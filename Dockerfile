@@ -21,4 +21,4 @@ COPY . .
 # 5. The command to run when the container starts.
 # We use Gunicorn to run the Uvicorn workers.
 # The --bind 0.0.0.0:8000 exposes the port inside the container.
-CMD ["/usr/local/bin/gunicorn", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000", "app.main:app"]
+CMD ["ls", "-la", "/usr/local/bin"]
