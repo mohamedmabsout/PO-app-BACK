@@ -12,7 +12,7 @@ services:
       - "8000:8000"  # Expose port 8000 to the host server
     environment:
       # We will set the DATABASE_URL here
-      - DATABASE_URL=mysql+pymysql://po_app_user:your_strong_password@db/po_data_app
+      - DATABASE_URL=mysql+pymysql://po_app_user:60MoG2$hKgvg&jsc@db/po_data_app
     depends_on:
       - db
 
@@ -22,10 +22,10 @@ services:
     container_name: po_app_db
     restart: always
     environment:
-      MYSQL_ROOT_PASSWORD: your_root_password
+      MYSQL_ROOT_PASSWORD: 7rhctg2t9K9sB5a3
       MYSQL_DATABASE: po_data_app
       MYSQL_USER: po_app_user
-      MYSQL_PASSWORD: your_strong_password
+      MYSQL_PASSWORD: 60MoG2$hKgvg&jsc
     volumes:
       - mysql_data:/var/lib/mysql
 
