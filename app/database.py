@@ -5,7 +5,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
 import os
 # Line 1: The Connection String
-DATABASE_URL = os.getenv("DATABASE_URL")
+DATABASE_URL = "mysql+pymysql://root:@localhost/po_data_app"
 # This is the address of our database.
 # - "mysql+pymysql": Use the MySQL dialect with the PyMySQL driver.
 # - "root:@localhost": Connect as the user 'root' with an empty password (':') to the server on our local machine ('localhost').
