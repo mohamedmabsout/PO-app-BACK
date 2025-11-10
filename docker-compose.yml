@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   backend:
-    image: po-app-backend-image
+    build: .
     container_name: po_app_backend
     restart: always
     ports:
