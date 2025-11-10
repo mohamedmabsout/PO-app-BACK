@@ -32,6 +32,15 @@ services:
       MYSQL_PASSWORD: 60MoG2$hKgvg&jsc
     volumes:
       - mysql_data:/var/lib/mysql
-
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin
+    container_name: po_app_phpmyadmin
+    restart: always
+    ports:
+      - "8080:80"
+    environment:
+      - PMA_HOST=db
+      - PMA_PORT=3306
+      - PMA_ARBITRARY=1  # <-- ADD THIS LINE
 volumes:
   mysql_data:
