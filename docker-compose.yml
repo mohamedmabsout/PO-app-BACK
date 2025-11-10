@@ -8,6 +8,8 @@ services:
     build: .  # Build the Dockerfile in the current directory
     container_name: po_app_backend
     restart: always
+    command: tail -f /dev/null  # <-- ADD THIS LINE
+
     ports:
       - "8000:8000"  # Expose port 8000 to the host server
     environment:

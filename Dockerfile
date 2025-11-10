@@ -10,6 +10,9 @@ WORKDIR /app
 # 3. Copy the dependency file and install dependencies.
 # This is done in a separate step to leverage Docker's caching.
 COPY requirements.txt .
+
+ENV PATH="/root/.local/bin:${PATH}"
+
 RUN pip install --no-cache-dir -r requirements.txt
 
 # 4. Copy the rest of the application code into the container.
@@ -18,4 +21,4 @@ COPY . .
 # 5. The command to run when the container starts.
 # We use Gunicorn to run the Uvicorn workers.
 # The --bind 0.0.0.0:8000 exposes the port inside the container.
-CMD ["gunicorn", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000", "app.main:app"]
+CMD ["/usr/local/bin/gunicorn", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000", "app.main:app"]
