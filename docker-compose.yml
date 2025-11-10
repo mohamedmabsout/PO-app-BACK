@@ -1,0 +1,33 @@
+# In PO-app-BACK/docker-compose.yml
+
+version: '3.8'
+
+services:
+  # Backend Service (FastAPI)
+  backend:
+    build: .  # Build the Dockerfile in the current directory
+    container_name: po_app_backend
+    restart: always
+    ports:
+      - "8000:8000"  # Expose port 8000 to the host server
+    environment:
+      # We will set the DATABASE_URL here
+      - DATABASE_URL=mysql+pymysql://po_app_user:your_strong_password@db/po_data_app
+    depends_on:
+      - db
+
+  # Database Service (MySQL)
+  db:
+    image: mysql:8.0
+    container_name: po_app_db
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: your_root_password
+      MYSQL_DATABASE: po_data_app
+      MYSQL_USER: po_app_user
+      MYSQL_PASSWORD: your_strong_password
+    volumes:
+      - mysql_data:/var/lib/mysql
+
+volumes:
+  mysql_data:
