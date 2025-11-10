@@ -1,0 +1,167 @@
+from typing import Optional
+from pydantic import BaseModel
+from datetime import date, datetime
+from pydantic import ConfigDict
+
+from .custom_types import FormattedDate
+
+from .enum import ProjectType, UserRole
+
+
+class User(BaseModel): # This is a simplified version for nesting
+    id: int
+    username: str
+    email: str
+    first_name: str
+    last_name: str
+    role: UserRole # We can use the UserRole enum here too
+    birth_date: Optional[FormattedDate] = None
+    cin: Optional[str] = None
+    cnss: Optional[str] = None
+    rib: Optional[str] = None
+    phone_number: Optional[str] = None
+    address: Optional[str] = None
+    city: Optional[str] = None
+    hire_date: Optional[FormattedDate] = None
+    job_title: Optional[str] = None
+    daily_rate: Optional[float] = None
+    is_active: bool
+
+# Schema for creating a user (includes password)
+class UserCreate(User):
+    password: str
+
+# Schema for reading a user (excludes password)
+class User(User):
+    id: int
+    is_active: bool
+
+    model_config = ConfigDict(from_attributes=True)
+# Schema for creating a project
+
+class AccountBase(BaseModel):
+    name: str
+
+class AccountCreate(AccountBase):
+    pass
+
+class Account(AccountBase):
+    id: int
+    model_config = ConfigDict(from_attributes=True)
+
+class CustomerBase(BaseModel):
+    name: str
+    short_name: Optional[str] = None
+
+class CustomerCreate(CustomerBase):
+    pass
+
+class Customer(CustomerBase):
+    id: int
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ProjectBase(BaseModel):
+    name: str
+    
+    # --- CHANGE 1: Use the Enum for project_type ---
+    project_type: Optional[ProjectType] = None
+    
+    start_date: Optional[FormattedDate] = None
+    plan_end_date: Optional[FormattedDate] = None
+    has_extension_possibility: Optional[bool] = False
+    
+    # We are removing project_manager_name
+    
+    forecast_plan_details: Optional[str] = None
+    budget_assigned: Optional[float] = None
+    assignment_date: Optional[FormattedDate] = None
+    budget_period: Optional[str] = None
+    
+    # We will accept IDs for the related objects
+    account_id: Optional[int] = None
+    direct_customer_id: Optional[int] = None
+    final_customer_id: Optional[int] = None
+    
+    # --- CHANGE 2: Accept a project_manager_id ---
+    project_manager_id: Optional[int] = None
+
+class ProjectCreate(ProjectBase):
+    pass
+
+# This schema is for reading a Project. It will include the full nested objects.
+class Project(ProjectBase):
+    id: int
+    account: Optional[Account] = None
+    direct_customer: Optional[Customer] = None
+    final_customer: Optional[Customer] = None
+    
+    # --- CHANGE 3: Return the full User object ---
+    project_manager: Optional[User] = None
+    
+    model_config = ConfigDict(from_attributes=True)
+
+class PurchaseOrderBase(BaseModel):
+    due_qty: float
+    po_status: str
+    unit_price: float
+    line_amount: float
+    billed_quantity: float
+    po_no: str
+    po_line_no: int
+    item_code: str
+    requested_qty: float
+    publish_date: FormattedDate
+    project_code: str
+    payment_terms_raw: Optional[str] = None # Add to schema
+
+class PurchaseOrderCreate(PurchaseOrderBase):
+    pass
+
+class PurchaseOrder(PurchaseOrderBase):
+    id: int
+    is_processed: bool
+    model_config = ConfigDict(from_attributes=True)
+
+class MergedPOBase(BaseModel):
+    po_id: str
+    project_name: Optional[str] = None
+    site_code: Optional[str] = None
+    po_no: str
+    po_line_no: int
+    item_description: Optional[str] = None
+    payment_term: str
+    unit_price: float
+    requested_qty: float
+    internal_control: int
+    line_amount_hw: float
+    publish_date: FormattedDate
+
+class MergedPO(MergedPOBase):
+    id: int
+    model_config = ConfigDict(from_attributes=True)
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+class TokenData(BaseModel):
+    username: Optional[str] = None
+
+# in backend/app/schemas.py
+
+# We already have a User schema for nesting, which is perfect.
+# class User(UserBase): ...
+
+class UploadHistoryBase(BaseModel):
+    original_filename: str
+    status: str
+    total_rows: int
+    error_message: Optional[str] = None
+
+class UploadHistory(UploadHistoryBase):
+    id: int
+    uploaded_at: datetime
+    uploader: User # Nest the full user object
+
+    model_config = ConfigDict(from_attributes=True)
