@@ -16,6 +16,9 @@ services:
   db:
     image: mysql:8.0
     container_name: po_app_db
+    ports: # <-- ADD THIS SECTION
+      - "3307:3306" # Maps container port 3306 to host port 3307
+  
     restart: always
     healthcheck: # <-- ADD THIS ENTIRE SECTION
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
