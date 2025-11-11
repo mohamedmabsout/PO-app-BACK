@@ -69,7 +69,6 @@ class Project(Base):
     
     forecast_plan_details = Column(String(1000))
     budget_assigned = Column(Float)
-    assignment_date = Column(Date)
     budget_period = Column(String(50))
 
     # --- RELATIONSHIPS ---

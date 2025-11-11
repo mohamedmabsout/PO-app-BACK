@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
 from .routers import data_processing
-from .routers import projects, users, auth
+from .routers import projects, users, auth, selectors
 from .database import engine ,SessionLocal
 from  .dependencies import get_db
 from . import crud, models, schemas
@@ -24,7 +24,7 @@ app.include_router(projects.router)
 app.include_router(users.router)
 app.include_router(auth.router) 
 app.include_router(data_processing.router)
-
+app.include_router(selectors.router )
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

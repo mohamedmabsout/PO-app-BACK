@@ -77,7 +77,6 @@ class ProjectBase(BaseModel):
     
     forecast_plan_details: Optional[str] = None
     budget_assigned: Optional[float] = None
-    assignment_date: Optional[FormattedDate] = None
     budget_period: Optional[str] = None
     
     # We will accept IDs for the related objects

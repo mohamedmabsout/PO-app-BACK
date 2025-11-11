@@ -4,6 +4,11 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
 import os
+from dotenv import load_dotenv # <-- 1. IMPORT THE LIBRARY
+
+load_dotenv()
+
+
 # Line 1: The Connection String
 DATABASE_URL = os.getenv("DATABASE_URL")
 
