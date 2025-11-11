@@ -1,3 +1,4 @@
+from datetime import datetime
 from sqlalchemy.orm import Session
 
 from . import auth
@@ -59,7 +60,21 @@ def get_projects(db: Session, skip: int = 0, limit: int = 100):
 
 # Function to create a new project
 def create_project(db: Session, project: schemas.ProjectCreate):
-    db_project = models.Project(**project.model_dump())
+    project_data = project.model_dump()
+
+    # Step 2: Intercept and convert the date strings
+    # We define the expected format from the frontend/Excel ('DD/MM/YYYY')
+    date_format = "%d/%m/%Y" # Use %Y for 4-digit year, %m for month, %d for day
+
+    if project_data.get("start_date"):
+        # strptime means "string parse time" - it converts a string to a datetime object
+        project_data["start_date"] = datetime.strptime(project_data["start_date"], date_format).date()
+
+    if project_data.get("plan_end_date"):
+        project_data["plan_end_date"] = datetime.strptime(project_data["plan_end_date"], date_format).date()
+        
+    # Step 3: Create the SQLAlchemy model instance using the MODIFIED dictionary
+    db_project = models.Project(**project_data)
     db.add(db_project)
     db.commit()
     db.refresh(db_project)

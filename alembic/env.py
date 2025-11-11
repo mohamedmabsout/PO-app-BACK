@@ -9,15 +9,14 @@ from alembic import context
 from dotenv import load_dotenv
 
 sys.path.insert(0, os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.insert(0, os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))
 from app.models import Base
+from app.config import settings # <-- IMPORT the settings object
 
-# Load environment variables from the .env file in the parent directory
-load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
-# this is the Alembic Config object, which provides
-# access to the values within the .ini file in use.
 config = context.config
 
-# Interpret the config file for Python logging.
+# Set the sqlalchemy.url from our validated settings object
+config.set_main_option('sqlalchemy.url', settings.DATABASE_URL)# Interpret the config file for Python logging.
 # This line sets up loggers basically.
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)

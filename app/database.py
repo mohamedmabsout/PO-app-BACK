@@ -4,21 +4,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
 import os
-from dotenv import load_dotenv # <-- 1. IMPORT THE LIBRARY
+from .config import settings # Import the single settings instance
 
-load_dotenv()
-
-
-# Line 1: The Connection String
-DATABASE_URL = os.getenv("DATABASE_URL")
-
-# If the variable is not found, you can have a fallback for local dev, but it's not essential.
-if DATABASE_URL is None:
-    # Fallback to a local sqlite DB or raise an error
-    # For production, we must have the variable.
-    raise ValueError("DATABASE_URL environment variable is not set")
-
-engine = create_engine(DATABASE_URL)
+# Use the validated URL from our settings object
+engine = create_engine(settings.DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 # This is the address of our database.
@@ -27,7 +16,6 @@ Base = declarative_base()
 # - "/po_data_app": The specific database to connect to.
 
 # Line 2: The Engine
-engine = create_engine(DATABASE_URL)
 # The "engine" is the heart of SQLAlchemy. It's not a connection itself,
 # but a factory that knows HOW to create connections and communicate with
 # our specific database (MySQL in this case) using the URL we provided.
