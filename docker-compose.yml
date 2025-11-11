@@ -32,6 +32,7 @@ services:
       MYSQL_PASSWORD: 60MoG2$hKgvg&jsc
     volumes:
       - mysql_data:/var/lib/mysql
+      
   phpmyadmin:
     image: phpmyadmin/phpmyadmin
     container_name: po_app_phpmyadmin

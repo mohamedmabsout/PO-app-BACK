@@ -14,7 +14,7 @@ from  .dependencies import get_db
 from . import crud, models, schemas
 
 
-models.Base.metadata.create_all(bind=engine)
+models.Base.metadata.create_all(bind=engine, checkfirst=True)
 
 app=FastAPI()
 
