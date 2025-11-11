@@ -1,11 +1,13 @@
 # in app/routers/data_processing.py
 from typing import List
+from fastapi.responses import StreamingResponse
 import pandas as pd
 import io
 import logging
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
 from sqlalchemy.orm import Session
-
+from typing import Optional
+from fastapi import Query
 from ..dependencies import get_db
 from .. import crud, models, auth, schemas
 
@@ -104,3 +106,59 @@ def get_merged_pos(
     Retrieves all records from the final merged_pos table.
     """
     return db.query(models.MergedPO).order_by(models.MergedPO.id.desc()).all()
+
+
+@router.get("/data/export-combined-report")
+def export_combined_report(
+    db: Session = Depends(get_db),
+    status: Optional[str] = Query(None),
+    category: Optional[str] = Query(None),
+    project_name: Optional[str] = Query(None),
+    search: Optional[str] = Query(None)
+):
+    try:
+        # 1. Fetch the data for the first report using the filters
+        # The backend developer will need a CRUD function that returns a Pandas DataFrame
+        merged_df = crud.get_merged_po_data_as_dataframe(
+            db=db, 
+            status=status, 
+            category=category, 
+            project_name=project_name, 
+            search=search
+        )
+        # Clean up column names for the export if needed
+        merged_df.rename(columns={'po_no': 'PO Number', 'project_name': 'Project Name'}, inplace=True)
+
+        # 2. Fetch the data for the second report
+        gap_summary_df = crud.get_gap_financial_summary_as_dataframe(
+            db=db,
+            project_name=project_name
+        )
+        gap_summary_df.rename(columns={'gap_value': 'GAP Value'}, inplace=True)
+
+
+        # 3. Create an in-memory Excel file using Pandas ExcelWriter
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            merged_df.to_excel(writer, sheet_name='Merged Data', index=False)
+            gap_summary_df.to_excel(writer, sheet_name='GAP Summary', index=False)
+        
+        # 4. Prepare the file for streaming back to the client
+        output.seek(0) # Go to the beginning of the in-memory file
+
+        headers = {
+            'Content-Disposition': 'attachment; filename="Combined_Report.xlsx"'
+        }
+
+        # 5. Return the file as a StreamingResponse
+        return StreamingResponse(
+            output, 
+            media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 
+            headers=headers
+        )
+
+    except Exception as e:
+        # Log the error for debugging
+        print(f"Failed to generate export: {e}")
+        # Return a proper error response
+        raise HTTPException(status_code=500, detail="Could not generate the Excel report.")
