@@ -108,53 +108,54 @@ def get_merged_pos(
     """
     return db.query(models.MergedPO).order_by(models.MergedPO.id.desc()).all()
 
-@router.get("/export-raw-pos")
-def export_raw_pos(
+@router.get("/data/export-merged-pos")
+def export_merged_pos_report(
     db: Session = Depends(get_db),
     status: Optional[str] = Query(None),
+    category: Optional[str] = Query(None),
     project_name: Optional[str] = Query(None),
     search: Optional[str] = Query(None)
 ):
     """
-    Exports the raw Purchase Order data based on filters into an Excel file.
+    Generates and downloads an Excel report of the Merged PO data based on filters.
     """
     try:
         # 1. Call our new CRUD function to get the data as a DataFrame
-        raw_po_df = crud.get_raw_po_data_as_dataframe(
-            db=db,
-            status=status,
-            project_name=project_name,
+        merged_df = crud.get_merged_po_data_as_dataframe(
+            db=db, 
+            status=status, 
+            category=category, 
+            project_name=project_name, 
             search=search
         )
-
-        # Optional: Clean up or rename columns for the final export file
-        # For example, to match the French "Nom" from your screenshot
-        raw_po_df.rename(columns={
-            'po_status': 'Status',
-            'unit_price': 'Unit Price',
-            'line_amount': 'Line Amount',
-            'project_code': 'Project Code',
-            # ... and so on for any columns you want to rename
-        }, inplace=True)
         
-        # 2. Create the in-memory Excel file
+        # Check if the DataFrame is empty. If so, there's nothing to export.
+        if merged_df.empty:
+            raise HTTPException(status_code=404, detail="No data found for the selected filters to export.")
+
+        # 2. Create an in-memory Excel file using Pandas ExcelWriter
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            raw_po_df.to_excel(writer, sheet_name='Raw PO Data', index=False)
+            merged_df.to_excel(writer, sheet_name='Merged PO Data', index=False)
         
-        output.seek(0)
+        output.seek(0) # Rewind the in-memory file to the beginning
 
+        # 3. Set up headers for the file download response
+        filename = "Merged_PO_Report.xlsx"
         headers = {
-            'Content-Disposition': 'attachment; filename="Raw_Purchase_Orders.xlsx"'
+            'Content-Disposition': f'attachment; filename="{filename}"'
         }
 
-        # 3. Return the file as a response
+        # 4. Return the file as a StreamingResponse
         return StreamingResponse(
-            output,
-            media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            output, 
+            media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 
             headers=headers
         )
 
+    except HTTPException as http_exc:
+        raise http_exc # Re-raise known HTTP exceptions
     except Exception as e:
-        print(f"Failed to generate raw PO export: {e}") # Log the error
-        raise HTTPException(status_code=500, detail="Could not generate the Excel report.")
+        # Log the actual error on the server for debugging
+        print(f"An unexpected error occurred during export: {e}")
+        raise HTTPException(status_code=500, detail="Could not generate the Excel report due to a server error.")

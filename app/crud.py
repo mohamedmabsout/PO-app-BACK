@@ -244,3 +244,46 @@ def get_raw_po_data_as_dataframe(
 
     # Return the DataFrame, which includes all columns from the table
     return df
+
+def get_merged_po_data_as_dataframe(
+    db: Session,
+    status: Optional[str] = None,
+    category: Optional[str] = None,
+    project_name: Optional[str] = None,
+    search: Optional[str] = None
+) -> pd.DataFrame:
+    """
+    Queries the MergedPO table with optional filters and returns the result as a Pandas DataFrame.
+    """
+    # Start with a base query on the MergedPO table
+    query = db.query(models.MergedPO)
+
+    # Apply filters to the query if they are provided.
+    # IMPORTANT: Adjust these column names to match your ACTUAL MergedPO model definition.
+    
+    if status:
+        # Assuming your MergedPO model has a 'status' column.
+        # If the status is on a related table, a JOIN would be needed here.
+        query = query.filter(models.MergedPO.status == status)
+
+    if category:
+        # Assuming your MergedPO model has a 'category' column.
+        query = query.filter(models.MergedPO.category == category)
+
+    if project_name:
+        query = query.filter(models.MergedPO.project_name == project_name)
+
+    if search:
+        # Create a search filter across multiple relevant columns in the MergedPO table
+        search_term = f"%{search}%"
+        query = query.filter(
+            (models.MergedPO.po_no.ilike(search_term)) |
+            (models.MergedPO.item_description.ilike(search_term)) |
+            (models.MergedPO.site_code.ilike(search_term))
+        )
+
+    # Execute the query and read the results directly into a Pandas DataFrame
+    df = pd.read_sql(query.statement, db.bind)
+    
+    # Return the DataFrame
+    return df
