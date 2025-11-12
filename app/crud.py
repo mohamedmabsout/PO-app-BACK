@@ -1,6 +1,6 @@
 from datetime import datetime
 from sqlalchemy.orm import Session
-
+from typing import List, Optional
 from . import auth
 from . import models, schemas
 import pandas as pd
@@ -211,3 +211,36 @@ def create_upload_history_record(
 def get_upload_history(db: Session, skip: int = 0, limit: int = 100):
     # Use order_by to get the most recent uploads first
     return db.query(models.UploadHistory).order_by(models.UploadHistory.uploaded_at.desc()).offset(skip).limit(limit).all()
+
+def get_raw_po_data_as_dataframe(
+    db: Session,
+    status: Optional[str] = None,
+    project_name: Optional[str] = None,
+    search: Optional[str] = None
+    # We are not including 'category' as it's not in the table
+) -> pd.DataFrame:
+    """
+    Queries the raw PurchaseOrder table with optional filters and returns a DataFrame.
+    """
+    # Start with a base query on the PurchaseOrder table
+    query = db.query(models.PurchaseOrder)
+
+    # Apply filters to the query if they are provided
+    if status:
+        # The 'po_status' column in the table matches this filter
+        query = query.filter(models.PurchaseOrder.po_status == status)
+
+    if project_name:
+        # The 'project_code' column in the table matches this filter
+        query = query.filter(models.PurchaseOrder.project_code == project_name)
+
+    if search:
+        # Create a search filter for PO number
+        search_term = f"%{search}%"
+        query = query.filter(models.PurchaseOrder.po_no.ilike(search_term))
+
+    # Execute the query and read the results directly into a Pandas DataFrame
+    df = pd.read_sql(query.statement, db.bind)
+
+    # Return the DataFrame, which includes all columns from the table
+    return df
