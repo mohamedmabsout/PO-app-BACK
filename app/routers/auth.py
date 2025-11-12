@@ -25,7 +25,7 @@ def login_for_access_token(db: Session = Depends(get_db), form_data: OAuth2Passw
         )
 
     access_token_expires = timedelta(
-        minutes=config.settings.ACCESS_TOKEN_EXPIRE_MINUTES
+        days=config.settings.ACCESS_TOKEN_EXPIRE_DAYS
     )
     access_token = auth.create_access_token(
         data={"sub": user.username}, expires_delta=access_token_expires

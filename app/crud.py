@@ -156,7 +156,7 @@ def process_and_merge_pos(db: Session):
                 "site_code": site_code,
                 "po_no": po.po_no,
                 "po_line_no": po.po_line_no,
-                "item_description": po.item_code,
+                "item_description": po.item_code_description,
                 "payment_term": payment_term_abbreviation,
                 "unit_price": po.unit_price,
                 "requested_qty": po.requested_qty,
@@ -261,11 +261,6 @@ def get_merged_po_data_as_dataframe(
     # Apply filters to the query if they are provided.
     # IMPORTANT: Adjust these column names to match your ACTUAL MergedPO model definition.
     
-    if status:
-        # Assuming your MergedPO model has a 'status' column.
-        # If the status is on a related table, a JOIN would be needed here.
-        query = query.filter(models.MergedPO.status == status)
-
     if category:
         # Assuming your MergedPO model has a 'category' column.
         query = query.filter(models.MergedPO.category == category)
@@ -287,3 +282,119 @@ def get_merged_po_data_as_dataframe(
     
     # Return the DataFrame
     return df
+
+def deduce_category(description: str) -> str:
+    """Deduces the category based on keywords in the item description."""
+    if not isinstance(description, str):
+        return "TBD"
+        
+    description_lower = description.lower()
+    
+    # Using simple 'in' checks for broad matching
+    if 'transport' in description_lower:
+        return "Transportation"
+    if 'survey' in description_lower:
+        return "Survey"
+    if 'site engineer' in description_lower or 'fsc' in description_lower:
+        return "Site Engineer"
+    
+    # If it's none of the specific keywords above, default to "Service"
+    # This covers the vast majority of your examples.
+    # Add more specific checks above this line if needed.
+    if 'service' in description_lower or 'install' in description_lower or 'zone' in description_lower:
+        return "Service"
+
+    return "TBD" # Default if no keywords match
+
+# --- FINAL REVISED FUNCTION ---
+def process_acceptance_dataframe(db: Session, acceptance_df: pd.DataFrame):
+    """
+    Processes a DataFrame of acceptance data, deduces categories, calculates AC/PAC values,
+    and updates the MergedPO table in the database.
+    """
+    # --- Phase 1: Pre-process and Aggregate the Acceptance Data ---
+    
+    # Standardize column names from the Acceptance Excel file
+    acceptance_df.rename(columns={
+        'PONo.': 'po_no',
+        'POLineNo.': 'po_line_no',
+        'ShipmentNO.': 'shipment_no',
+        'AcceptanceQty': 'acceptance_qty',
+        'ApplicationProcessed': 'application_processed_date' # The new date source
+    }, inplace=True, errors='ignore') # 'ignore' prevents errors if a column is missing
+
+    # Ensure correct data types
+    acceptance_df['po_no'] = acceptance_df['po_no'].astype(str)
+    acceptance_df['po_line_no'] = pd.to_numeric(acceptance_df['po_line_no'], errors='coerce')
+    acceptance_df['shipment_no'] = pd.to_numeric(acceptance_df['shipment_no'], errors='coerce')
+    acceptance_df['acceptance_qty'] = pd.to_numeric(acceptance_df['acceptance_qty'], errors='coerce')
+    acceptance_df['application_processed_date'] = pd.to_datetime(acceptance_df['application_processed_date'], errors='coerce')
+
+    # Drop rows where essential data is missing
+    acceptance_df.dropna(subset=['po_no', 'po_line_no', 'shipment_no', 'acceptance_qty', 'application_processed_date'], inplace=True)
+    
+    # Generate the 'po_id' and 'id2' for aggregation
+    acceptance_df['po_id'] = acceptance_df['po_no'] + '-' + acceptance_df['po_line_no'].astype(int).astype(str)
+    acceptance_df['id2'] = acceptance_df['po_id'] + '-' + acceptance_df['shipment_no'].astype(int).astype(str)
+
+    # Aggregate duplicate id2 rows
+    aggregated_df = acceptance_df.groupby('id2').agg(
+        acceptance_qty=('acceptance_qty', 'sum'),
+        application_processed_date=('application_processed_date', 'max'),
+        po_id=('po_id', 'first'),
+        shipment_no=('shipment_no', 'first')
+    ).reset_index()
+
+    # --- Phase 2 & 3: Calculate and Update ---
+
+    po_ids_to_update = aggregated_df['po_id'].unique().tolist()
+    if not po_ids_to_update:
+        return 0 # Nothing to process
+
+    merged_po_records = db.query(models.MergedPO).filter(models.MergedPO.po_id.in_(po_ids_to_update)).all()
+    merged_po_map = {mp.po_id: mp for mp in merged_po_records}
+    
+    updated_records = []
+
+    for index, acceptance_row in aggregated_df.iterrows():
+        po_id = acceptance_row['po_id']
+        
+        if po_id in merged_po_map:
+            merged_po_to_update = merged_po_map[po_id]
+            updated_records.append(po_id)
+            
+            unit_price = merged_po_to_update.unit_price or 0
+            req_qty = merged_po_to_update.requested_qty or 0
+            agg_acceptance_qty = acceptance_row['acceptance_qty']
+            # Get the latest date from the correct column and extract only the date part
+            latest_processed_date = acceptance_row['application_processed_date'].date()
+
+            # --- 1. Deduce and Update Category ---
+            merged_po_to_update.category = deduce_category(merged_po_to_update.item_description)
+
+            # --- 2. AC Calculation ---
+            if acceptance_row['shipment_no'] == 1:
+                merged_po_to_update.total_ac_amount = unit_price * req_qty * 0.80
+                merged_po_to_update.accepted_ac_amount = unit_price * agg_acceptance_qty * 0.80
+                merged_po_to_update.date_ac_ok = latest_processed_date
+
+            # --- 3. PAC Calculation ---
+            payment_term = merged_po_to_update.payment_term
+            
+            if payment_term == "ACPAC 100%":
+                # This logic is triggered by shipment 1
+                if acceptance_row['shipment_no'] == 1:
+                    merged_po_to_update.total_pac_amount = unit_price * req_qty * 0.20
+                    merged_po_to_update.accepted_pac_amount = unit_price * agg_acceptance_qty * 0.20
+                    merged_po_to_update.date_pac_ok = latest_processed_date # Same as AC date
+            
+            elif payment_term == "AC1 80 | PAC 20":
+                # This logic is triggered by shipment 2
+                if acceptance_row['shipment_no'] == 2:
+                    merged_po_to_update.total_pac_amount = unit_price * req_qty * 0.20
+                    merged_po_to_update.accepted_pac_amount = unit_price * agg_acceptance_qty * 0.20
+                    merged_po_to_update.date_pac_ok = latest_processed_date
+    
+    db.commit()
+
+    return len(set(updated_records)) 

@@ -101,12 +101,15 @@ class PurchaseOrder(Base):
     po_no = Column(String(100), index=True) # Index this for faster lookups
     po_line_no = Column(Integer)
     item_code = Column(String(100))
+    item_code_description = Column(String(500), nullable=True) # New field for description
     requested_qty = Column(Float)
     publish_date = Column(DateTime)
     project_code = Column(String(50), index=True) # Index this too
     site_code = Column(String(100), index=True) # Index this too
     payment_terms_raw = Column(String(500), nullable=True) # New field for the raw text
     is_processed = Column(Boolean, default=False) # Our new tracking flag!
+
+    
 
 
 class MergedPO(Base):
@@ -125,6 +128,16 @@ class MergedPO(Base):
     internal_control = Column(Integer, default=1) # Defaults to 1
     line_amount_hw = Column(Float) # The calculated amount
     publish_date = Column(DateTime)
+
+    category = Column(String(100), nullable=True) # For "Service", "Transportation", etc.
+    
+    total_ac_amount = Column(Float, nullable=True)
+    accepted_ac_amount = Column(Float, nullable=True)
+    date_ac_ok = Column(Date, nullable=True)
+    
+    total_pac_amount = Column(Float, nullable=True)
+    accepted_pac_amount = Column(Float, nullable=True)
+    date_pac_ok = Column(Date, nullable=True)
     
 class UploadHistory(Base):
     __tablename__ = "upload_history"
