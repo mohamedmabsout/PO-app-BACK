@@ -107,7 +107,7 @@ def get_merged_pos(
     """
     return db.query(models.MergedPO).order_by(models.MergedPO.id.desc()).all()
 
-@router.get("/data/export-raw-pos")
+@router.get("/export-raw-pos")
 def export_raw_pos(
     db: Session = Depends(get_db),
     status: Optional[str] = Query(None),
