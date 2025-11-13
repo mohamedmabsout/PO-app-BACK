@@ -101,7 +101,7 @@ class PurchaseOrder(Base):
     po_no = Column(String(100), index=True) # Index this for faster lookups
     po_line_no = Column(Integer)
     item_code = Column(String(100))
-    item_code_description = Column(String(500), nullable=True) # New field for description
+    item_description = Column(String(500), nullable=True) # New field for description
     requested_qty = Column(Float)
     publish_date = Column(DateTime)
     project_code = Column(String(50), index=True) # Index this too

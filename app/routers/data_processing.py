@@ -7,7 +7,7 @@ import logging
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
 from sqlalchemy.orm import Session
 from typing import Optional
-from fastapi import Query
+from fastapi import Query,status
 from ..dependencies import get_db
 from .. import crud, models, auth, schemas
 from datetime import datetime
@@ -31,7 +31,7 @@ async def import_purchase_orders(file: UploadFile = File(...), db: Session = Dep
         column_mapping = {
             'Due Qty': 'due_qty', 'PO Status': 'po_status', 'Unit Price': 'unit_price',
             'Line Amount': 'line_amount', 'Billed Quantity': 'billed_quantity',
-            'PO NO.': 'po_no', 'PO Line NO.': 'po_line_no', 'Item Code': 'item_code',
+            'PO NO.': 'po_no', 'PO Line NO.': 'po_line_no', 'Item Code': 'item_code', 'Item Description': 'item_description',
             'Requested Qty': 'requested_qty', 'Publish Date': 'publish_date',
             'Project Code': 'project_code','Payment Terms': 'payment_terms_raw' ,'Site Code':'site_code'
 
@@ -108,7 +108,7 @@ def get_merged_pos(
     """
     return db.query(models.MergedPO).order_by(models.MergedPO.id.desc()).all()
 
-@router.get("/export-merged-pos")
+@router.get("/export-merged-pos", status_code=status.HTTP_200_OK)
 def export_merged_pos_report(
     db: Session = Depends(get_db),
     status: Optional[str] = Query(None),
@@ -117,10 +117,10 @@ def export_merged_pos_report(
     search: Optional[str] = Query(None)
 ):
     """
-    Generates and downloads an Excel report of the Merged PO data based on filters.
+    Generates and streams an Excel report of the Merged PO data based on filters.
     """
     try:
-        # 1. Call our new CRUD function to get the data as a DataFrame
+        # 1. Call our new CRUD function to get the data
         merged_df = crud.get_merged_po_data_as_dataframe(
             db=db, 
             status=status, 
@@ -129,24 +129,21 @@ def export_merged_pos_report(
             search=search
         )
         
-        # Check if the DataFrame is empty. If so, there's nothing to export.
         if merged_df.empty:
-            raise HTTPException(status_code=404, detail="No data found for the selected filters to export.")
+            raise HTTPException(status_code=404, detail="No data found for the selected filters.")
 
-        # 2. Create an in-memory Excel file using Pandas ExcelWriter
+        # 2. Create the Excel file in memory
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
             merged_df.to_excel(writer, sheet_name='Merged PO Data', index=False)
         
-        output.seek(0) # Rewind the in-memory file to the beginning
+        output.seek(0)
 
-        # 3. Set up headers for the file download response
+        # 3. Set headers for the file download
         filename = "Merged_PO_Report.xlsx"
-        headers = {
-            'Content-Disposition': f'attachment; filename="{filename}"'
-        }
+        headers = {'Content-Disposition': f'attachment; filename="{filename}"'}
 
-        # 4. Return the file as a StreamingResponse
+        # 4. Return the file as a streaming response
         return StreamingResponse(
             output, 
             media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 
@@ -154,8 +151,7 @@ def export_merged_pos_report(
         )
 
     except HTTPException as http_exc:
-        raise http_exc # Re-raise known HTTP exceptions
+        raise http_exc
     except Exception as e:
-        # Log the actual error on the server for debugging
-        print(f"An unexpected error occurred during export: {e}")
-        raise HTTPException(status_code=500, detail="Could not generate the Excel report due to a server error.")
+        print(f"Error during export: {e}") # Log the error for debugging
+        raise HTTPException(status_code=500, detail="Could not generate the Excel report.")
