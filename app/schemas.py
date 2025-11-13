@@ -41,6 +41,17 @@ class User(UserBase):
     is_active: bool
 
     model_config = ConfigDict(from_attributes=True)
+class UserUpdate(BaseModel):
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    job_title: Optional[str] = None
+    hire_date: Optional[date] = None
+    phone_number: Optional[str] = None
+    email: Optional[EmailStr] = None
+    role: Optional[str] = None
+
+    class Config:
+        orm_mode = True
 class AccountBase(BaseModel):
     name: str
 
