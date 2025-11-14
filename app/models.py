@@ -5,7 +5,6 @@ from .enum import ProjectType, UserRole
 from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, Text, Date, Enum, ForeignKey
 from .database import Base
 from sqlalchemy.orm import relationship
-
 class User(Base):
     __tablename__ = "users"
 
@@ -108,8 +107,30 @@ class PurchaseOrder(Base):
     site_code = Column(String(100), index=True) # Index this too
     payment_terms_raw = Column(String(500), nullable=True) # New field for the raw text
     is_processed = Column(Boolean, default=False) # Our new tracking flag!
-
+    uploaded_at = Column(DateTime, default=datetime.datetime.now(datetime.timezone.utc))
     
+    # Link to the user who uploaded it
+    uploader_id = Column(Integer, ForeignKey("users.id"))
+    uploader = relationship("User")
+
+class RawAcceptance(Base):
+    __tablename__ = "raw_acceptances"
+    id = Column(Integer, primary_key=True, index=True)
+    
+    # Columns from your Acceptance Excel file
+    po_no = Column(String(100), index=True)
+    po_line_no = Column(Integer)
+    shipment_no = Column(Integer)
+    acceptance_qty = Column(Float)
+    application_processed_date = Column(DateTime)
+    
+    is_processed = Column(Boolean, default=False, index=True)
+    uploaded_at = Column(DateTime, default=datetime.datetime.now(datetime.timezone.utc))
+    
+    # Link to the user who uploaded it
+    uploader_id = Column(Integer, ForeignKey("users.id"))
+    uploader = relationship("User")
+
 
 
 class MergedPO(Base):

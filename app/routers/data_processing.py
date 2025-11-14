@@ -49,6 +49,7 @@ async def import_purchase_orders(file: UploadFile = File(...), db: Session = Dep
         
         # Call the new CRUD function to save to the raw table
         num_records = crud.create_purchase_orders_from_dataframe(db, df=df)
+        
         crud.create_upload_history_record(
             db=db, 
             filename=file.filename, 
@@ -56,7 +57,15 @@ async def import_purchase_orders(file: UploadFile = File(...), db: Session = Dep
             user_id=current_user.id,
             total_rows=num_records
         )
-        return {"filename": file.filename, "message": f"{num_records} raw PO records saved successfully!"}
+           
+        # 2. Immediately trigger the processing
+        processed_count = crud.process_and_merge_pos(db=db)
+        
+        return {
+            "filename": file.filename,
+            "message": f"PO file uploaded and processed successfully, {num_records} raw PO records saved successfully!",
+            "records_processed": processed_count
+        }
     
     except Exception as e:
         logger.error(f"Error during PO import: {e}", exc_info=True)
@@ -70,16 +79,16 @@ async def import_purchase_orders(file: UploadFile = File(...), db: Session = Dep
         )
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/process/merge-pos")
-def trigger_po_merge(db: Session = Depends(get_db),current_user: models.User = Depends(auth.get_current_user)):
-    try:
-        num_processed = crud.process_and_merge_pos(db)
-        if num_processed == 0:
-            return {"message": "No new POs to process."}
-        return {"message": f"Successfully processed and merged {num_processed} POs."}
-    except Exception as e:
-        logger.error(f"Error during PO merge processing: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+# @router.post("/process/merge-pos")
+# def trigger_po_merge(db: Session = Depends(get_db),current_user: models.User = Depends(auth.get_current_user)):
+#     try:
+#         num_processed = crud.process_and_merge_pos(db)
+#         if num_processed == 0:
+#             return {"message": "No new POs to process."}
+#         return {"message": f"Successfully processed and merged {num_processed} POs."}
+#     except Exception as e:
+#         logger.error(f"Error during PO merge processing: {e}", exc_info=True)
+#         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/import/history", response_model=List[schemas.UploadHistory])
 def read_upload_history(

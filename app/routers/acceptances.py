@@ -42,7 +42,23 @@ def upload_and_process_acceptances(
         # Read the Excel file directly into a Pandas DataFrame
         contents = file.file.read()
         acceptance_df = pd.read_excel(io.BytesIO(contents))
+        column_mapping = {
+            'ShipmentNO.': 'shipment_no', 'AcceptanceQty': 'acceptance_qty', 'ApplicationProcessed': 'application_processed_date',
+            'PONo.': 'po_no', 'POLineNo.': 'po_line_no', 
+
+        }
+        acceptance_df.rename(columns=column_mapping, inplace=True)
         
+        # Basic validation and type conversion
+        acceptance_df['application_processed_date'] = pd.to_datetime(acceptance_df['application_processed_date'])
+        numeric_cols = [
+            'acceptance_qty', 'po_line_no', 'shipment_no',
+        ]
+        for col in numeric_cols:
+            acceptance_df[col] = pd.to_numeric(acceptance_df[col], errors='coerce').fillna(0)
+
+
+        crud.create_raw_acceptances_from_dataframe(db, acceptance_df, current_user.id)
         # Call the core logic function in crud.py to do all the work
         updated_count = crud.process_acceptance_dataframe(db=db, acceptance_df=acceptance_df)
         

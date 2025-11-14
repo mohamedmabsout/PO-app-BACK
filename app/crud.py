@@ -206,16 +206,20 @@ def get_all_po_data(db: Session):
     return db.query(models.MergedPO).all()
 
 
-def create_po_data_from_dataframe(db: Session, df: pd.DataFrame):
-    db.query(models.MergedPO).delete()
-    db.close()
+def create_po_data_from_dataframe(db: Session, df: pd.DataFrame, user_id: int):
+    df['uploader_id'] = user_id
 
     records = df.to_dict(orient="records")
-    db.bulk_insert_mappings(models.MergedPO, records)
+    db.bulk_insert_mappings(models.PurchaseOrder, records)
     db.commit()
 
+def create_raw_acceptances_from_dataframe(db: Session, df: pd.DataFrame, user_id: int):
+    df['uploader_id'] = user_id
+    records = df.to_dict("records")
+    db.bulk_insert_mappings(models.RawAcceptance, records)
+    db.commit()
+    return len(records)
 
-# in backend/app/crud.py
 
 
 def create_upload_history_record(
@@ -366,7 +370,14 @@ def process_acceptance_dataframe(db: Session, acceptance_df: pd.DataFrame):
         inplace=True,
         errors="ignore",
     )  # 'ignore' prevents errors if a column is missing
+    unprocessed_acceptances_query = db.query(models.RawAcceptance).filter(models.RawAcceptance.is_processed == False)
+    unprocessed_acceptances = unprocessed_acceptances_query.all()
+    
+    if not unprocessed_acceptances:
+        return 0
 
+    # Convert the raw data to a DataFrame to use our existing Pandas logic
+    acceptance_df = pd.read_sql(unprocessed_acceptances_query.statement, db.bind)
     # Ensure correct data types
     acceptance_df["po_no"] = acceptance_df["po_no"].astype(str)
     acceptance_df["po_line_no"] = pd.to_numeric(
@@ -427,72 +438,59 @@ def process_acceptance_dataframe(db: Session, acceptance_df: pd.DataFrame):
     # --- END DEBUGGING ---
     # --- Phase 2 & 3: Calculate and Update ---
 
-    po_ids_to_update = aggregated_df["po_id"].unique().tolist()
+    po_ids_to_update = aggregated_df['po_id'].unique().tolist()
     if not po_ids_to_update:
-        return 0  # Nothing to process
+        return 0
 
-    merged_po_records = (
-        db.query(models.MergedPO)
-        .filter(models.MergedPO.po_id.in_(po_ids_to_update))
-        .all()
-    )
+    merged_po_records = db.query(models.MergedPO).filter(models.MergedPO.po_id.in_(po_ids_to_update)).all()
     merged_po_map = {mp.po_id: mp for mp in merged_po_records}
-    print("\n--- DEBUG: Database Match ---")
-    print(f"Found {len(merged_po_map)} matching records in the MergedPO table.")
-    if merged_po_map:
-        print("First 5 po_ids found in database:", list(merged_po_map.keys())[:5])
+    
     updated_records = []
 
     for index, acceptance_row in aggregated_df.iterrows():
-        po_id = acceptance_row["po_id"]
-
+        po_id = acceptance_row['po_id']
+        
         if po_id in merged_po_map:
             merged_po_to_update = merged_po_map[po_id]
             updated_records.append(po_id)
-
+            
             unit_price = merged_po_to_update.unit_price or 0
             req_qty = merged_po_to_update.requested_qty or 0
-            agg_acceptance_qty = acceptance_row["acceptance_qty"]
-            # Get the latest date from the correct column and extract only the date part
-            latest_processed_date = acceptance_row["application_processed_date"].date()
-
-            # --- 1. Deduce and Update Category ---
-            merged_po_to_update.category = deduce_category(
-                merged_po_to_update.item_description
-            )
-
-            # --- 2. AC Calculation ---
-            if acceptance_row["shipment_no"] == 1:
-                merged_po_to_update.total_ac_amount = unit_price * req_qty * 0.80
-                merged_po_to_update.accepted_ac_amount = (
-                    unit_price * agg_acceptance_qty * 0.80
-                )
-                merged_po_to_update.date_ac_ok = latest_processed_date
-
-            # --- 3. PAC Calculation ---
+            agg_acceptance_qty = acceptance_row['acceptance_qty']
+            latest_processed_date = acceptance_row['application_processed_date'].date()
             payment_term = merged_po_to_update.payment_term
+            shipment_no = acceptance_row['shipment_no']
 
-            if payment_term == "ACPAC 100%":
-                # This logic is triggered by shipment 1
-                if acceptance_row["shipment_no"] == 1:
-                    merged_po_to_update.total_pac_amount = unit_price * req_qty * 0.20
-                    merged_po_to_update.accepted_pac_amount = (
-                        unit_price * agg_acceptance_qty * 0.20
-                    )
-                    merged_po_to_update.date_pac_ok = (
-                        latest_processed_date  # Same as AC date
-                    )
+            # Deduce and Update Category
+            merged_po_to_update.category = deduce_category(merged_po_to_update.item_description)
 
-            elif payment_term == "AC1 80 | PAC 20":
-                # This logic is triggered by shipment 2
-                if acceptance_row["shipment_no"] == 2:
+            # --- REVISED AC/PAC CALCULATION LOGIC ---
+
+            # Case 1: Processing a Shipment 1 record
+            if shipment_no == 1:
+                # Always calculate AC for Shipment 1
+                merged_po_to_update.total_ac_amount = unit_price * req_qty * 0.80
+                merged_po_to_update.accepted_ac_amount = unit_price * agg_acceptance_qty * 0.80
+                merged_po_to_update.date_ac_ok = latest_processed_date
+                
+                # ONLY calculate PAC if the payment term is "ACPAC 100%"
+                if payment_term == "AC PAC 100%":
                     merged_po_to_update.total_pac_amount = unit_price * req_qty * 0.20
-                    merged_po_to_update.accepted_pac_amount = (
-                        unit_price * agg_acceptance_qty * 0.20
-                    )
+                    merged_po_to_update.accepted_pac_amount = unit_price * agg_acceptance_qty * 0.20
+                    merged_po_to_update.date_pac_ok = latest_processed_date # Same date as AC
+
+            # Case 2: Processing a Shipment 2 record
+            elif shipment_no == 2:
+                # ONLY calculate PAC, and ONLY if the payment term is "AC1 80 | PAC 20"
+                if payment_term == "AC1 80 | PAC 20":
+                    merged_po_to_update.total_pac_amount = unit_price * req_qty * 0.20
+                    merged_po_to_update.accepted_pac_amount = unit_price * agg_acceptance_qty * 0.20
                     merged_po_to_update.date_pac_ok = latest_processed_date
-        else:
-            print(f"  [!] No match found in database for po_id: '{po_id}'")
+            
+            # For any other shipment number (3, 4, etc.), no calculations are performed.
+    
+    unprocessed_acceptances_query.update({"is_processed": True})
+    
     db.commit()
 
     return len(set(updated_records))
