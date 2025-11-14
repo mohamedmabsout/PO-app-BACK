@@ -25,6 +25,7 @@ def upload_and_process_acceptances(
 ):
     """
     Uploads an Excel file containing acceptance data.
+
     The system will perform the following steps:
     1. Pre-process and aggregate the data from the file.
     2. Deduce the 'category' for each corresponding PO.
@@ -37,7 +38,13 @@ def upload_and_process_acceptances(
             status_code=status.HTTP_400_BAD_REQUEST, 
             detail="Invalid file type. Please upload an Excel file (.xlsx or .xls)."
         )
-
+    history_record = crud.create_upload_history_record(
+        db=db,
+        filename=file.filename,
+        status="PROCESSING",
+        user_id=current_user.id,
+total_rows=0
+    )
     try:
         # Read the Excel file directly into a Pandas DataFrame
         contents = file.file.read()
@@ -58,9 +65,12 @@ def upload_and_process_acceptances(
             acceptance_df[col] = pd.to_numeric(acceptance_df[col], errors='coerce').fillna(0)
 
 
-        crud.create_raw_acceptances_from_dataframe(db, acceptance_df, current_user.id)
+        raw_count = crud.create_raw_acceptances_from_dataframe(db, acceptance_df, current_user.id)
         # Call the core logic function in crud.py to do all the work
         updated_count = crud.process_acceptance_dataframe(db=db, acceptance_df=acceptance_df)
+        history_record.status = "SUCCESS"
+        history_record.total_rows = raw_count # Store how many rows were in the file
+        db.commit()
         
         # Return a detailed success message
         return {
@@ -72,7 +82,12 @@ def upload_and_process_acceptances(
     except Exception as e:
         # Log the actual, detailed error on the server for debugging
         # In a real production app, you'd use a proper logger here
-        print(f"An error occurred during acceptance processing for user {current_user.email}: {e}")
+        db.rollback() # Rollback any partial changes
+        history_record.status = "FAILED"
+        history_record.error_message = str(e)
+        db.commit()
+        
+        print(f"An error occurred during acceptance processing for user {current_user.last_name}: {e}")
         
         # Return a user-friendly error message
         raise HTTPException(

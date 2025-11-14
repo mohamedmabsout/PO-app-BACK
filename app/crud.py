@@ -99,10 +99,10 @@ def delete_project(db: Session, project_id: int):
     return db_project
 
 
-def create_purchase_orders_from_dataframe(db: Session, df: pd.DataFrame):
+def create_purchase_orders_from_dataframe(db: Session, df: pd.DataFrame, user_id: int):
     # We can optionally clear the table if we want to re-import from scratch
     # db.query(models.PurchaseOrder).delete()
-
+    df['uploader_id'] = user_id
     records = df.to_dict(orient="records")
     db.bulk_insert_mappings(models.PurchaseOrder, records)
     db.commit()

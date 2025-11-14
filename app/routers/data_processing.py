@@ -48,8 +48,8 @@ async def import_purchase_orders(file: UploadFile = File(...), db: Session = Dep
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
         
         # Call the new CRUD function to save to the raw table
-        num_records = crud.create_purchase_orders_from_dataframe(db, df=df)
-        
+        num_records = crud.create_purchase_orders_from_dataframe(db, df=df, user_id=current_user.id)
+
         crud.create_upload_history_record(
             db=db, 
             filename=file.filename, 
