@@ -1,10 +1,11 @@
-from datetime import datetime
+from datetime import datetime,date
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from . import auth
 from . import models, schemas
 import pandas as pd
-
+from sqlalchemy.orm import joinedload,Query
+import sqlalchemy as sa
 PAYMENT_TERM_MAP = {
     "【TT】▍AC1 (80.00%, INV AC -15D, Complete 80%) / AC2 (20.00%, INV AC -15D, Complete 100%) ▍": "AC1 80 | PAC 20",
     "【TT】▍AC1 (80.00%, INV AC -30D, Complete 80%) / AC2 (20.00%, INV AC -30D, Complete 100%) ▍": "AC1 80 | PAC 20",
@@ -60,7 +61,12 @@ def get_project_by_name(db: Session, name: str):
 # Function to get a list of all projects
 def get_projects(db: Session, skip: int = 0, limit: int = 100):
     return db.query(models.Project).offset(skip).limit(limit).all()
+def get_all_projects(db: Session):
+    """Returns all project records from the database."""
+    return db.query(models.Project).order_by(models.Project.name).all()
 
+def get_all_sites(db:Session):
+    return db.query(models.Site).order_by(models.Site.site_code).all()
 
 # Function to create a new project
 def create_project(db: Session, project: schemas.ProjectCreate):
@@ -99,107 +105,170 @@ def delete_project(db: Session, project_id: int):
     return db_project
 
 
-def create_purchase_orders_from_dataframe(db: Session, df: pd.DataFrame, user_id: int):
-    # We can optionally clear the table if we want to re-import from scratch
-    # db.query(models.PurchaseOrder).delete()
+def get_or_create(db: Session, model, **kwargs):
+    instance = db.query(model).filter_by(**kwargs).first()
+    if instance:
+        return instance, False # Returns instance and "was not created" flag
+    else:
+        instance = model(**kwargs)
+        db.add(instance)
+        db.flush() # Use flush to get the ID without committing
+        return instance, True # Returns instance and "was created" flag
+
+def save_and_hydrate_raw_pos(db: Session, df: pd.DataFrame, user_id: int):
+    # Standardize column names from the Excel file - This part is perfect.
+    df.rename(columns={
+        'PO NO.': 'po_no', 'PO Line NO.': 'po_line_no', 'Project Name': 'project_code',
+        'Site Code': 'site_code', 'Customer': 'customer','PO Status': 'po_status',
+        'Item Description': 'item_description', 'Payment Terms': 'payment_terms_raw',
+        'Unit Price': 'unit_price', 'Requested Qty': 'requested_qty', 'Publish Date': 'publish_date'
+    }, inplace=True, errors='ignore')
+
+    # --- REVISED AND CORRECTED HYDRATION LOGIC ---
+
+    # Helper function is now cleaner
+    def hydrate_lookup_table(model, model_key_col: str, df_key_col: str, df_val_col: str = None):
+        if df_key_col not in df.columns:
+            return {} # If the source column doesn't exist in the Excel file, do nothing.
+            
+        unique_keys = df[df_key_col].dropna().unique()
+        if len(unique_keys) == 0:
+            return {}
+
+        existing_items = db.query(model).filter(getattr(model, model_key_col).in_(unique_keys)).all()
+        existing_map = {getattr(item, model_key_col): item for item in existing_items}
+        
+        new_keys = set(unique_keys) - set(existing_map.keys())
+        
+        if new_keys:
+            new_items_to_insert = []
+            if df_val_col: # Case for Sites (key-value pairs)
+                unique_new_sites = df[df[df_key_col].isin(new_keys)][[df_key_col, df_val_col]].drop_duplicates(subset=[df_key_col])
+                for _, row in unique_new_sites.iterrows():
+                    new_items_to_insert.append({model_key_col: row[df_key_col], df_val_col: row[df_val_col]})
+            else: # Case for Projects/Customers (single key)
+                new_items_to_insert = [{model_key_col: key} for key in new_keys]
+            
+            if new_items_to_insert:
+                db.bulk_insert_mappings(model, new_items_to_insert)
+                db.commit()
+            
+            newly_created_items = db.query(model).filter(getattr(model, model_key_col).in_(new_keys)).all()
+            for item in newly_created_items:
+                existing_map[getattr(item, model_key_col)] = item
+        
+        return existing_map
+
+    # Run the hydration for each lookup table with corrected arguments
+    # hydrate_lookup_table(Model, 'model_column_name', 'dataframe_column_name')
+    project_map = hydrate_lookup_table(models.Project, 'name', 'project_code')
+
+    customer_map = hydrate_lookup_table(models.Customer, 'name', 'customer')
+    # For sites: hydrate_lookup_table(Model, 'model_key_col', 'df_key_col', 'df_val_col')
+    site_map = hydrate_lookup_table(models.Site, 'site_code', 'site_code')
+
+    # Map names/codes to their database IDs - This part is now more robust
+    if project_map:
+        df['project_id'] = df['project_code'].map({p.name: p.id for p in project_map.values()})
+    if customer_map:
+        df['customer_id'] = df['customer'].map({c.name: c.id for c in customer_map.values()})
+    if site_map:
+        df['site_id'] = df['site_code'].map({s.site_code: s.id for s in site_map.values()})
+    
     df['uploader_id'] = user_id
-    records = df.to_dict(orient="records")
-    db.bulk_insert_mappings(models.PurchaseOrder, records)
+
+    # -----------------------------------------------
+
+    # Select only the columns that exist in the RawPurchaseOrder model
+    # This part is correct and remains the same.
+    model_columns = [c.key for c in models.RawPurchaseOrder.__table__.columns if c.key != 'id']
+    df_to_insert = df[[col for col in model_columns if col in df.columns]]
+    
+    records = df_to_insert.to_dict("records")
+    db.bulk_insert_mappings(models.RawPurchaseOrder, records)
     db.commit()
-    return len(records)  # Return the number of records created
+    return len(records)
+
 
 
 def process_and_merge_pos(db: Session):
     # 1. Find all purchase orders that haven't been processed yet
-    unprocessed_pos = (
-        db.query(models.PurchaseOrder)
-        .filter(models.PurchaseOrder.is_processed == False)
-        .all()
-    )
+    unprocessed_pos_query = db.query(models.RawPurchaseOrder).filter(models.RawPurchaseOrder.is_processed == False)
+ 
+    # Check if there's anything to do before proceeding
+    if unprocessed_pos_query.count() == 0:
+        return 0
 
-    if not unprocessed_pos:
-        return 0  # Nothing to process
+    # --- NEW: DE-DUPLICATION STEP ---
+    # Load all unprocessed records into a Pandas DataFrame
+    unprocessed_df = pd.read_sql(unprocessed_pos_query.statement, db.bind)
+    
+    # Ensure publish_date is in datetime format for correct sorting
+    unprocessed_df['publish_date'] = pd.to_datetime(unprocessed_df['publish_date'])
+    
+    # Sort by publish_date to ensure we keep the most recent record
+    unprocessed_df.sort_values('publish_date', inplace=True)
+    
+    # Drop duplicates based on po_no and po_line_no, keeping the 'last' (most recent) one
+    clean_df = unprocessed_df.drop_duplicates(subset=['po_no', 'po_line_no'], keep='last').copy()
+    
+    # Generate the po_id on the clean DataFrame
+    clean_df['po_id'] = clean_df['po_no'] + '-' + clean_df['po_line_no'].astype(int).astype(str)
+    # --------------------------------
 
-    # MODIFICATION 1: We will build this list inside the loop for clarity
-    # po_ids_to_check = [f"{po.po_no}-{po.po_line_no}" for po in unprocessed_pos]
+    po_ids_to_check = clean_df['po_id'].tolist()
+    existing_merged_map = {mp.po_id: mp for mp in db.query(models.MergedPO).filter(models.MergedPO.po_id.in_(po_ids_to_check)).all()}
 
-    # 3. In ONE efficient query, fetch all existing MergedPO records that match our batch
-    # This part is excellent and remains the same.
-    po_ids_to_check = [f"{po.po_no}-{po.po_line_no}" for po in unprocessed_pos]
-    existing_merged_pos_query = (
-        db.query(models.MergedPO)
-        .filter(models.MergedPO.po_id.in_(po_ids_to_check))
-        .all()
-    )
 
-    # 4. Create a dictionary for fast lookups (O(1) complexity).
-    # This is also excellent and remains the same.
-    existing_pos_map = {mp.po_id: mp for mp in existing_merged_pos_query}
+     # We need to fetch the related project and site objects for the clean data
+    project_ids = clean_df['project_id'].dropna().unique().tolist()
+    site_ids = clean_df['site_id'].dropna().unique().tolist()
+    
+    project_map = {p.id: p for p in db.query(models.Project).filter(models.Project.id.in_(project_ids)).all()}
+    site_map = {s.id: s for s in db.query(models.Site).filter(models.Site.id.in_(site_ids)).all()}
 
-    # 5. Loop through the raw POs
-    for po in unprocessed_pos:
-        po_id = f"{po.po_no}-{po.po_line_no}"
+    # Loop through the rows of the CLEAN DataFrame
+    for _, po_row in clean_df.iterrows():
+        po_id = po_row['po_id']
+        
+        # Get the related objects from our maps
+        project = project_map.get(po_row['project_id'])
+        site = site_map.get(po_row['site_id'])
 
-        # --- MODIFICATION 2: SIMPLIFY THE UPDATE/INSERT LOGIC ---
-
-        # --- UPDATE PATH ---
-        # Check if this PO already exists in our merged table
-        if po_id in existing_pos_map:
-            merged_po_to_update = existing_pos_map[po_id]
-
-            # ALWAYS update the key fields from the raw PO file.
-            # This handles cases where a PO is re-uploaded with changes.
-            merged_po_to_update.requested_qty = po.requested_qty
-            merged_po_to_update.unit_price = (
-                po.unit_price
-            )  # It's good to update the price too
-            merged_po_to_update.publish_date = po.publish_date
-
-            # Recalculate the line amount based on the potentially new values
-            merged_po_to_update.line_amount_hw = po.unit_price * po.requested_qty
-
-            # You could also update other fields here if they can change, e.g., payment_term
-            merged_po_to_update.payment_term = PAYMENT_TERM_MAP.get(
-                po.payment_terms_raw, "UNKNOWN"
-            )
+        if po_id in existing_merged_map:
+            # UPDATE logic
+            merged_po_to_update = existing_merged_map[po_id]
+            merged_po_to_update.requested_qty = po_row['requested_qty']
+            merged_po_to_update.unit_price = po_row['unit_price']
+            merged_po_to_update.publish_date = po_row['publish_date']
+            merged_po_to_update.line_amount_hw = (po_row['unit_price'] or 0) * (po_row['requested_qty'] or 0)
         else:
-            # This part of your logic is mostly correct and can stay.
-            line_amount_hw = po.unit_price * po.requested_qty
-            payment_term_abbreviation = PAYMENT_TERM_MAP.get(
-                po.payment_terms_raw, "UNKNOWN"
+            # INSERT logic
+            new_merged_po = models.MergedPO(
+                po_id=po_id,
+                raw_po_id=po_row['id'], # Use the ID from the raw table row
+                project_id=po_row['project_id'],
+                site_id=po_row['site_id'],
+                project_name=project.name if project else None,
+                site_code=site.site_code if site else None,
+                po_no=po_row['po_no'],
+                po_line_no=po_row['po_line_no'],
+                item_description=po_row['item_description'],
+                payment_term=PAYMENT_TERM_MAP.get(po_row['payment_terms_raw'], "UNKNOWN"),
+                unit_price=po_row['unit_price'],
+                requested_qty=po_row['requested_qty'],
+                internal_control=1,
+                line_amount_hw=(po_row['unit_price'] or 0) * (po_row['requested_qty'] or 0),
+                publish_date=po_row['publish_date'],
             )
-
-            # MODIFICATION 3: Use the correct column name for item description
-            # Your old code had 'item_code_description', let's assume the model has 'item_code'
-            # based on your database screenshot.
-            item_desc_value = getattr(po, "item_description", None)
-
-            new_merged_data = {
-                "po_id": po_id,
-                "project_name": po.project_code,
-                "site_code": po.site_code,
-                "po_no": po.po_no,
-                "po_line_no": po.po_line_no,
-                "item_description": item_desc_value,  # Use the corrected variable
-                "payment_term": payment_term_abbreviation,
-                "unit_price": po.unit_price,
-                "requested_qty": po.requested_qty,
-                "internal_control": 1,
-                "line_amount_hw": line_amount_hw,
-                "publish_date": po.publish_date,
-            }
-            new_merged_po = models.MergedPO(**new_merged_data)
             db.add(new_merged_po)
 
-            # --- MODIFICATION 4: This is CRITICAL and stays ---
-            # Mark the raw PO as processed, regardless of whether it was an INSERT or UPDATE.
-        po.is_processed = True
-
-    # 6. Commit the session. This saves all changes at once.
-    # This is also correct and stays.
+    # Mark the original unprocessed rows as processed
+    unprocessed_pos_query.update({"is_processed": True})
+    
     db.commit()
 
-    return len(unprocessed_pos)
+    return len(clean_df) 
 
 
 def get_all_po_data(db: Session):
@@ -210,7 +279,7 @@ def create_po_data_from_dataframe(db: Session, df: pd.DataFrame, user_id: int):
     df['uploader_id'] = user_id
 
     records = df.to_dict(orient="records")
-    db.bulk_insert_mappings(models.PurchaseOrder, records)
+    db.bulk_insert_mappings(models.RawPurchaseOrder, records)
     db.commit()
 
 def create_raw_acceptances_from_dataframe(db: Session, df: pd.DataFrame, user_id: int):
@@ -261,24 +330,24 @@ def get_raw_po_data_as_dataframe(
     # We are not including 'category' as it's not in the table
 ) -> pd.DataFrame:
     """
-    Queries the raw PurchaseOrder table with optional filters and returns a DataFrame.
+    Queries the raw RawPurchaseOrder table with optional filters and returns a DataFrame.
     """
-    # Start with a base query on the PurchaseOrder table
-    query = db.query(models.PurchaseOrder)
+    # Start with a base query on the RawPurchaseOrder table
+    query = db.query(models.RawPurchaseOrder)
 
     # Apply filters to the query if they are provided
     if status:
         # The 'po_status' column in the table matches this filter
-        query = query.filter(models.PurchaseOrder.po_status == status)
+        query = query.filter(models.RawPurchaseOrder.po_status == status)
 
     if project_name:
         # The 'project_code' column in the table matches this filter
-        query = query.filter(models.PurchaseOrder.project_code == project_name)
+        query = query.filter(models.RawPurchaseOrder.project_code == project_name)
 
     if search:
         # Create a search filter for PO number
         search_term = f"%{search}%"
-        query = query.filter(models.PurchaseOrder.po_no.ilike(search_term))
+        query = query.filter(models.RawPurchaseOrder.po_no.ilike(search_term))
 
     # Execute the query and read the results directly into a Pandas DataFrame
     df = pd.read_sql(query.statement, db.bind)
@@ -494,3 +563,45 @@ def process_acceptance_dataframe(db: Session, acceptance_df: pd.DataFrame):
     db.commit()
 
     return len(set(updated_records))
+
+
+def get_filtered_merged_pos(
+    db: Session,
+    project_name: Optional[str] = None,
+    site_code: Optional[str] = None,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    search: Optional[str] = None # Keeping the general search filter
+) -> Query:
+    """
+    Builds a SQLAlchemy Query for the MergedPO table with multiple optional filters.
+    Returns the Query object, not the results.
+    """
+    # Start with a base query
+    query = db.query(models.MergedPO)
+
+    # Apply filters conditionally
+    if project_name:
+        query = query.filter(models.MergedPO.project_name == project_name)
+    
+    if site_code:
+        query = query.filter(models.MergedPO.site_code == site_code)
+
+    if start_date:
+        # Filter for publish_date >= start_date
+        # We use a cast to date to ignore the time part for comparison
+        query = query.filter(sa.func.date(models.MergedPO.publish_date) >= start_date)
+
+    if end_date:
+        # Filter for publish_date <= end_date
+        query = query.filter(sa.func.date(models.MergedPO.publish_date) <= end_date)
+        
+    if search:
+        search_term = f"%{search}%"
+        query = query.filter(
+            (models.MergedPO.po_no.ilike(search_term)) |
+            (models.MergedPO.item_description.ilike(search_term))
+        )
+
+    # Return the complete, but not yet executed, query object
+    return query

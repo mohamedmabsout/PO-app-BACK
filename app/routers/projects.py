@@ -35,6 +35,18 @@ def read_projects(
     projects = crud.get_projects(db, skip=skip, limit=limit)
     return projects
 
+@router.get("/all", response_model=List[schemas.Project])
+def read_all_projects(db: Session = Depends(get_db)):
+    """
+    Retrieve ALL projects without pagination.
+    Ideal for populating filter dropdowns on the frontend.
+    """
+    # We will use the existing crud.get_projects but without a limit.
+    # We can set a very high limit or create a new specific crud function.
+    # Let's create a new CRUD function for clarity.
+    return crud.get_all_projects(db=db)
+
+
 @router.get("/{project_id}", response_model=schemas.Project)
 def read_project(
     project_id: int, 

@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import List, Optional
 from datetime import date, datetime
 from pydantic import ConfigDict
 
@@ -130,7 +130,7 @@ class PurchaseOrderBase(BaseModel):
 class PurchaseOrderCreate(PurchaseOrderBase):
     pass
 
-class PurchaseOrder(PurchaseOrderBase):
+class RawPurchaseOrder(PurchaseOrderBase):
     id: int
     is_processed: bool
     model_config = ConfigDict(from_attributes=True)
@@ -176,4 +176,21 @@ class UploadHistory(UploadHistoryBase):
     uploaded_at: datetime
     uploader: User # Nest the full user object
 
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PaginatedMergedPO(BaseModel):
+    items: List[MergedPO]
+    total_items: int
+    page: int
+    per_page: int
+    total_pages: int
+
+class SiteBase(BaseModel):
+    site_code: str
+    site_name: Optional[str] = None
+
+class Site(SiteBase):
+    id: int
+    
     model_config = ConfigDict(from_attributes=True)

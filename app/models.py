@@ -48,8 +48,11 @@ class Customer(Base):
     name = Column(String(255), unique=True, nullable=False, index=True)
     short_name = Column(String(100))
     # Add other customer-specific fields here
-
-# --- UPDATED MODEL: Project ---
+class Site(Base):
+    __tablename__ = 'sites'
+    id = Column(Integer, primary_key=True, index=True)
+    site_code = Column(String(300), unique=True, index=True, nullable=False)
+# --- UPDATED MODEL: Project --- 
 class Project(Base):
     __tablename__ = 'projects'
     
@@ -64,7 +67,7 @@ class Project(Base):
     has_extension_possibility = Column(Boolean, default=False)
     
     # We are removing 'project_manager_name'
-    # project_manager_name = Column(String(255)) 
+    #project_manager_name = Column(String(255)) 
     
     forecast_plan_details = Column(String(1000))
     budget_assigned = Column(Float)
@@ -88,28 +91,32 @@ class Project(Base):
 
 
 
-class PurchaseOrder(Base):
-    __tablename__ = "purchase_orders"
+class RawPurchaseOrder(Base):
+    __tablename__ = 'raw_purchase_orders' # A NEW table for raw data
 
     id = Column(Integer, primary_key=True, index=True)
-    due_qty = Column(Float)
     po_status = Column(String(50))
     unit_price = Column(Float)
     line_amount = Column(Float)
-    billed_quantity = Column(Float)
     po_no = Column(String(100), index=True) # Index this for faster lookups
     po_line_no = Column(Integer)
-    item_code = Column(String(100))
     item_description = Column(String(500), nullable=True) # New field for description
     requested_qty = Column(Float)
     publish_date = Column(DateTime)
-    project_code = Column(String(50), index=True) # Index this too
-    site_code = Column(String(100), index=True) # Index this too
     payment_terms_raw = Column(String(500), nullable=True) # New field for the raw text
-    is_processed = Column(Boolean, default=False) # Our new tracking flag!
-    uploaded_at = Column(DateTime, default=datetime.datetime.now(datetime.timezone.utc))
+    # Store IDs, not names
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=True, index=True)
+    site_id = Column(Integer, ForeignKey("sites.id"), nullable=True, index=True)
+    customer_id = Column(Integer, ForeignKey("customers.id"), nullable=True, index=True) # Assuming 'Customer' column in Excel
+
+    # Relationships to fetch the full objects
+    project = relationship("Project")
+    site = relationship("Site")
+    customer = relationship("Customer")
+    # ----------------------------------------
     
-    # Link to the user who uploaded it
+    is_processed = Column(Boolean, default=False, index=True)
+    uploaded_at = Column(DateTime, default=datetime.datetime.utcnow)
     uploader_id = Column(Integer, ForeignKey("users.id"))
     uploader = relationship("User")
 
@@ -138,8 +145,13 @@ class MergedPO(Base):
     id = Column(Integer, primary_key=True, index=True)
     # --- NEW & TRANSFORMED FIELDS ---
     po_id = Column(String(255), unique=True, index=True) # "PO NO - PO LINE"
-    project_name = Column(String(255), nullable=True) # We need to decide where this comes from
-    site_code = Column(String(100), nullable=True) # We need to decide where this comes from
+    raw_po_id = Column(Integer, ForeignKey("raw_purchase_orders.id"), unique=True)
+    raw_po = relationship("RawPurchaseOrder", backref="merged_po")
+    
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=True)
+    site_id = Column(Integer, ForeignKey("sites.id"), nullable=True)
+    project_name = Column(String(255), nullable=True)   
+    site_code = Column(String(100), nullable=True)
     po_no = Column(String(100), index=True)
     po_line_no = Column(Integer)
     item_description = Column(String(500), nullable=True)
@@ -159,6 +171,8 @@ class MergedPO(Base):
     total_pac_amount = Column(Float, nullable=True)
     accepted_pac_amount = Column(Float, nullable=True)
     date_pac_ok = Column(Date, nullable=True)
+    project = relationship("Project")
+    site = relationship("Site")
     
 class UploadHistory(Base):
     __tablename__ = "upload_history"
