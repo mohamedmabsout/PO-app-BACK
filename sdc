@@ -23,14 +23,29 @@ docker compose up -d --build
 # execute the migration.
 docker compose exec backend alembic upgrade head
 
-alembic revision --autogenerate -m "..."
-alembic revision --autogenerate -m "project and site linking"
-
-alembic revision --autogenerate -m "project and site linking"
-
 
 DELETE FROM merged_pos;
 DELETE FROM raw_purchase_orders;
 DELETE FROM raw_acceptances;
 DELETE FROM sites;
 DELETE FROM projects;
+
+
+# 1. Go to project folder
+cd /var/www/po-app-backend
+
+# 2. Enter the container
+docker compose exec backend bash
+
+
+# 7. (Inside container) Generate the migration script
+alembic revision --autogenerate -m "Add acceptance columns"
+
+# 8. (Inside container) Apply the migration
+alembic upgrade head
+
+# 9. (Inside container) Exit for the last time
+exit
+
+# 10. Restart the application service
+docker compose restart backend

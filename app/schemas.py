@@ -148,6 +148,15 @@ class MergedPOBase(BaseModel):
     internal_control: int
     line_amount_hw: float
     publish_date: FormattedDate
+    category: Optional[str] = None
+    total_ac_amount: Optional[float] = None
+    accepted_ac_amount: Optional[float] = None
+    date_ac_ok: Optional[date] = None
+    
+    total_pac_amount: Optional[float] = None
+    accepted_pac_amount: Optional[float] = None
+    date_pac_ok: Optional[date] = None
+  
 
 class MergedPO(MergedPOBase):
     id: int
