@@ -6,6 +6,8 @@ from . import models, schemas
 import pandas as pd
 from sqlalchemy.orm import joinedload,Query
 import sqlalchemy as sa
+from sqlalchemy import func, case
+
 PAYMENT_TERM_MAP = {
     "【TT】▍AC1 (80.00%, INV AC -15D, Complete 80%) / AC2 (20.00%, INV AC -15D, Complete 100%) ▍": "AC1 80 | PAC 20",
     "【TT】▍AC1 (80.00%, INV AC -30D, Complete 80%) / AC2 (20.00%, INV AC -30D, Complete 100%) ▍": "AC1 80 | PAC 20",
@@ -605,3 +607,18 @@ def get_filtered_merged_pos(
 
     # Return the complete, but not yet executed, query object
     return query
+def get_total_financial_summary(db: Session) -> dict:
+    # Use the SQLAlchemy func module to perform SUM aggregations
+    # coalesce(value, 0) is used to turn NULL results into 0.0
+    total_po_value = db.query(func.sum(models.MergedPO.line_amount_hw)).scalar() or 0.0
+    total_accepted_ac = db.query(func.sum(models.MergedPO.accepted_ac_amount)).scalar() or 0.0
+    total_accepted_pac = db.query(func.sum(models.MergedPO.accepted_pac_amount)).scalar() or 0.0
+    
+    remaining_gap = total_po_value - (total_accepted_ac + total_accepted_pac)
+    
+    return {
+        "total_po_value": total_po_value,
+        "total_accepted_ac": total_accepted_ac,
+        "total_accepted_pac": total_accepted_pac,
+        "remaining_gap": remaining_gap
+    }

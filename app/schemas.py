@@ -203,3 +203,8 @@ class Site(SiteBase):
     id: int
     
     model_config = ConfigDict(from_attributes=True)
+class FinancialSummary(BaseModel):
+    total_po_value: float
+    total_accepted_ac: float
+    total_accepted_pac: float
+    remaining_gap: float
