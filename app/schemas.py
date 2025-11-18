@@ -208,3 +208,12 @@ class FinancialSummary(BaseModel):
     total_accepted_ac: float
     total_accepted_pac: float
     remaining_gap: float
+
+class ProjectFinancials(BaseModel):
+    project_id: int
+    project_name: str
+    total_po_value: float
+    total_accepted: float
+    remaining_gap: float
+    completion_percentage: float
+

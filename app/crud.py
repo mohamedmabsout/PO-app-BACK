@@ -622,3 +622,40 @@ def get_total_financial_summary(db: Session) -> dict:
         "total_accepted_pac": total_accepted_pac,
         "remaining_gap": remaining_gap
     }
+def get_projects_financial_summary(db: Session):
+    # This query groups all MergedPOs by project and calculates the sums for each.
+    results = db.query(
+        models.MergedPO.project_name,
+        func.sum(models.MergedPO.line_amount_hw).label("total_po_value"),
+        (func.sum(models.MergedPO.accepted_ac_amount) + func.sum(models.MergedPO.accepted_pac_amount)).label("total_accepted")
+    ).group_by(models.MergedPO.project_name).all()
+
+    summary_list = []
+    for row in results:
+        po_value = row.total_po_value or 0
+        accepted = row.total_accepted or 0
+        gap = po_value - accepted
+        completion = (accepted / po_value * 100) if po_value > 0 else 0
+        
+        # We need to find the project_id. This is a simplification.
+        # A more robust solution would join with the projects table.
+        project = db.query(models.Project).filter(models.Project.name == row.project_name).first()
+
+        summary_list.append({
+            "project_id": project.id if project else 0,
+            "project_name": row.project_name,
+            "total_po_value": po_value,
+            "total_accepted": accepted,
+            "remaining_gap": gap,
+            "completion_percentage": completion
+        })
+    return summary_list
+
+def get_po_value_by_category(db: Session):
+    results = db.query(
+        models.MergedPO.category,
+        func.sum(models.MergedPO.line_amount_hw).label("total_value")
+    ).group_by(models.MergedPO.category).all()
+    
+    # Convert to a list of dicts for the frontend
+    return [{"category": row.category or "TBD", "value": row.total_value or 0} for row in results]
