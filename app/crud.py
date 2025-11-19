@@ -675,15 +675,13 @@ def get_financial_summary_for_year(db: Session, year: int) -> dict:
     
     remaining_gap = total_po_value - (total_accepted_ac + total_accepted_pac)
     
-    # NOTE: Les champs total_expenses et total_profit ne sont pas dans votre modèle MergedPO.
-    # Je les retourne à 0.0 pour que le schéma Pydantic soit valide.
+    
     return {
         "total_po_value": total_po_value,
         "total_accepted_ac": total_accepted_ac,
         "total_accepted_pac": total_accepted_pac,
         "remaining_gap": remaining_gap,
-        "total_expenses": 0.0,
-        "total_profit": 0.0
+        
     }
 
 
@@ -706,8 +704,7 @@ def get_financial_summary_for_month(db: Session, year: int, month: int) -> dict:
         "total_accepted_ac": total_accepted_ac,
         "total_accepted_pac": total_accepted_pac,
         "remaining_gap": remaining_gap,
-        "total_expenses": 0.0,
-        "total_profit": 0.0
+        
     }
 
 
@@ -731,6 +728,5 @@ def get_financial_summary_for_week(db: Session, year: int, week: int) -> dict:
         "total_accepted_ac": total_accepted_ac,
         "total_accepted_pac": total_accepted_pac,
         "remaining_gap": remaining_gap,
-        "total_expenses": 0.0,
-        "total_profit": 0.0
+        
     }
