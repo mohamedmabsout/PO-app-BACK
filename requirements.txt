@@ -64,7 +64,7 @@ tzdata==2025.2
 ujson==5.11.0
 urllib3==2.5.0
 uvicorn==0.38.0
-uvloop==0.22.1
+# uvloop==0.22.1
 watchfiles==1.1.1
 websockets==15.0.1
 xlsxwriter==3.2.9

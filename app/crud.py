@@ -659,3 +659,78 @@ def get_po_value_by_category(db: Session):
     
     # Convert to a list of dicts for the frontend
     return [{"category": row.category or "TBD", "value": row.total_value or 0} for row in results]
+
+def get_financial_summary_for_year(db: Session, year: int) -> dict:
+    """Calculates the financial summary for a specific year based on 'publish_date'."""
+    
+    # Base query filtering by year
+    query = db.query(models.MergedPO).filter(
+        func.extract('year', models.MergedPO.publish_date) == year
+    )
+    
+    # Perform aggregations on the filtered query
+    total_po_value = query.with_entities(func.sum(models.MergedPO.line_amount_hw)).scalar() or 0.0
+    total_accepted_ac = query.with_entities(func.sum(models.MergedPO.accepted_ac_amount)).scalar() or 0.0
+    total_accepted_pac = query.with_entities(func.sum(models.MergedPO.accepted_pac_amount)).scalar() or 0.0
+    
+    remaining_gap = total_po_value - (total_accepted_ac + total_accepted_pac)
+    
+    # NOTE: Les champs total_expenses et total_profit ne sont pas dans votre modèle MergedPO.
+    # Je les retourne à 0.0 pour que le schéma Pydantic soit valide.
+    return {
+        "total_po_value": total_po_value,
+        "total_accepted_ac": total_accepted_ac,
+        "total_accepted_pac": total_accepted_pac,
+        "remaining_gap": remaining_gap,
+        "total_expenses": 0.0,
+        "total_profit": 0.0
+    }
+
+
+def get_financial_summary_for_month(db: Session, year: int, month: int) -> dict:
+    """Calculates the financial summary for a specific month and year."""
+    
+    query = db.query(models.MergedPO).filter(
+        func.extract('year', models.MergedPO.publish_date) == year,
+        func.extract('month', models.MergedPO.publish_date) == month
+    )
+    
+    total_po_value = query.with_entities(func.sum(models.MergedPO.line_amount_hw)).scalar() or 0.0
+    total_accepted_ac = query.with_entities(func.sum(models.MergedPO.accepted_ac_amount)).scalar() or 0.0
+    total_accepted_pac = query.with_entities(func.sum(models.MergedPO.accepted_pac_amount)).scalar() or 0.0
+    
+    remaining_gap = total_po_value - (total_accepted_ac + total_accepted_pac)
+    
+    return {
+        "total_po_value": total_po_value,
+        "total_accepted_ac": total_accepted_ac,
+        "total_accepted_pac": total_accepted_pac,
+        "remaining_gap": remaining_gap,
+        "total_expenses": 0.0,
+        "total_profit": 0.0
+    }
+
+
+def get_financial_summary_for_week(db: Session, year: int, week: int) -> dict:
+    """Calculates the financial summary for a specific week and year."""
+    
+    # 'week' in PostgreSQL/SQLAlchemy returns the week number (1-53)
+    query = db.query(models.MergedPO).filter(
+        func.extract('year', models.MergedPO.publish_date) == year,
+        func.extract('week', models.MergedPO.publish_date) == week
+    )
+    
+    total_po_value = query.with_entities(func.sum(models.MergedPO.line_amount_hw)).scalar() or 0.0
+    total_accepted_ac = query.with_entities(func.sum(models.MergedPO.accepted_ac_amount)).scalar() or 0.0
+    total_accepted_pac = query.with_entities(func.sum(models.MergedPO.accepted_pac_amount)).scalar() or 0.0
+    
+    remaining_gap = total_po_value - (total_accepted_ac + total_accepted_pac)
+    
+    return {
+        "total_po_value": total_po_value,
+        "total_accepted_ac": total_accepted_ac,
+        "total_accepted_pac": total_accepted_pac,
+        "remaining_gap": remaining_gap,
+        "total_expenses": 0.0,
+        "total_profit": 0.0
+    }

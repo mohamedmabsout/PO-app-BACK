@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from .. import crud, schemas, auth
 from ..dependencies import get_db
+from fastapi import HTTPException
 
 router = APIRouter(
     prefix="/api/summary",
@@ -25,3 +26,26 @@ def get_projects_overview(db: Session = Depends(get_db)):
 @router.get("/value-by-category")
 def get_value_by_category(db: Session = Depends(get_db)):
     return crud.get_po_value_by_category(db=db)
+# --- NOUVEAU : Endpoint pour l'aperçu ANNUEL (Yearly) ---
+@router.get("/yearly-overview", response_model=schemas.FinancialSummary)
+def get_yearly_overview(year: int, db: Session = Depends(get_db)):
+    summary = crud.get_financial_summary_for_year(db=db, year=year)
+    if not summary:
+        raise HTTPException(status_code=404, detail=f"No data found for year {year}")
+    return summary
+
+# --- NOUVEAU : Endpoint pour l'aperçu MENSUEL (Monthly) ---
+@router.get("/monthly-overview", response_model=schemas.FinancialSummary)
+def get_monthly_overview(year: int, month: int, db: Session = Depends(get_db)):
+    summary = crud.get_financial_summary_for_month(db=db, year=year, month=month)
+    if not summary:
+        raise HTTPException(status_code=404, detail=f"No data found for {year}-{month}")
+    return summary
+
+# --- NOUVEAU : Endpoint pour l'aperçu HEBDOMADAIRE (Weekly) ---
+@router.get("/weekly-overview", response_model=schemas.FinancialSummary)
+def get_weekly_overview(year: int, week: int, db: Session = Depends(get_db)):
+    summary = crud.get_financial_summary_for_week(db=db, year=year, week=week)
+    if not summary:
+        raise HTTPException(status_code=404, detail=f"No data found for week {week} of {year}")
+    return summary
