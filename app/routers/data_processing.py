@@ -148,6 +148,11 @@ def export_merged_pos_report(
         
         if merged_df.empty:
             raise HTTPException(status_code=404, detail="No data found for the selected filters.")        # 2. Create the Excel file in memory
+          # Identify all columns that are of a date or datetime type
+        for col in merged_df.select_dtypes(include=['datetime64[ns]', 'datetime']).columns:
+            # Format them to 'DD/MM/YYYY'. The '.dt' accessor is for datetime operations.
+            merged_df[col] = merged_df[col].dt.strftime('%d/%m/%Y')
+
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
             merged_df.to_excel(writer, sheet_name="Merged PO Data", index=False)
