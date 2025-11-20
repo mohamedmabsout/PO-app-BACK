@@ -672,9 +672,7 @@ def get_financial_summary_for_year(db: Session, year: int) -> dict:
     total_po_value = query.with_entities(func.sum(models.MergedPO.line_amount_hw)).scalar() or 0.0
     total_accepted_ac = query.with_entities(func.sum(models.MergedPO.accepted_ac_amount)).scalar() or 0.0
     total_accepted_pac = query.with_entities(func.sum(models.MergedPO.accepted_pac_amount)).scalar() or 0.0
-    
     remaining_gap = total_po_value - (total_accepted_ac + total_accepted_pac)
-    
     
     return {
         "total_po_value": total_po_value,

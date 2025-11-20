@@ -7,7 +7,8 @@ import os
 from .config import settings # Import the single settings instance
 
 # Use the validated URL from our settings object
-engine = create_engine(settings.DATABASE_URL)
+engine = create_engine(settings.DATABASE_URL,
+    pool_recycle=3600)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 # This is the address of our database.
