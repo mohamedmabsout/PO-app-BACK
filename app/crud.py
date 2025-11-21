@@ -7,6 +7,7 @@ import pandas as pd
 from sqlalchemy.orm import joinedload,Query
 import sqlalchemy as sa
 from sqlalchemy import func, case
+from sqlalchemy.sql.functions import coalesce # More explicit import
 
 PAYMENT_TERM_MAP = {
     "【TT】▍AC1 (80.00%, INV AC -15D, Complete 80%) / AC2 (20.00%, INV AC -15D, Complete 100%) ▍": "AC1 80 | PAC 20",
@@ -652,14 +653,24 @@ def get_projects_financial_summary(db: Session):
     return summary_list
 
 def get_po_value_by_category(db: Session):
-    results = db.query(
-        models.MergedPO.category,
-        func.sum(models.MergedPO.line_amount_hw).label("total_value")
-    ).group_by(models.MergedPO.category).all()
+    """
+    Calculates the total PO value for each category, correctly grouping NULL
+    and 'TBD' values together at the database level.
+    """
     
-    # Convert to a list of dicts for the frontend
-    return [{"category": row.category or "TBD", "value": row.total_value or 0} for row in results]
+    # --- THIS IS THE FIX ---
+    # We use `coalesce` to tell the database: "if the category is NULL, use 'TBD' instead."
+    # This happens BEFORE the GROUP BY, so the aggregation is correct.
+    category_label = coalesce(models.MergedPO.category, "TBD").label("category_name")
 
+    results = db.query(
+        category_label,
+        func.sum(models.MergedPO.line_amount_hw).label("total_value")
+    ).group_by(category_label).all()
+    
+    # Now, the Python part is much simpler because the data is already clean.
+    # The 'row' object will have attributes 'category_name' and 'total_value'.
+    return [{"category": row.category_name, "value": row.total_value or 0} for row in results]
 def get_financial_summary_for_year(db: Session, year: int) -> dict:
     """Calculates the financial summary for a specific year based on 'publish_date'."""
     
