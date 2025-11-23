@@ -118,72 +118,23 @@ def get_or_create(db: Session, model, **kwargs):
         db.flush() # Use flush to get the ID without committing
         return instance, True # Returns instance and "was created" flag
 
-def save_and_hydrate_raw_pos(db: Session, df: pd.DataFrame, user_id: int):
-    # Standardize column names from the Excel file - This part is perfect.
+def create_raw_purchase_orders_from_dataframe(db: Session, df: pd.DataFrame, user_id: int):    # Standardize column names from the Excel file - This part is perfect.
     df.rename(columns={
         'PO NO.': 'po_no', 'PO Line NO.': 'po_line_no', 'Project Name': 'project_code',
         'Site Code': 'site_code', 'Customer': 'customer','PO Status': 'po_status',
         'Item Description': 'item_description', 'Payment Terms': 'payment_terms_raw',
         'Unit Price': 'unit_price', 'Requested Qty': 'requested_qty', 'Publish Date': 'publish_date'
     }, inplace=True, errors='ignore')
-
-    # --- REVISED AND CORRECTED HYDRATION LOGIC ---
-
-    # Helper function is now cleaner
-    def hydrate_lookup_table(model, model_key_col: str, df_key_col: str, df_val_col: str = None):
-        if df_key_col not in df.columns:
-            return {} # If the source column doesn't exist in the Excel file, do nothing.
-            
-        unique_keys = df[df_key_col].dropna().unique()
-        if len(unique_keys) == 0:
-            return {}
-
-        existing_items = db.query(model).filter(getattr(model, model_key_col).in_(unique_keys)).all()
-        existing_map = {getattr(item, model_key_col): item for item in existing_items}
-        
-        new_keys = set(unique_keys) - set(existing_map.keys())
-        
-        if new_keys:
-            new_items_to_insert = []
-            if df_val_col: # Case for Sites (key-value pairs)
-                unique_new_sites = df[df[df_key_col].isin(new_keys)][[df_key_col, df_val_col]].drop_duplicates(subset=[df_key_col])
-                for _, row in unique_new_sites.iterrows():
-                    new_items_to_insert.append({model_key_col: row[df_key_col], df_val_col: row[df_val_col]})
-            else: # Case for Projects/Customers (single key)
-                new_items_to_insert = [{model_key_col: key} for key in new_keys]
-            
-            if new_items_to_insert:
-                db.bulk_insert_mappings(model, new_items_to_insert)
-                db.commit()
-            
-            newly_created_items = db.query(model).filter(getattr(model, model_key_col).in_(new_keys)).all()
-            for item in newly_created_items:
-                existing_map[getattr(item, model_key_col)] = item
-        
-        return existing_map
-
-    # Run the hydration for each lookup table with corrected arguments
-    # hydrate_lookup_table(Model, 'model_column_name', 'dataframe_column_name')
-    project_map = hydrate_lookup_table(models.Project, 'name', 'project_code')
-
-    customer_map = hydrate_lookup_table(models.Customer, 'name', 'customer')
-    # For sites: hydrate_lookup_table(Model, 'model_key_col', 'df_key_col', 'df_val_col')
-    site_map = hydrate_lookup_table(models.Site, 'site_code', 'site_code')
-
-    # Map names/codes to their database IDs - This part is now more robust
-    if project_map:
-        df['project_id'] = df['project_code'].map({p.name: p.id for p in project_map.values()})
-    if customer_map:
-        df['customer_id'] = df['customer'].map({c.name: c.id for c in customer_map.values()})
-    if site_map:
-        df['site_id'] = df['site_code'].map({s.site_code: s.id for s in site_map.values()})
-    
     df['uploader_id'] = user_id
+    
+    # Hydrate Customers and Sites ONLY
+    customer_map = {name: get_or_create(db, models.Customer, name=name)[0] for name in df['customer'].dropna().unique()} if 'customer' in df.columns else {}
+    site_map = {code: get_or_create(db, models.Site, site_code=code)[0] for code in df['site_code'].dropna().unique()} if 'site_code' in df.columns else {}
+    db.commit() # Commit new customers/sites
 
-    # -----------------------------------------------
-
-    # Select only the columns that exist in the RawPurchaseOrder model
-    # This part is correct and remains the same.
+    df['customer_id'] = df['customer'].map({c.name: c.id for c in customer_map.values()}) if customer_map else None
+    df['site_id'] = df['site_code'].map({s.site_code: s.id for s in site_map.values()}) if site_map else None
+    
     model_columns = [c.key for c in models.RawPurchaseOrder.__table__.columns if c.key != 'id']
     df_to_insert = df[[col for col in model_columns if col in df.columns]]
     
@@ -191,88 +142,140 @@ def save_and_hydrate_raw_pos(db: Session, df: pd.DataFrame, user_id: int):
     db.bulk_insert_mappings(models.RawPurchaseOrder, records)
     db.commit()
     return len(records)
+def get_internal_project_id_from_rules(db: Session, customer_project_name: str, tbd_project_id: int):
+    """
+    Applies assignment rules to a customer project name to find the correct internal project ID.
+    """
+    if not customer_project_name:
+        return tbd_project_id
+
+    # Fetch all rules from the database
+    # In a high-performance system, this could be cached.
+    rules = db.query(models.ProjectAssignmentRule).all()
+
+    for rule in rules:
+        if rule.rule_type == "STARTS_WITH" and customer_project_name.startswith(rule.pattern):
+            return rule.internal_project_id
+        elif rule.rule_type == "ENDS_WITH" and customer_project_name.endswith(rule.pattern):
+            return rule.internal_project_id
+        elif rule.rule_type == "CONTAINS" and rule.pattern in customer_project_name:
+            return rule.internal_project_id
+            
+    # If no rules match, return the ID for the "To Be Determined" project
+    return tbd_project_id
+
 
 
 
 def process_and_merge_pos(db: Session):
-    # 1. Find all purchase orders that haven't been processed yet
+    """
+    Final, robust version: Processes unprocessed RawPurchaseOrders, de-duplicates,
+    applies rules, and inserts/updates the MergedPO table.
+    """
+    # 1. Get the "To Be Determined" project ID
+    tbd_project = db.query(models.InternalProject).filter_by(name="To Be Determined").first()
+    if not tbd_project:
+        tbd_project = models.InternalProject(name="To Be Determined")
+        db.add(tbd_project)
+        db.commit()
+    tbd_project_id = tbd_project.id
+
+    # 2. Query for unprocessed raw POs and EAGERLY LOAD their related Site objects
     unprocessed_pos_query = db.query(models.RawPurchaseOrder).filter(models.RawPurchaseOrder.is_processed == False)
- 
-    # Check if there's anything to do before proceeding
-    if unprocessed_pos_query.count() == 0:
+    unprocessed_pos = unprocessed_pos_query.options(joinedload(models.RawPurchaseOrder.site)).all()
+    
+    if not unprocessed_pos:
         return 0
+    
+    # --- NEW: Hydrate the CustomerProject table ---
+    # 1. Get all unique customer project names from the raw data
+    customer_project_names = {po.project_code for po in unprocessed_pos if po.project_code}
+    
+    # 2. Find which ones already exist in our CustomerProject table
+    existing_cust_projs = {p.name: p for p in db.query(models.CustomerProject).filter(models.CustomerProject.name.in_(customer_project_names)).all()}
+    
+    # 3. For the new ones, apply rules and create them
+    for name in customer_project_names:
+        if name not in existing_cust_projs:
+            internal_project_id = get_internal_project_id_from_rules(db, name, tbd_project_id)
+            new_cust_proj = models.CustomerProject(name=name, internal_project_id=internal_project_id)
+            db.add(new_cust_proj)
+    
+    db.commit() # Commit all new customer projects
+    
+    # 4. Create a final map for lookup: Customer Project Name -> CustomerProject Object
+    all_cust_projs_map = {p.name: p for p in db.query(models.CustomerProject).filter(models.CustomerProject.name.in_(customer_project_names)).all()}
+    # 3. De-duplicate the raw POs in memory to get the latest version of each line
+    unique_pos_map = {}
+    for po in unprocessed_pos:
+        key = (po.po_no, po.po_line_no)
+        # If the key already exists, only replace it if the new one has a later publish date
+        if key not in unique_pos_map or po.publish_date > unique_pos_map[key].publish_date:
+            unique_pos_map[key] = po
+            
+    clean_pos_list = list(unique_pos_map.values())
 
-    # --- NEW: DE-DUPLICATION STEP ---
-    # Load all unprocessed records into a Pandas DataFrame
-    unprocessed_df = pd.read_sql(unprocessed_pos_query.statement, db.bind)
-    
-    # Ensure publish_date is in datetime format for correct sorting
-    unprocessed_df['publish_date'] = pd.to_datetime(unprocessed_df['publish_date'])
-    
-    # Sort by publish_date to ensure we keep the most recent record
-    unprocessed_df.sort_values('publish_date', inplace=True)
-    
-    # Drop duplicates based on po_no and po_line_no, keeping the 'last' (most recent) one
-    clean_df = unprocessed_df.drop_duplicates(subset=['po_no', 'po_line_no'], keep='last').copy()
-    
-    # Generate the po_id on the clean DataFrame
-    clean_df['po_id'] = clean_df['po_no'] + '-' + clean_df['po_line_no'].astype(int).astype(str)
-    # --------------------------------
-
-    po_ids_to_check = clean_df['po_id'].tolist()
+    # 4. Prepare for batch processing
+    po_ids_to_check = [f"{po.po_no}-{po.po_line_no}" for po in clean_pos_list]
     existing_merged_map = {mp.po_id: mp for mp in db.query(models.MergedPO).filter(models.MergedPO.po_id.in_(po_ids_to_check)).all()}
 
+    # 5. Loop through the CLEAN list of PO objects
+    for po in clean_pos_list:
+        po_id = f"{po.po_no}-{po.po_line_no}"
+        # Get the CustomerProject object from our map
+        customer_project = all_cust_projs_map.get(po.project_code)
+        if not customer_project: continue # Skip if no matching customer project was found
 
-     # We need to fetch the related project and site objects for the clean data
-    project_ids = clean_df['project_id'].dropna().unique().tolist()
-    site_ids = clean_df['site_id'].dropna().unique().tolist()
-    
-    project_map = {p.id: p for p in db.query(models.Project).filter(models.Project.id.in_(project_ids)).all()}
-    site_map = {s.id: s for s in db.query(models.Site).filter(models.Site.id.in_(site_ids)).all()}
 
-    # Loop through the rows of the CLEAN DataFrame
-    for _, po_row in clean_df.iterrows():
-        po_id = po_row['po_id']
-        
-        # Get the related objects from our maps
-        project = project_map.get(po_row['project_id'])
-        site = site_map.get(po_row['site_id'])
-
+        # --- UPDATE PATH ---
         if po_id in existing_merged_map:
-            # UPDATE logic
-            merged_po_to_update = existing_merged_map[po_id]
-            merged_po_to_update.requested_qty = po_row['requested_qty']
-            merged_po_to_update.unit_price = po_row['unit_price']
-            merged_po_to_update.publish_date = po_row['publish_date']
-            merged_po_to_update.line_amount_hw = (po_row['unit_price'] or 0) * (po_row['requested_qty'] or 0)
+            merged_po = existing_merged_map[po_id]
+            
+            # Your critical update logic
+            if po.requested_qty == 0:
+                merged_po.requested_qty = 0
+                merged_po.line_amount_hw = 0
+            else:
+                merged_po.requested_qty = po.requested_qty
+                merged_po.unit_price = po.unit_price
+                merged_po.line_amount_hw = (po.unit_price or 0) * (po.requested_qty or 0)
+            
+            # Always update these fields on an update
+            # merged_po.internal_project_id = customer_project.internal_project_id
+            merged_po.customer_project_id = customer_project.id
+            merged_po.publish_date = po.publish_date
+            merged_po.site_id = po.site_id
+            merged_po.site_code = po.site.site_code if po.site else None
+        
+        # --- INSERT PATH ---
         else:
-            # INSERT logic
             new_merged_po = models.MergedPO(
                 po_id=po_id,
-                raw_po_id=po_row['id'], # Use the ID from the raw table row
-                project_id=po_row['project_id'],
-                site_id=po_row['site_id'],
-                project_name=project.name if project else None,
-                site_code=site.site_code if site else None,
-                po_no=po_row['po_no'],
-                po_line_no=po_row['po_line_no'],
-                item_description=po_row['item_description'],
-                payment_term=PAYMENT_TERM_MAP.get(po_row['payment_terms_raw'], "UNKNOWN"),
-                unit_price=po_row['unit_price'],
-                requested_qty=po_row['requested_qty'],
+                raw_po_id=po.id,
+                customer_project_id=customer_project.id,
+                site_id=po.site_id,
+                site_code=po.site.site_code if po.site else None, # We can access this because of `joinedload`
+                po_no=po.po_no,
+                po_line_no=po.po_line_no,
+                item_description=po.item_description,
+                payment_term=PAYMENT_TERM_MAP.get(po.payment_terms_raw, "UNKNOWN"),
+                unit_price=po.unit_price,
+                requested_qty=po.requested_qty,
                 internal_control=1,
-                line_amount_hw=(po_row['unit_price'] or 0) * (po_row['requested_qty'] or 0),
-                publish_date=po_row['publish_date'],
+                line_amount_hw=(po.unit_price or 0) * (po.requested_qty or 0),
+                publish_date=po.publish_date,
             )
             db.add(new_merged_po)
 
-    # Mark the original unprocessed rows as processed
-    unprocessed_pos_query.update({"is_processed": True})
+    # 6. Mark ALL original unprocessed rows as processed in a single, efficient query
+    unprocessed_ids = [po.id for po in unprocessed_pos]
+    if unprocessed_ids: # Ensure the list is not empty
+        db.query(models.RawPurchaseOrder).filter(models.RawPurchaseOrder.id.in_(unprocessed_ids)).update({"is_processed": True})
     
+    # 7. Commit all changes
     db.commit()
 
-    return len(clean_df) 
-
+    return len(clean_pos_list)
 
 def get_all_po_data(db: Session):
     return db.query(models.MergedPO).all()
@@ -581,7 +584,11 @@ def get_filtered_merged_pos(
     Returns the Query object, not the results.
     """
     # Start with a base query
-    query = db.query(models.MergedPO)
+    query = db.query(models.MergedPO).join(
+        models.CustomerProject
+    ).join(
+        models.InternalProject
+    )
 
     # Apply filters conditionally
     if project_name:

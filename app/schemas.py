@@ -134,10 +134,18 @@ class RawPurchaseOrder(PurchaseOrderBase):
     id: int
     is_processed: bool
     model_config = ConfigDict(from_attributes=True)
+class InternalProject(BaseModel):
+    name: str
+    model_config = ConfigDict(from_attributes=True)
+
+class CustomerProject(BaseModel):
+    name: str
+    internal_project: InternalProject
+    model_config = ConfigDict(from_attributes=True)
 
 class MergedPOBase(BaseModel):
     po_id: str
-    project_name: Optional[str] = None
+    customer_project: CustomerProject # This will be a nested object
     site_code: Optional[str] = None
     po_no: str
     po_line_no: int
@@ -156,7 +164,7 @@ class MergedPOBase(BaseModel):
     total_pac_amount: Optional[float] = None
     accepted_pac_amount: Optional[float] = None
     date_pac_ok: Optional[date] = None
-  
+    model_config = ConfigDict(from_attributes=True)
 
 class MergedPO(MergedPOBase):
     id: int

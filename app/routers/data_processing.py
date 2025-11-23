@@ -34,7 +34,7 @@ async def import_purchase_orders(
         df = pd.read_excel(io.BytesIO(contents))
 
         # --- FIX 1: Delegate ALL logic to a new, smart CRUD function ---
-        num_raw_records = crud.save_and_hydrate_raw_pos(
+        num_raw_records = crud.create_raw_purchase_orders_from_dataframe(
             db=db, df=df, user_id=current_user.id
         )
 
