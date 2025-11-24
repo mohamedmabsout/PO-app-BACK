@@ -629,13 +629,18 @@ def get_total_financial_summary(db: Session) -> dict:
         "total_accepted_pac": total_accepted_pac,
         "remaining_gap": remaining_gap
     }
-def get_projects_financial_summary(db: Session):
-    # This query groups all MergedPOs by project and calculates the sums for each.
+def get_internal_projects_financial_summary(db: Session):
+    # This query groups by the InternalProject.
     results = db.query(
-        models.MergedPO.project_name,
+        models.InternalProject.id.label("project_id"),
+        models.InternalProject.name.label("project_name"),
         func.sum(models.MergedPO.line_amount_hw).label("total_po_value"),
         (func.sum(models.MergedPO.accepted_ac_amount) + func.sum(models.MergedPO.accepted_pac_amount)).label("total_accepted")
-    ).group_by(models.MergedPO.project_name).all()
+    ).select_from(models.MergedPO).join(
+        models.CustomerProject
+    ).join(
+        models.InternalProject
+    ).group_by(models.InternalProject.id, models.InternalProject.name).all()
 
     summary_list = []
     for row in results:
@@ -646,10 +651,38 @@ def get_projects_financial_summary(db: Session):
         
         # We need to find the project_id. This is a simplification.
         # A more robust solution would join with the projects table.
-        project = db.query(models.Project).filter(models.Project.name == row.project_name).first()
+        project = db.query(models.InternalProject).filter(models.InternalProject.name == row.project_name).first()
 
         summary_list.append({
             "project_id": project.id if project else 0,
+            "project_name": row.project_name,
+            "total_po_value": po_value,
+            "total_accepted": accepted,
+            "remaining_gap": gap,
+            "completion_percentage": completion
+        })
+    return summary_list
+def get_customer_projects_financial_summary(db: Session):
+    # This query groups by the CustomerProject.
+    results = db.query(
+        models.CustomerProject.id.label("project_id"),
+        models.CustomerProject.name.label("project_name"),
+        func.sum(models.MergedPO.line_amount_hw).label("total_po_value"),
+        (func.sum(models.MergedPO.accepted_ac_amount) + func.sum(models.MergedPO.accepted_pac_amount)).label("total_accepted")
+    ).select_from(models.MergedPO).join(
+        models.CustomerProject
+    ).group_by(models.CustomerProject.id, models.CustomerProject.name).all()
+    
+    # The summary calculation logic is identical, just on a different grouping.
+    summary_list = []
+    for row in results:
+        po_value = row.total_po_value or 0
+        accepted = row.total_accepted or 0
+        gap = po_value - accepted
+        completion = (accepted / po_value * 100) if po_value > 0 else 0
+        
+        summary_list.append({
+            "project_id": row.project_id,
             "project_name": row.project_name,
             "total_po_value": po_value,
             "total_accepted": accepted,
