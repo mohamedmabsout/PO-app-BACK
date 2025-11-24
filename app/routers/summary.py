@@ -49,3 +49,8 @@ def get_monthly_overview(year: int, month: int, db: Session = Depends(get_db)):
 def get_weekly_overview(year: int, week: int, db: Session = Depends(get_db)):
     summary = crud.get_financial_summary_by_period(db=db, year=year, week=week)
     return summary
+
+@router.get("/yearly-chart", response_model=List[schemas.MonthlyChartData])
+def get_yearly_chart_data(year: int, db: Session = Depends(get_db)):
+    """Retourne les données agrégées pour chaque mois d'une année."""
+    return crud.get_yearly_chart_data(db=db, year=year)

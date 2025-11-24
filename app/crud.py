@@ -6,7 +6,7 @@ from . import models, schemas
 import pandas as pd
 from sqlalchemy.orm import joinedload,Query
 import sqlalchemy as sa
-from sqlalchemy import func, case, extract, and_
+from sqlalchemy import func, extract, extract, and_
 from sqlalchemy.sql.functions import coalesce # More explicit import
 
 PAYMENT_TERM_MAP = {
@@ -760,5 +760,15 @@ def get_financial_summary_by_period(
         "total_po_value": total_po_value,
         "total_accepted_ac": total_accepted_ac,
         "total_accepted_pac": total_accepted_pac,
-        "remaining_gap": remaining_gap,
+        "remaining_gap": remaining_gap,        
     }
+def get_yearly_chart_data(db: Session, year: int):
+    results = db.query(
+        extract('month', models.MergedPO.publish_date).label("month"),
+        func.sum(models.MergedPO.line_amount_hw).label("total_po_value"),
+        (func.sum(models.MergedPO.accepted_ac_amount) + func.sum(models.MergedPO.accepted_pac_amount)).label("total_paid")
+    ).filter(
+        extract('year', models.MergedPO.publish_date) == year
+    ).group_by("month").order_by("month").all()
+
+    return [{"month": r.month, "total_po_value": r.total_po_value or 0, "total_paid": r.total_paid or 0} for r in results]
