@@ -6,7 +6,7 @@ from . import models, schemas
 import pandas as pd
 from sqlalchemy.orm import joinedload,Query
 import sqlalchemy as sa
-from sqlalchemy import func, case
+from sqlalchemy import func, case, extract, and_
 from sqlalchemy.sql.functions import coalesce # More explicit import
 
 PAYMENT_TERM_MAP = {
@@ -710,18 +710,50 @@ def get_po_value_by_category(db: Session):
     # Now, the Python part is much simpler because the data is already clean.
     # The 'row' object will have attributes 'category_name' and 'total_value'.
     return [{"category": row.category_name, "value": row.total_value or 0} for row in results]
-def get_financial_summary_for_year(db: Session, year: int) -> dict:
-    """Calculates the financial summary for a specific year based on 'publish_date'."""
+def get_financial_summary_by_period(
+    db: Session, 
+    year: int, 
+    month: Optional[int] = None, 
+    week: Optional[int] = None
+) -> dict:
+    """
+    Calculates the financial summary for a specific period (year, month, or week)
+    using correct date fields for each metric via conditional aggregation.
+    """
     
-    # Base query filtering by year
-    query = db.query(models.MergedPO).filter(
-        func.extract('year', models.MergedPO.publish_date) == year
-    )
+    # --- Define our time period filters ---
+    po_date_filter = [extract('year', models.MergedPO.publish_date) == year]
+    ac_date_filter = [extract('year', models.MergedPO.date_ac_ok) == year]
+    pac_date_filter = [extract('year', models.MergedPO.date_pac_ok) == year]
+
+    if month:
+        po_date_filter.append(extract('month', models.MergedPO.publish_date) == month)
+        ac_date_filter.append(extract('month', models.MergedPO.date_ac_ok) == month)
+        pac_date_filter.append(extract('month', models.MergedPO.date_pac_ok) == month)
+
+    if week:
+        po_date_filter.append(extract('week', models.MergedPO.publish_date) == week)
+        ac_date_filter.append(extract('week', models.MergedPO.date_ac_ok) == week)
+        pac_date_filter.append(extract('week', models.MergedPO.date_pac_ok) == week)
+
+    # --- Perform the conditional aggregation in a single query ---
+    summary = db.query(
+        # 1. Total PO Value based on PUBLISH date
+        func.sum(case((and_(*po_date_filter), models.MergedPO.line_amount_hw), else_=0)).label("total_po_value"),
+        
+        # 2. Total Accepted AC based on AC date
+        func.sum(case((and_(*ac_date_filter), models.MergedPO.accepted_ac_amount), else_=0)).label("total_accepted_ac"),
+        
+        # 3. Total Accepted PAC based on PAC date
+        func.sum(case((and_(*pac_date_filter), models.MergedPO.accepted_pac_amount), else_=0)).label("total_accepted_pac")
+        
+    ).one() # .one() executes the query and returns the single row of results
+
+    total_po_value = summary.total_po_value or 0.0
+    total_accepted_ac = summary.total_accepted_ac or 0.0
+    total_accepted_pac = summary.total_accepted_pac or 0.0
     
-    # Perform aggregations on the filtered query
-    total_po_value = query.with_entities(func.sum(models.MergedPO.line_amount_hw)).scalar() or 0.0
-    total_accepted_ac = query.with_entities(func.sum(models.MergedPO.accepted_ac_amount)).scalar() or 0.0
-    total_accepted_pac = query.with_entities(func.sum(models.MergedPO.accepted_pac_amount)).scalar() or 0.0
+    # The GAP calculation remains a simple subtraction of the aggregated results
     remaining_gap = total_po_value - (total_accepted_ac + total_accepted_pac)
     
     return {
@@ -729,52 +761,4 @@ def get_financial_summary_for_year(db: Session, year: int) -> dict:
         "total_accepted_ac": total_accepted_ac,
         "total_accepted_pac": total_accepted_pac,
         "remaining_gap": remaining_gap,
-        
-    }
-
-
-def get_financial_summary_for_month(db: Session, year: int, month: int) -> dict:
-    """Calculates the financial summary for a specific month and year."""
-    
-    query = db.query(models.MergedPO).filter(
-        func.extract('year', models.MergedPO.publish_date) == year,
-        func.extract('month', models.MergedPO.publish_date) == month
-    )
-    
-    total_po_value = query.with_entities(func.sum(models.MergedPO.line_amount_hw)).scalar() or 0.0
-    total_accepted_ac = query.with_entities(func.sum(models.MergedPO.accepted_ac_amount)).scalar() or 0.0
-    total_accepted_pac = query.with_entities(func.sum(models.MergedPO.accepted_pac_amount)).scalar() or 0.0
-    
-    remaining_gap = total_po_value - (total_accepted_ac + total_accepted_pac)
-    
-    return {
-        "total_po_value": total_po_value,
-        "total_accepted_ac": total_accepted_ac,
-        "total_accepted_pac": total_accepted_pac,
-        "remaining_gap": remaining_gap,
-        
-    }
-
-
-def get_financial_summary_for_week(db: Session, year: int, week: int) -> dict:
-    """Calculates the financial summary for a specific week and year."""
-    
-    # 'week' in PostgreSQL/SQLAlchemy returns the week number (1-53)
-    query = db.query(models.MergedPO).filter(
-        func.extract('year', models.MergedPO.publish_date) == year,
-        func.extract('week', models.MergedPO.publish_date) == week
-    )
-    
-    total_po_value = query.with_entities(func.sum(models.MergedPO.line_amount_hw)).scalar() or 0.0
-    total_accepted_ac = query.with_entities(func.sum(models.MergedPO.accepted_ac_amount)).scalar() or 0.0
-    total_accepted_pac = query.with_entities(func.sum(models.MergedPO.accepted_pac_amount)).scalar() or 0.0
-    
-    remaining_gap = total_po_value - (total_accepted_ac + total_accepted_pac)
-    
-    return {
-        "total_po_value": total_po_value,
-        "total_accepted_ac": total_accepted_ac,
-        "total_accepted_pac": total_accepted_pac,
-        "remaining_gap": remaining_gap,
-        
     }
