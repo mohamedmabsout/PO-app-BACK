@@ -154,15 +154,50 @@ def export_merged_pos_report(
             merged_df[col] = merged_df[col].dt.strftime('%d/%m/%Y')
 
         output = io.BytesIO()
-        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-            merged_df.to_excel(writer, sheet_name="Merged PO Data", index=False)
+        with pd.ExcelWriter(output, engine='xlsxwriter', datetime_format='dd/mm/yyyy') as writer:
+            merged_df.to_excel(writer, sheet_name='Merged PO Data', index=False)
+            
+            # Get the workbook and worksheet objects
+            workbook = writer.book
+            worksheet = writer.sheets['Merged PO Data']
+
+            # Create format objects for the colors
+            ac_format = workbook.add_format({'bg_color': '#D9EAD3'}) # Light green
+            pac_format = workbook.add_format({'bg_color': '#CFE2F3'}) # Light blue
+            
+            # Find the column index for the AC/PAC columns
+            # header=True by default, so row 1 is the first data row.
+            header = list(merged_df.columns)
+            try:
+                ac_amount_col = header.index('accepted_ac_amount')
+                ac_date_col = header.index('date_ac_ok')
+                pac_amount_col = header.index('accepted_pac_amount')
+                pac_date_col = header.index('date_pac_ok')
+
+                # Apply the format conditionally to each row
+                for row_num, row_data in merged_df.iterrows():
+                    # xlsxwriter is 0-indexed for cols, 1-indexed for data rows
+                    if pd.notna(row_data['accepted_ac_amount']):
+                        worksheet.write(row_num + 1, ac_amount_col, row_data['accepted_ac_amount'], ac_format)
+                        worksheet.write(row_num + 1, ac_date_col, row_data['date_ac_ok'], ac_format)
+                    
+                    if pd.notna(row_data['accepted_pac_amount']):
+                        worksheet.write(row_num + 1, pac_amount_col, row_data['accepted_pac_amount'], pac_format)
+                        worksheet.write(row_num + 1, pac_date_col, row_data['date_pac_ok'], pac_format)
+            except ValueError:
+                # Handle case where a column might be missing
+                print("A required column for formatting was not found in the export DataFrame.")
 
         output.seek(0)
 
-        # 3. Set headers for the file download
-        filename = "Merged_PO_Report.xlsx"
-        headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
-
+       # 1. Get the current timestamp
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M") # e.g., "2025-11-23_18-45"
+        
+        # 2. Construct the dynamic filename
+        filename = f"Merged_PO_Report_{timestamp}.xlsx"
+        
+        # 3. Set up headers for the file download with the new filename
+        headers = {'Content-Disposition': f'attachment; filename="{filename}"'}
         # 4. Return the file as a streaming response
         return StreamingResponse(
             output,

@@ -532,8 +532,7 @@ def process_acceptance_dataframe(db: Session, acceptance_df: pd.DataFrame):
             unit_price = merged_po_to_update.unit_price or 0
             req_qty = merged_po_to_update.requested_qty or 0
             agg_acceptance_qty = acceptance_row['acceptance_qty']
-            latest_processed_date = acceptance_row['application_processed_date'].date()
-            payment_term = merged_po_to_update.payment_term
+            latest_processed_date = acceptance_row['application_processed_date'].date() if pd.notna(acceptance_row['application_processed_date']) else None
             shipment_no = acceptance_row['shipment_no']
 
             # Deduce and Update Category

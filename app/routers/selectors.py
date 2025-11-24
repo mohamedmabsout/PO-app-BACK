@@ -45,3 +45,31 @@ def get_project_manager_selector(
             models.User.last_name.ilike(f"%{search}%")
         )
     return query.limit(20).all()
+
+@router.get("/internal-projects/", response_model=List[schemas.InternalProject])
+def get_internal_project_selector(
+    search: str = Query(None, min_length=1, max_length=50),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """
+    Provides a list of internal projects for dropdowns, with optional search.
+    """
+    query = db.query(models.InternalProject)
+    if search:
+        query = query.filter(models.InternalProject.name.ilike(f"%{search}%"))
+    return query.limit(20).all()
+
+@router.get("/customer-projects", response_model=List[schemas.CustomerProject])
+def get_customer_project_selector(
+    search: str = Query(None, min_length=1, max_length=50),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """
+    Provides a list of customer projects for dropdowns, with optional search.
+    """
+    query = db.query(models.CustomerProject)
+    if search:
+        query = query.filter(models.CustomerProject.name.ilike(f"%{search}%"))
+    return query.limit(20).all()
