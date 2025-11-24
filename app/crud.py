@@ -6,7 +6,7 @@ from . import models, schemas
 import pandas as pd
 from sqlalchemy.orm import joinedload,Query
 import sqlalchemy as sa
-from sqlalchemy import func, extract, extract, and_
+from sqlalchemy import func, case, extract, and_
 from sqlalchemy.sql.functions import coalesce # More explicit import
 
 PAYMENT_TERM_MAP = {
