@@ -226,3 +226,7 @@ class ProjectFinancials(BaseModel):
     remaining_gap: float
     completion_percentage: float
 
+class MonthlyChartData(BaseModel):
+    month: int
+    total_po_value: float
+    total_paid: float
