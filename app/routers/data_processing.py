@@ -89,7 +89,8 @@ def get_merged_pos_preview(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
     # Add filter parameters as Query dependencies
-    project_name: Optional[str] = Query(None),
+    internal_project_id: Optional[int] = Query(None),
+    customer_project_id: Optional[int] = Query(None),
     site_code: Optional[str] = Query(None),
     start_date: Optional[date] = Query(None, description="Format: YYYY-MM-DD"),
     end_date: Optional[date] = Query(None, description="Format: YYYY-MM-DD"),
@@ -103,7 +104,7 @@ def get_merged_pos_preview(
     """
     # 1. Get the base filtered query from our new CRUD function
     query = crud.get_filtered_merged_pos(
-        db, project_name=project_name, site_code=site_code, 
+        db, internal_project_id=internal_project_id, customer_project_id=customer_project_id, site_code=site_code, 
         start_date=start_date, end_date=end_date, search=search
     )
 
