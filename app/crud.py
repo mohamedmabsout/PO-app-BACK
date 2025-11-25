@@ -711,80 +711,136 @@ def get_po_value_by_category(db: Session):
     # The 'row' object will have attributes 'category_name' and 'total_value'.
     return [{"category": row.category_name, "value": row.total_value or 0} for row in results]
 def get_financial_summary_for_year(db: Session, year: int) -> dict:
-    """Calculates the financial summary for a specific year based on 'publish_date'."""
-    
-    # Base query filtering by year
-    query = db.query(models.MergedPO).filter(
+    """
+    Yearly summary:
+    - PO value → based on publish_date
+    - Paid AC/PAC → based on actual acceptance dates (date_ac_ok / date_pac_ok)
+    """
+
+    # PO value by publish year
+    total_po_value = db.query(
+        func.sum(models.MergedPO.line_amount_hw)
+    ).filter(
         func.extract('year', models.MergedPO.publish_date) == year
-    )
-    
-    # Perform aggregations on the filtered query
-    total_po_value = query.with_entities(func.sum(models.MergedPO.line_amount_hw)).scalar() or 0.0
-    total_accepted_ac = query.with_entities(func.sum(models.MergedPO.accepted_ac_amount)).scalar() or 0.0
-    total_accepted_pac = query.with_entities(func.sum(models.MergedPO.accepted_pac_amount)).scalar() or 0.0
+    ).scalar() or 0.0
+
+    # AC paid in that year
+    total_accepted_ac = db.query(
+        func.sum(models.MergedPO.accepted_ac_amount)
+    ).filter(
+        func.extract('year', models.MergedPO.date_ac_ok) == year
+    ).scalar() or 0.0
+
+    # PAC paid in that year
+    total_accepted_pac = db.query(
+        func.sum(models.MergedPO.accepted_pac_amount)
+    ).filter(
+        func.extract('year', models.MergedPO.date_pac_ok) == year
+    ).scalar() or 0.0
+
     remaining_gap = total_po_value - (total_accepted_ac + total_accepted_pac)
-    
+
     return {
         "total_po_value": total_po_value,
         "total_accepted_ac": total_accepted_ac,
         "total_accepted_pac": total_accepted_pac,
-        "remaining_gap": remaining_gap,
-        
+        "remaining_gap": remaining_gap
     }
 
 
 def get_financial_summary_for_month(db: Session, year: int, month: int) -> dict:
-    """Calculates the financial summary for a specific month and year."""
-    
-    query = db.query(models.MergedPO).filter(
+    """
+    Monthly summary:
+    - PO value → publish_date
+    - Paid → actual acceptance dates
+    """
+
+    total_po_value = db.query(
+        func.sum(models.MergedPO.line_amount_hw)
+    ).filter(
         func.extract('year', models.MergedPO.publish_date) == year,
         func.extract('month', models.MergedPO.publish_date) == month
-    )
-    
-    total_po_value = query.with_entities(func.sum(models.MergedPO.line_amount_hw)).scalar() or 0.0
-    total_accepted_ac = query.with_entities(func.sum(models.MergedPO.accepted_ac_amount)).scalar() or 0.0
-    total_accepted_pac = query.with_entities(func.sum(models.MergedPO.accepted_pac_amount)).scalar() or 0.0
-    
+    ).scalar() or 0.0
+
+    total_accepted_ac = db.query(
+        func.sum(models.MergedPO.accepted_ac_amount)
+    ).filter(
+        func.extract('year', models.MergedPO.date_ac_ok) == year,
+        func.extract('month', models.MergedPO.date_ac_ok) == month
+    ).scalar() or 0.0
+
+    total_accepted_pac = db.query(
+        func.sum(models.MergedPO.accepted_pac_amount)
+    ).filter(
+        func.extract('year', models.MergedPO.date_pac_ok) == year,
+        func.extract('month', models.MergedPO.date_pac_ok) == month
+    ).scalar() or 0.0
+
     remaining_gap = total_po_value - (total_accepted_ac + total_accepted_pac)
-    
+
     return {
         "total_po_value": total_po_value,
         "total_accepted_ac": total_accepted_ac,
         "total_accepted_pac": total_accepted_pac,
-        "remaining_gap": remaining_gap,
-        
+        "remaining_gap": remaining_gap
     }
-
 
 def get_financial_summary_for_week(db: Session, year: int, week: int) -> dict:
-    """Calculates the financial summary for a specific week and year."""
-    
-    # 'week' in PostgreSQL/SQLAlchemy returns the week number (1-53)
-    query = db.query(models.MergedPO).filter(
+    """
+    Weekly summary:
+    - PO value → publish_date
+    - Paid → acceptance dates
+    """
+
+    total_po_value = db.query(
+        func.sum(models.MergedPO.line_amount_hw)
+    ).filter(
         func.extract('year', models.MergedPO.publish_date) == year,
         func.extract('week', models.MergedPO.publish_date) == week
-    )
-    
-    total_po_value = query.with_entities(func.sum(models.MergedPO.line_amount_hw)).scalar() or 0.0
-    total_accepted_ac = query.with_entities(func.sum(models.MergedPO.accepted_ac_amount)).scalar() or 0.0
-    total_accepted_pac = query.with_entities(func.sum(models.MergedPO.accepted_pac_amount)).scalar() or 0.0
-    
+    ).scalar() or 0.0
+
+    total_accepted_ac = db.query(
+        func.sum(models.MergedPO.accepted_ac_amount)
+    ).filter(
+        func.extract('year', models.MergedPO.date_ac_ok) == year,
+        func.extract('week', models.MergedPO.date_ac_ok) == week
+    ).scalar() or 0.0
+
+    total_accepted_pac = db.query(
+        func.sum(models.MergedPO.accepted_pac_amount)
+    ).filter(
+        func.extract('year', models.MergedPO.date_pac_ok) == year,
+        func.extract('week', models.MergedPO.date_pac_ok) == week
+    ).scalar() or 0.0
+
     remaining_gap = total_po_value - (total_accepted_ac + total_accepted_pac)
-    
+
     return {
         "total_po_value": total_po_value,
         "total_accepted_ac": total_accepted_ac,
         "total_accepted_pac": total_accepted_pac,
-        "remaining_gap": remaining_gap,
-        
+        "remaining_gap": remaining_gap
     }
+
 def get_yearly_chart_data(db: Session, year: int):
     results = db.query(
         extract('month', models.MergedPO.publish_date).label("month"),
         func.sum(models.MergedPO.line_amount_hw).label("total_po_value"),
-        (func.sum(models.MergedPO.accepted_ac_amount) + func.sum(models.MergedPO.accepted_pac_amount)).label("total_paid")
+        (
+            func.sum(
+                func.coalesce(models.MergedPO.accepted_ac_amount, 0)
+            ) +
+            func.sum(
+                func.coalesce(models.MergedPO.accepted_pac_amount, 0)
+            )
+        ).label("total_paid")
     ).filter(
-        extract('year', models.MergedPO.publish_date) == year
+        extract('year', models.MergedPO.date_ac_ok) == year
+        | extract('year', models.MergedPO.date_pac_ok) == year
     ).group_by("month").order_by("month").all()
 
-    return [{"month": r.month, "total_po_value": r.total_po_value or 0, "total_paid": r.total_paid or 0} for r in results]
+    return [{
+        "month": r.month,
+        "total_po_value": r.total_po_value or 0,
+        "total_paid": r.total_paid or 0
+    } for r in results]
