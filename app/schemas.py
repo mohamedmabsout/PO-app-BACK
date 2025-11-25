@@ -135,10 +135,12 @@ class RawPurchaseOrder(PurchaseOrderBase):
     is_processed: bool
     model_config = ConfigDict(from_attributes=True)
 class InternalProject(BaseModel):
+    id: int
     name: str
     model_config = ConfigDict(from_attributes=True)
 
 class CustomerProject(BaseModel):
+    id: int
     name: str
     internal_project: InternalProject
     model_config = ConfigDict(from_attributes=True)

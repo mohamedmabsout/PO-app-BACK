@@ -57,6 +57,7 @@ def get_weekly_overview(year: int, week: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail=f"No data found for week {week} of {year}")
     return summary
 
+
 @router.get("/yearly-chart", response_model=List[schemas.MonthlyChartData])
 def get_yearly_chart_data(year: int, db: Session = Depends(get_db)):
     """Retourne les données agrégées pour chaque mois d'une année."""

@@ -6,7 +6,7 @@ from . import models, schemas
 import pandas as pd
 from sqlalchemy.orm import joinedload,Query
 import sqlalchemy as sa
-from sqlalchemy import func, extract
+from sqlalchemy import func, case, extract, and_
 from sqlalchemy.sql.functions import coalesce # More explicit import
 
 PAYMENT_TERM_MAP = {
@@ -569,50 +569,58 @@ def process_acceptance_dataframe(db: Session, acceptance_df: pd.DataFrame):
 
     return len(set(updated_records))
 
-
 def get_filtered_merged_pos(
     db: Session,
-    project_name: Optional[str] = None,
+    internal_project_id: Optional[int] = None,
+    customer_project_id: Optional[int] = None,
     site_code: Optional[str] = None,
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
-    search: Optional[str] = None # Keeping the general search filter
+    search: Optional[str] = None
 ) -> Query:
     """
     Builds a SQLAlchemy Query for the MergedPO table with multiple optional filters.
-    Returns the Query object, not the results.
     """
-    # Start with a base query
-    query = db.query(models.MergedPO).join(
-        models.CustomerProject
-    ).join(
-        models.InternalProject
+    # Start with a base query and eagerly load relationships to prevent N+1 query problem.
+    # This makes the API faster.
+    query = db.query(models.MergedPO).options(
+        joinedload(models.MergedPO.customer_project).joinedload(models.CustomerProject.internal_project),
+        joinedload(models.MergedPO.site)
     )
 
-    # Apply filters conditionally
-    if project_name:
-        query = query.filter(models.MergedPO.project_name == project_name)
+   
+    if internal_project_id:
+        # To filter on a related model, you must join it first.
+        # The filter is then applied on the joined model's column.
+        query = query.join(models.CustomerProject).filter(
+            models.CustomerProject.internal_project_id == internal_project_id
+        )
+    
+    if customer_project_id:
+        # This filter is on the MergedPO model itself, so it's simpler.
+        query = query.filter(models.MergedPO.customer_project_id == customer_project_id)
     
     if site_code:
+        # Your previous logic for site_code was referencing MergedPO, which is correct.
         query = query.filter(models.MergedPO.site_code == site_code)
 
     if start_date:
-        # Filter for publish_date >= start_date
-        # We use a cast to date to ignore the time part for comparison
         query = query.filter(sa.func.date(models.MergedPO.publish_date) >= start_date)
 
     if end_date:
-        # Filter for publish_date <= end_date
         query = query.filter(sa.func.date(models.MergedPO.publish_date) <= end_date)
         
     if search:
         search_term = f"%{search}%"
+        # Search on MergedPO fields AND related fields
+        query = query.join(models.CustomerProject, isouter=True).join(models.InternalProject, isouter=True)
         query = query.filter(
-            (models.MergedPO.po_no.ilike(search_term)) |
-            (models.MergedPO.item_description.ilike(search_term))
+            (models.MergedPO.po_id.ilike(search_term)) |
+            (models.MergedPO.item_description.ilike(search_term)) |
+            (models.InternalProject.name.ilike(search_term)) | # Search by Internal Project name
+            (models.CustomerProject.name.ilike(search_term))   # Search by Customer Project name
         )
-
-    # Return the complete, but not yet executed, query object
+        
     return query
 def get_total_financial_summary(db: Session) -> dict:
     # Use the SQLAlchemy func module to perform SUM aggregations
@@ -839,8 +847,15 @@ def get_yearly_chart_data(db: Session, year: int):
         | extract('year', models.MergedPO.date_pac_ok) == year
     ).group_by("month").order_by("month").all()
 
-    return [{
-        "month": r.month,
-        "total_po_value": r.total_po_value or 0,
-        "total_paid": r.total_paid or 0
-    } for r in results]
+    return [{"month": r.month, "total_po_value": r.total_po_value or 0, "total_paid": r.total_paid or 0} for r in results]
+
+def get_yearly_chart_data(db: Session, year: int):
+    results = db.query(
+        extract('month', models.MergedPO.publish_date).label("month"),
+        func.sum(models.MergedPO.line_amount_hw).label("total_po_value"),
+        (func.sum(models.MergedPO.accepted_ac_amount) + func.sum(models.MergedPO.accepted_pac_amount)).label("total_paid")
+    ).filter(
+        extract('year', models.MergedPO.publish_date) == year
+    ).group_by("month").order_by("month").all()
+
+    return [{"month": r.month, "total_po_value": r.total_po_value or 0, "total_paid": r.total_paid or 0} for r in results]
