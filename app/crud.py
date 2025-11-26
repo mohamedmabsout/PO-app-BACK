@@ -8,6 +8,7 @@ from sqlalchemy.orm import joinedload,Query
 import sqlalchemy as sa
 from sqlalchemy import func, case, extract, and_
 from sqlalchemy.sql.functions import coalesce # More explicit import
+from sqlalchemy.orm import aliased
 
 PAYMENT_TERM_MAP = {
     "【TT】▍AC1 (80.00%, INV AC -15D, Complete 80%) / AC2 (20.00%, INV AC -15D, Complete 100%) ▍": "AC1 80 | PAC 20",
@@ -533,6 +534,7 @@ def process_acceptance_dataframe(db: Session, acceptance_df: pd.DataFrame):
             req_qty = merged_po_to_update.requested_qty or 0
             agg_acceptance_qty = acceptance_row['acceptance_qty']
             latest_processed_date = acceptance_row['application_processed_date'].date() if pd.notna(acceptance_row['application_processed_date']) else None
+            payment_term = merged_po_to_update.payment_term
             shipment_no = acceptance_row['shipment_no']
 
             # Deduce and Update Category
@@ -718,18 +720,58 @@ def get_po_value_by_category(db: Session):
     # Now, the Python part is much simpler because the data is already clean.
     # The 'row' object will have attributes 'category_name' and 'total_value'.
     return [{"category": row.category_name, "value": row.total_value or 0} for row in results]
-def get_financial_summary_for_year(db: Session, year: int) -> dict:
-    """Calculates the financial summary for a specific year based on 'publish_date'."""
+def get_financial_summary_by_period(
+    db: Session, 
+    year: int, 
+    month: Optional[int] = None, 
+    week: Optional[int] = None
+) -> dict:
+    """
+    Calculates the financial summary for a specific period (year, month, or week)
+    using the correct date fields for each metric via conditional aggregation.
+    """
     
-    # Base query filtering by year
-    query = db.query(models.MergedPO).filter(
-        func.extract('year', models.MergedPO.publish_date) == year
-    )
+    # --- Define the date filters for each metric ---
+    # We will build a list of conditions for each date column
     
-    # Perform aggregations on the filtered query
-    total_po_value = query.with_entities(func.sum(models.MergedPO.line_amount_hw)).scalar() or 0.0
-    total_accepted_ac = query.with_entities(func.sum(models.MergedPO.accepted_ac_amount)).scalar() or 0.0
-    total_accepted_pac = query.with_entities(func.sum(models.MergedPO.accepted_pac_amount)).scalar() or 0.0
+    # Filter for Total PO Value (based on publish_date)
+    po_date_filters = [extract('year', models.MergedPO.publish_date) == year]
+    
+    # Filter for Accepted AC (based on date_ac_ok)
+    ac_date_filters = [extract('year', models.MergedPO.date_ac_ok) == year]
+    
+    # Filter for Accepted PAC (based on date_pac_ok)
+    pac_date_filters = [extract('year', models.MergedPO.date_pac_ok) == year]
+
+    # Add month or week filters if they are provided
+    if month:
+        po_date_filters.append(extract('month', models.MergedPO.publish_date) == month)
+        ac_date_filters.append(extract('month', models.MergedPO.date_ac_ok) == month)
+        pac_date_filters.append(extract('month', models.MergedPO.date_pac_ok) == month)
+
+    if week:
+        po_date_filters.append(extract('week', models.MergedPO.publish_date) == week)
+        ac_date_filters.append(extract('week', models.MergedPO.date_ac_ok) == week)
+        pac_date_filters.append(extract('week', models.MergedPO.date_pac_ok) == week)
+
+    # --- Perform the conditional aggregation in a single, efficient query ---
+    summary = db.query(
+        # 1. Sum line_amount_hw IF its publish_date matches the period
+        func.sum(case((and_(*po_date_filters), models.MergedPO.line_amount_hw), else_=0)).label("total_po_value"),
+        
+        # 2. Sum accepted_ac_amount IF its date_ac_ok matches the period
+        func.sum(case((and_(*ac_date_filters), models.MergedPO.accepted_ac_amount), else_=0)).label("total_accepted_ac"),
+        
+        # 3. Sum accepted_pac_amount IF its date_pac_ok matches the period
+        func.sum(case((and_(*pac_date_filters), models.MergedPO.accepted_pac_amount), else_=0)).label("total_accepted_pac")
+        
+    ).one() # .one() executes the query and returns the single row of results
+
+    # Process the results (this part is the same)
+    total_po_value = summary.total_po_value or 0.0
+    total_accepted_ac = summary.total_accepted_ac or 0.0
+    total_accepted_pac = summary.total_accepted_pac or 0.0
+    
     remaining_gap = total_po_value - (total_accepted_ac + total_accepted_pac)
     
     return {
@@ -737,73 +779,95 @@ def get_financial_summary_for_year(db: Session, year: int) -> dict:
         "total_accepted_ac": total_accepted_ac,
         "total_accepted_pac": total_accepted_pac,
         "remaining_gap": remaining_gap,
-        
     }
 
 
-def get_financial_summary_for_month(db: Session, year: int, month: int) -> dict:
-    """Calculates the financial summary for a specific month and year."""
-    
-    query = db.query(models.MergedPO).filter(
-        func.extract('year', models.MergedPO.publish_date) == year,
-        func.extract('month', models.MergedPO.publish_date) == month
-    )
-    
-    total_po_value = query.with_entities(func.sum(models.MergedPO.line_amount_hw)).scalar() or 0.0
-    total_accepted_ac = query.with_entities(func.sum(models.MergedPO.accepted_ac_amount)).scalar() or 0.0
-    total_accepted_pac = query.with_entities(func.sum(models.MergedPO.accepted_pac_amount)).scalar() or 0.0
-    
-    remaining_gap = total_po_value - (total_accepted_ac + total_accepted_pac)
-    
-    return {
-        "total_po_value": total_po_value,
-        "total_accepted_ac": total_accepted_ac,
-        "total_accepted_pac": total_accepted_pac,
-        "remaining_gap": remaining_gap,
-        
-    }
-
-
-def get_financial_summary_for_week(db: Session, year: int, week: int) -> dict:
-    """Calculates the financial summary for a specific week and year."""
-    
-    # 'week' in PostgreSQL/SQLAlchemy returns the week number (1-53)
-    query = db.query(models.MergedPO).filter(
-        func.extract('year', models.MergedPO.publish_date) == year,
-        func.extract('week', models.MergedPO.publish_date) == week
-    )
-    
-    total_po_value = query.with_entities(func.sum(models.MergedPO.line_amount_hw)).scalar() or 0.0
-    total_accepted_ac = query.with_entities(func.sum(models.MergedPO.accepted_ac_amount)).scalar() or 0.0
-    total_accepted_pac = query.with_entities(func.sum(models.MergedPO.accepted_pac_amount)).scalar() or 0.0
-    
-    remaining_gap = total_po_value - (total_accepted_ac + total_accepted_pac)
-    
-    return {
-        "total_po_value": total_po_value,
-        "total_accepted_ac": total_accepted_ac,
-        "total_accepted_pac": total_accepted_pac,
-        "remaining_gap": remaining_gap,
-        
-    }
-def get_yearly_chart_data(db: Session, year: int):
-    results = db.query(
-        extract('month', models.MergedPO.publish_date).label("month"),
-        func.sum(models.MergedPO.line_amount_hw).label("total_po_value"),
-        (func.sum(models.MergedPO.accepted_ac_amount) + func.sum(models.MergedPO.accepted_pac_amount)).label("total_paid")
-    ).filter(
-        extract('year', models.MergedPO.publish_date) == year
-    ).group_by("month").order_by("month").all()
-
-    return [{"month": r.month, "total_po_value": r.total_po_value or 0, "total_paid": r.total_paid or 0} for r in results]
+# --- Also, let's fix the get_yearly_chart_data function ---
 
 def get_yearly_chart_data(db: Session, year: int):
-    results = db.query(
-        extract('month', models.MergedPO.publish_date).label("month"),
-        func.sum(models.MergedPO.line_amount_hw).label("total_po_value"),
-        (func.sum(models.MergedPO.accepted_ac_amount) + func.sum(models.MergedPO.accepted_pac_amount)).label("total_paid")
+    # We need to get data for all 12 months
+    months = db.query(
+        extract('month', models.MergedPO.publish_date).label("month")
     ).filter(
         extract('year', models.MergedPO.publish_date) == year
-    ).group_by("month").order_by("month").all()
+    ).distinct().all()
 
-    return [{"month": r.month, "total_po_value": r.total_po_value or 0, "total_paid": r.total_paid or 0} for r in results]
+    monthly_data = []
+    for month_row in months:
+        month = month_row.month
+        if not month: continue
+
+        # For each month, run our powerful conditional aggregation
+        summary = get_financial_summary_by_period(db=db, year=year, month=month)
+        
+        total_paid = summary["total_accepted_ac"] + summary["total_accepted_pac"]
+        monthly_data.append({
+            "month": month,
+            "total_po_value": summary["total_po_value"],
+            "total_paid": total_paid
+        })
+        
+    return sorted(monthly_data, key=lambda x: x['month'])
+def get_export_dataframe(
+    db: Session,
+    internal_project_id: Optional[int] = None,
+    customer_project_id: Optional[int] = None,
+    site_code: Optional[str] = None,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    search: Optional[str] = None
+) -> pd.DataFrame:
+    """
+    Constructs a specific query for the Excel export, joining tables to get all
+    necessary names and selecting columns in the correct order.
+    """
+    # Create aliases for our joined tables to make the query clearer
+    CustProj = aliased(models.CustomerProject)
+    IntProj = aliased(models.InternalProject)
+    
+    # 1. Define the exact columns we want to SELECT in the final export
+    query = db.query(
+        IntProj.name.label("Internal Project"),
+        CustProj.name.label("Customer Project"),
+        models.MergedPO.site_code.label("Site Code"),
+        models.MergedPO.po_id.label("PO ID"),
+        models.MergedPO.po_no.label("PO No."),
+        models.MergedPO.po_line_no.label("PO Line No."),
+        models.MergedPO.item_description.label("Item Description"),
+        models.MergedPO.category.label("Category"),
+        models.MergedPO.publish_date.label("Publish Date"),
+        models.MergedPO.line_amount_hw.label("Line Amount"),
+        models.MergedPO.accepted_ac_amount.label("Accepted AC Amount"),
+        models.MergedPO.date_ac_ok.label("Date AC OK"),
+        models.MergedPO.accepted_pac_amount.label("Accepted PAC Amount"),
+        models.MergedPO.date_pac_ok.label("Date PAC OK")
+    ).select_from(models.MergedPO).join(
+        CustProj, models.MergedPO.customer_project_id == CustProj.id
+    ).join(
+        IntProj, CustProj.internal_project_id == IntProj.id
+    )
+
+    # 2. Apply the same filters as before
+    if internal_project_id:
+        query = query.filter(IntProj.id == internal_project_id)
+    if customer_project_id:
+        query = query.filter(CustProj.id == customer_project_id)
+    if site_code:
+        query = query.filter(models.MergedPO.site_code == site_code)
+    if start_date:
+        query = query.filter(sa.func.date(models.MergedPO.publish_date) >= start_date)
+    if end_date:
+        query = query.filter(sa.func.date(models.MergedPO.publish_date) <= end_date)
+    if search:
+        search_term = f"%{search}%"
+        query = query.filter(
+            (models.MergedPO.po_id.ilike(search_term)) |
+            (models.MergedPO.item_description.ilike(search_term)) |
+            (IntProj.name.ilike(search_term)) |
+            (CustProj.name.ilike(search_term))
+        )
+
+    # 3. Read the precisely constructed query into a DataFrame
+    df = pd.read_sql(query.statement, db.bind)
+    
+    return df
