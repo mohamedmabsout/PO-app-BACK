@@ -169,6 +169,8 @@ class InternalProjectCreate(BaseModel):
     account_id: Optional[int] = None
     direct_customer_id: Optional[int] = None
     final_customer_id: Optional[int] = None
+class InternalProjectUpdate(InternalProjectCreate):
+    pass
 
 class CustomerProject(BaseModel):
     id: int

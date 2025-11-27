@@ -189,3 +189,13 @@ def get_site_assignment_rules(db: Session = Depends(get_db)):
     Fetch all active site assignment rules.
     """
     return db.query(models.SiteAssignmentRule).all()
+@router.put("/internal/{project_id}", response_model=schemas.InternalProject)
+def update_internal_project(
+    project_id: int, 
+    project: schemas.InternalProjectUpdate, 
+    db: Session = Depends(get_db)
+):
+    updated_project = crud.update_internal_project(db, project_id=project_id, updates=project)
+    if updated_project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return updated_project

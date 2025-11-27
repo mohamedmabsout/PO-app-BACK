@@ -966,3 +966,16 @@ def get_sites_for_internal_project(db: Session, project_id: int):
     ).distinct().all()
     
     return sites
+def update_internal_project(db: Session, project_id: int, updates: schemas.InternalProjectUpdate):
+    db_project = db.query(models.InternalProject).filter(models.InternalProject.id == project_id).first()
+    if not db_project:
+        return None
+    
+    update_data = updates.model_dump(exclude_unset=True)
+    
+    for key, value in update_data.items():
+        setattr(db_project, key, value)
+    
+    db.commit()
+    db.refresh(db_project)
+    return db_project
