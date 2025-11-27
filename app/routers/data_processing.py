@@ -172,7 +172,6 @@ def export_merged_pos_report(
         # 3. Setup Excel Writer
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-            # Write data starting from Row 1 (leaving Row 0 for our custom headers)
             export_df.to_excel(writer, sheet_name="Merged PO Data", startrow=1, header=False, index=False)
 
             workbook = writer.book
@@ -180,82 +179,77 @@ def export_merged_pos_report(
             (max_row, max_col) = export_df.shape
 
             # --- DEFINING FORMATS ---
-
-            # 1. Header Formats
             header_base = {
-                'bold': True,
-                'text_wrap': True,
-                'valign': 'vcenter',
-                'align': 'center',
-                'border': 1
+                'bold': True, 'text_wrap': True, 'valign': 'vcenter', 'align': 'center', 'border': 1
             }
             
-            fmt_header_std = workbook.add_format({**header_base, 'fg_color': '#EEEEEE'}) # Light Gray
-            fmt_header_ac = workbook.add_format({**header_base, 'fg_color': '#93c47d'})  # Darker Green
-            fmt_header_pac = workbook.add_format({**header_base, 'fg_color': '#6d9eeb'}) # Darker Blue
+            fmt_header_std = workbook.add_format({**header_base, 'fg_color': '#EEEEEE'}) # Gray
+            fmt_header_ac = workbook.add_format({**header_base, 'fg_color': '#93c47d'})  # Green
+            fmt_header_pac = workbook.add_format({**header_base, 'fg_color': '#6d9eeb'}) # Blue
+            
+            # NEW: Red Header for Remaining
+            fmt_header_red = workbook.add_format({**header_base, 'fg_color': '#e06666'}) # Darker Red for Header
 
-            # 2. Data Highlight Formats
+            # Data Formats
             fmt_data_ac = workbook.add_format({"bg_color": "#D9EAD3"})  # Light Green
             fmt_data_pac = workbook.add_format({"bg_color": "#CFE2F3"})  # Light Blue
+            
+            # NEW: Red Data Background for Remaining
+            fmt_data_red = workbook.add_format({"bg_color": "#F4CCCC"}) # Light Red
 
             # --- WRITING HEADERS MANUALLY ---
-            
             headers = export_df.columns.tolist()
             
             for col_idx, column_name in enumerate(headers):
-                # Determine color based on column name keywords
-                if "AC" in column_name and "PAC" not in column_name:
+                # 1. Determine Header Style
+                if "Remaining" in column_name:
+                    style = fmt_header_red
+                elif "AC" in column_name and "PAC" not in column_name:
                     style = fmt_header_ac
                 elif "PAC" in column_name:
                     style = fmt_header_pac
                 else:
                     style = fmt_header_std
                 
-                # Write the header
+                # 2. Write Header
                 worksheet.write(0, col_idx, column_name, style)
-                
-                # Optional: Set column width for better readability
                 worksheet.set_column(col_idx, col_idx, 20) 
 
             # --- CONDITIONAL FORMATTING (DATA) ---
-            
-            # We want to format the cells if they are NOT empty (including 0.0)
-            # The range starts at A2
-            
-            # Find column letters for AC and PAC fields
             try:
-                # AC Columns (Amount and Date)
+                # 1. AC Formatting
                 ac_amt_idx = headers.index("Accepted AC Amount")
                 ac_date_idx = headers.index("Date AC OK")
                 
-                # PAC Columns (Amount and Date)
-                pac_amt_idx = headers.index("Accepted PAC Amount")
-                pac_date_idx = headers.index("Date PAC OK")
-
-                # Apply formatting for AC Columns
                 for idx in [ac_amt_idx, ac_date_idx]:
                     col_letter = xl_col_to_name(idx)
-                    range_str = f"{col_letter}2:{col_letter}{max_row + 1}"
-                    
-                    # Rule: Cell Value != "" (This highlights values, including 0, but ignores empty)
-                    worksheet.conditional_format(range_str, {
-                        'type': 'cell',
-                        'criteria': '!=',
-                        'value': '""', 
-                        'format': fmt_data_ac
+                    worksheet.conditional_format(f"{col_letter}2:{col_letter}{max_row + 1}", {
+                        'type': 'cell', 'criteria': '!=', 'value': '""', 'format': fmt_data_ac
                     })
 
-                # Apply formatting for PAC Columns
+                # 2. PAC Formatting
+                pac_amt_idx = headers.index("Accepted PAC Amount")
+                pac_date_idx = headers.index("Date PAC OK")
+                
                 for idx in [pac_amt_idx, pac_date_idx]:
                     col_letter = xl_col_to_name(idx)
-                    range_str = f"{col_letter}2:{col_letter}{max_row + 1}"
-                    
-                    worksheet.conditional_format(range_str, {
-                        'type': 'cell',
-                        'criteria': '!=',
-                        'value': '""',
-                        'format': fmt_data_pac
+                    worksheet.conditional_format(f"{col_letter}2:{col_letter}{max_row + 1}", {
+                        'type': 'cell', 'criteria': '!=', 'value': '""', 'format': fmt_data_pac
                     })
+
+                # 3. NEW: Remaining Amount Formatting (Light Red)
+                # We apply this to the "Remaining Amount" column
+                rem_idx = headers.index("Remaining Amount")
+                col_letter = xl_col_to_name(rem_idx)
+                
+                # Option A: Always color it light red to highlight it's a debt/gap
+                # Option B: Only color if > 0. Let's do > 0 (meaning there is still work to do)
+                worksheet.conditional_format(f"{col_letter}2:{col_letter}{max_row + 1}", {
+                     'type': 'cell', 
+                     'criteria': '>', 
+                     'value': 0, 
+                     'format': fmt_data_red
+                })
 
             except ValueError:
                 print("Warning: Could not find specific AC/PAC columns for formatting.")

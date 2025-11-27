@@ -846,14 +846,11 @@ def get_export_dataframe(
     end_date: Optional[date] = None,
     search: Optional[str] = None
 ) -> pd.DataFrame:
-    """
-    Constructs a specific query for the Excel export.
-    Updated for Site-First Logic.
-    """
+    
     CustProj = aliased(models.CustomerProject)
     IntProj = aliased(models.InternalProject)
     
-    # 1. Select Columns
+    # --- UPDATED SELECT STATEMENT ---
     query = db.query(
         IntProj.name.label("Internal Project"),
         CustProj.name.label("Customer Project"),
@@ -864,12 +861,28 @@ def get_export_dataframe(
         models.MergedPO.item_description.label("Item Description"),
         models.MergedPO.category.label("Category"),
         models.MergedPO.publish_date.label("Publish Date"),
+        
+        # 1. Base Amount
         models.MergedPO.line_amount_hw.label("Line Amount"),
+        
+        # 2. AC Columns (Total 80% vs Accepted)
+        models.MergedPO.total_ac_amount.label("Total AC (80%)"), # Added
         models.MergedPO.accepted_ac_amount.label("Accepted AC Amount"),
         models.MergedPO.date_ac_ok.label("Date AC OK"),
+        
+        # 3. PAC Columns (Total 20% vs Accepted)
+        models.MergedPO.total_pac_amount.label("Total PAC (20%)"), # Added
         models.MergedPO.accepted_pac_amount.label("Accepted PAC Amount"),
-        models.MergedPO.date_pac_ok.label("Date PAC OK")
+        models.MergedPO.date_pac_ok.label("Date PAC OK"),
+
+        # 4. Calculated Remaining (Light Red)
+        # Logic: Line Amount - (Accepted AC + Accepted PAC)
+        (models.MergedPO.line_amount_hw - (
+            func.coalesce(models.MergedPO.accepted_ac_amount, 0) + 
+            func.coalesce(models.MergedPO.accepted_pac_amount, 0)
+        )).label("Remaining Amount")
     ).select_from(models.MergedPO)
+
 
     # 2. Fix Joins
     # Join Customer Project
