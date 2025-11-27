@@ -175,7 +175,13 @@ class CustomerProject(BaseModel):
     name: str
     
     model_config = ConfigDict(from_attributes=True)
-    
+class SiteAssignmentRule(BaseModel):
+    id: int
+    rule_type: str
+    pattern: str
+    internal_project: InternalProject
+
+    model_config = ConfigDict(from_attributes=True)  
 class SiteAssignmentRuleCreate(BaseModel):
     rule_type: str # STARTS_WITH, ENDS_WITH, CONTAINS
     pattern: str
