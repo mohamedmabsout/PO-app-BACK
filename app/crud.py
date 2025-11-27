@@ -263,7 +263,6 @@ def process_and_merge_pos(db: Session):
             db, 
             site_id=po.site_id, 
             site_code=po.site.site_code if po.site else None,
-            customer_project_id=customer_project.id,
             tbd_project_id=tbd_project_id
         )
 
