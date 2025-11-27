@@ -183,3 +183,9 @@ def assign_site_to_internal_project(
         "message": "Site globally assigned successfully", 
         "records_updated": updated_rows
     }
+@router.get("/site-rules", response_model=List[schemas.SiteAssignmentRule])
+def get_site_assignment_rules(db: Session = Depends(get_db)):
+    """
+    Fetch all active site assignment rules.
+    """
+    return db.query(models.SiteAssignmentRule).all()
