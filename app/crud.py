@@ -979,45 +979,6 @@ def get_export_dataframe(
     df = pd.read_sql(query.statement, db.bind)
     return df
 
-def apply_rule_retrospective(db: Session, rule: models.SiteAssignmentRule):
-    """
-    When a new rule is created, this function finds all MergedPOs that are 
-    currently 'To Be Determined' and matches the new rule pattern, 
-    then moves them to the correct project.
-    """
-    # 1. Get TBD Project ID
-    tbd_project = db.query(models.InternalProject).filter_by(name="To Be Determined").first()
-    if not tbd_project:
-        return 0 # Should not happen, but safety first
-    
-    # 2. Start building a query for MergedPOs currently assigned to TBD
-    query = db.query(models.MergedPO).filter(
-        models.MergedPO.internal_project_id == tbd_project.id,
-        models.MergedPO.site_code.isnot(None) # Ensure site code exists
-    )
-    
-    # 3. Apply the pattern filter based on the rule type
-    if rule.rule_type == "STARTS_WITH":
-        # SQLAlchemy .startswith() maps to SQL 'LIKE X%'
-        query = query.filter(models.MergedPO.site_code.startswith(rule.pattern))
-        
-    elif rule.rule_type == "ENDS_WITH":
-        # SQLAlchemy .endswith() maps to SQL 'LIKE %X'
-        query = query.filter(models.MergedPO.site_code.endswith(rule.pattern))
-        
-    elif rule.rule_type == "CONTAINS":
-        # SQLAlchemy .contains() maps to SQL 'LIKE %X%'
-        query = query.filter(models.MergedPO.site_code.contains(rule.pattern))
-
-    # 4. Perform a BULK UPDATE (Very efficient)
-    # synchronize_session=False is required for bulk updates in SQLAlchemy
-    updated_count = query.update(
-        {models.MergedPO.internal_project_id: rule.internal_project_id}, 
-        synchronize_session=False
-    )
-    
-    db.commit()
-    return updated_count
 
 def get_internal_project_by_name(db: Session, name: str):
     return db.query(models.InternalProject).filter(models.InternalProject.name == name).first()
