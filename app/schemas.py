@@ -177,17 +177,28 @@ class CustomerProject(BaseModel):
     name: str
     
     model_config = ConfigDict(from_attributes=True)
-class SiteAssignmentRule(BaseModel):
-    id: int
-    rule_type: str
-    pattern: str
-    internal_project: InternalProject
-
-    model_config = ConfigDict(from_attributes=True)  
 class SiteAssignmentRuleCreate(BaseModel):
-    rule_type: str # STARTS_WITH, ENDS_WITH, CONTAINS
-    pattern: str
-    internal_project_id: int
+    # All criteria are optional, but at least one should ideally be provided
+    starts_with: Optional[str] = None
+    ends_with: Optional[str] = None
+    contains_str: Optional[str] = None
+    
+    customer_project_id: Optional[int] = None
+    
+    min_publish_date: Optional[date] = None
+    max_publish_date: Optional[date] = None
+    
+    priority: int = 1 # Default priority
+    
+    internal_project_id: int # Mandatory target
+
+class SiteAssignmentRule(SiteAssignmentRuleCreate):
+    id: int
+    # We include nested objects for the UI table
+    internal_project: Optional[InternalProject] = None 
+    customer_project: Optional[CustomerProject] = None # Assuming you have a basic schema for this
+    
+    model_config = ConfigDict(from_attributes=True)
 class SiteAllocationCreate(BaseModel):
     site_id: int
     internal_project_id: int

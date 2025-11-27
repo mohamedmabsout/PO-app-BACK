@@ -99,20 +99,33 @@ class CustomerProject(Base):
     merged_pos = relationship("MergedPO", back_populates="customer_project")
 
 
-class SiteAssignmentRule(Base):
-    # RENAMED from ProjectAssignmentRule to reflect it applies to SITES
+class SiteAssignmentRule(Base): # Inherit from Base, not Pydantic BaseModel (Typo fix in concept)
     __tablename__ = 'site_assignment_rules'
     
     id = Column(Integer, primary_key=True, index=True)
     
-    # Rule definition
-    # Changed enum name to avoid conflict with old tables
-    rule_type = Column(Enum("STARTS_WITH", "ENDS_WITH", "CONTAINS", name="site_rule_type_enum"), nullable=False)
-    pattern = Column(String(255), nullable=False)
+    # --- 1. String Pattern Criteria (All Nullable) ---
+    # If a field is NULL, we ignore it. If populated, it MUST match.
+    starts_with = Column(String(100), nullable=True) 
+    ends_with = Column(String(100), nullable=True)
+    contains_str = Column(String(100), nullable=True)
     
-    # The outcome of the rule
+    # --- 2. Context Criteria ---
+    customer_project_id = Column(Integer, ForeignKey("customer_projects.id"), nullable=True)
+    
+    # --- 3. Date Criteria ---
+    min_publish_date = Column(Date, nullable=True)
+    max_publish_date = Column(Date, nullable=True)
+    
+    # --- 4. Logic Control ---
+    priority = Column(Integer, default=1, index=True) # Higher number = Higher priority
+    
+    # --- 5. Outcome ---
     internal_project_id = Column(Integer, ForeignKey("internal_projects.id"), nullable=False)
+    
+    # Relationships
     internal_project = relationship("InternalProject")
+    customer_project = relationship("CustomerProject")
 
 
 class SiteProjectAllocation(Base):

@@ -1,8 +1,8 @@
-"""fresh_schema_v2_site_first
+"""advanced_rules_schema
 
-Revision ID: 191f264aeeed
+Revision ID: 9b3fe32c3034
 Revises: 
-Create Date: 2025-11-27 10:02:28.667149
+Create Date: 2025-11-27 21:55:23.181623
 
 """
 from typing import Sequence, Union
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision: str = '191f264aeeed'
+revision: str = '9b3fe32c3034'
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -161,13 +161,20 @@ def upgrade() -> None:
     op.create_index(op.f('ix_raw_purchase_orders_site_id'), 'raw_purchase_orders', ['site_id'], unique=False)
     op.create_table('site_assignment_rules',
     sa.Column('id', sa.Integer(), nullable=False),
-    sa.Column('rule_type', sa.Enum('STARTS_WITH', 'ENDS_WITH', 'CONTAINS', name='site_rule_type_enum'), nullable=False),
-    sa.Column('pattern', sa.String(length=255), nullable=False),
+    sa.Column('starts_with', sa.String(length=100), nullable=True),
+    sa.Column('ends_with', sa.String(length=100), nullable=True),
+    sa.Column('contains_str', sa.String(length=100), nullable=True),
+    sa.Column('customer_project_id', sa.Integer(), nullable=True),
+    sa.Column('min_publish_date', sa.Date(), nullable=True),
+    sa.Column('max_publish_date', sa.Date(), nullable=True),
+    sa.Column('priority', sa.Integer(), nullable=True),
     sa.Column('internal_project_id', sa.Integer(), nullable=False),
+    sa.ForeignKeyConstraint(['customer_project_id'], ['customer_projects.id'], ),
     sa.ForeignKeyConstraint(['internal_project_id'], ['internal_projects.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
     op.create_index(op.f('ix_site_assignment_rules_id'), 'site_assignment_rules', ['id'], unique=False)
+    op.create_index(op.f('ix_site_assignment_rules_priority'), 'site_assignment_rules', ['priority'], unique=False)
     op.create_table('site_project_allocations',
     sa.Column('id', sa.Integer(), nullable=False),
     sa.Column('customer_project_id', sa.Integer(), nullable=False),
@@ -226,6 +233,7 @@ def downgrade() -> None:
     op.drop_table('merged_pos')
     op.drop_index(op.f('ix_site_project_allocations_id'), table_name='site_project_allocations')
     op.drop_table('site_project_allocations')
+    op.drop_index(op.f('ix_site_assignment_rules_priority'), table_name='site_assignment_rules')
     op.drop_index(op.f('ix_site_assignment_rules_id'), table_name='site_assignment_rules')
     op.drop_table('site_assignment_rules')
     op.drop_index(op.f('ix_raw_purchase_orders_site_id'), table_name='raw_purchase_orders')

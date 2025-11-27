@@ -170,44 +170,107 @@ def get_internal_project_id_from_rules(db: Session, customer_project_name: str, 
 
 
 
-def resolve_internal_project(db: Session, site_id: int, site_code: str, tbd_project_id: int):
+def resolve_internal_project(
+    db: Session, 
+    site_id: int, 
+    site_code: str, 
+    publish_date: datetime, 
+    customer_project_id: int,
+    tbd_project_id: int
+):
     """
-    Decides the Internal Project for a Site.
-    Updated: Looks for Site Allocations GLOBALLY (ignoring Customer Project).
-    Priority: Manual Allocation > Pattern Rule > TBD
+    Advanced Matching Logic:
+    1. Manual Override (Global Site Allocation)
+    2. Rules (Ordered by Priority DESC) -> First full match wins
+    3. Default (TBD)
     """
-    if not site_id:
-        return tbd_project_id
+    
+    # 1. Manual Override (Highest Priority)
+    if site_id:
+        allocation = db.query(models.SiteProjectAllocation).filter(
+            models.SiteProjectAllocation.site_id == site_id
+        ).first()
+        if allocation:
+            return allocation.internal_project_id
 
-    # 1. Check for Manual Allocation (Global for this Site)
-    # We take the first one found, assuming a site belongs to one PM.
-    allocation = db.query(models.SiteProjectAllocation).filter(
-        models.SiteProjectAllocation.site_id == site_id
-    ).first()
-
-    if allocation:
-        return allocation.internal_project_id
-
-    # 2. Check for Pattern Rules (if no site code, skip)
     if not site_code:
         return tbd_project_id
-        
-    rules = db.query(models.SiteAssignmentRule).all()
-    
-    for rule in rules:
-        match = False
-        if rule.rule_type == "STARTS_WITH" and site_code.startswith(rule.pattern):
-            match = True
-        elif rule.rule_type == "ENDS_WITH" and site_code.endswith(rule.pattern):
-            match = True
-        elif rule.rule_type == "CONTAINS" and rule.pattern in site_code:
-            match = True
-            
-        if match:
-            return rule.internal_project_id
 
-    # 3. Fallback
+    # 2. Fetch Rules ordered by Priority (Highest first)
+    # Optimization: In a huge system, cache this list in Redis or memory
+    rules = db.query(models.SiteAssignmentRule).order_by(
+        models.SiteAssignmentRule.priority.desc()
+    ).all()
+
+    # 3. Iterate and Check Conditions
+    for rule in rules:
+        # A. String Checks
+        if rule.starts_with and not site_code.startswith(rule.starts_with):
+            continue # Fail
+        if rule.ends_with and not site_code.endswith(rule.ends_with):
+            continue # Fail
+        if rule.contains_str and rule.contains_str not in site_code:
+            continue # Fail
+            
+        # B. Context Checks
+        if rule.customer_project_id and rule.customer_project_id != customer_project_id:
+            continue # Fail
+            
+        # C. Date Checks (Comparing Date vs DateTime, strictly need .date())
+        p_date = publish_date.date() if isinstance(publish_date, datetime) else publish_date
+        
+        if rule.min_publish_date and p_date and p_date < rule.min_publish_date:
+            continue
+        if rule.max_publish_date and p_date and p_date > rule.max_publish_date:
+            continue
+
+        # If we survived all checks, this is the winner!
+        return rule.internal_project_id
+
+    # 4. No rule matched -> TBD
     return tbd_project_id
+def apply_rule_retrospective(db: Session, rule: models.SiteAssignmentRule):
+    """
+    Re-evaluates TBD items against the SPECIFIC new rule.
+    """
+    tbd_project = db.query(models.InternalProject).filter_by(name="To Be Determined").first()
+    if not tbd_project: return 0
+
+    # 1. Get candidate POs (Only TBD ones to save performance)
+    candidates = db.query(models.MergedPO).filter(
+        models.MergedPO.internal_project_id == tbd_project.id
+    ).all()
+
+    updates = []
+    
+    # 2. Python-side Check
+    for po in candidates:
+        # Check String patterns
+        if rule.starts_with and not (po.site_code and po.site_code.startswith(rule.starts_with)): continue
+        if rule.ends_with and not (po.site_code and po.site_code.endswith(rule.ends_with)): continue
+        if rule.contains_str and not (po.site_code and rule.contains_str in po.site_code): continue
+        
+        # Check Context
+        if rule.customer_project_id and po.customer_project_id != rule.customer_project_id: continue
+        
+        # Check Dates
+        p_date = po.publish_date.date() if po.publish_date else None
+        if rule.min_publish_date and (not p_date or p_date < rule.min_publish_date): continue
+        if rule.max_publish_date and (not p_date or p_date > rule.max_publish_date): continue
+        
+        # Match Found!
+        updates.append(po.id)
+
+    # 3. Bulk Update
+    if updates:
+        db.query(models.MergedPO).filter(models.MergedPO.id.in_(updates)).update(
+            {models.MergedPO.internal_project_id: rule.internal_project_id},
+            synchronize_session=False
+        )
+        db.commit()
+    
+    return len(updates)
+
 
 def process_and_merge_pos(db: Session):
     # 1. Ensure "To Be Determined" Project exists
@@ -257,14 +320,16 @@ def process_and_merge_pos(db: Session):
         customer_project = all_cust_projs_map.get(po.project_code)
         if not customer_project: continue
 
-        # --- THE KEY CHANGE IS HERE ---
-        # We determine the project based on the SITE CODE + Rules
         final_internal_project_id = resolve_internal_project(
             db, 
             site_id=po.site_id, 
             site_code=po.site.site_code if po.site else None,
+            # NEW ARGUMENTS PASSED HERE:
+            publish_date=po.publish_date,
+            customer_project_id=customer_project.id,
             tbd_project_id=tbd_project_id
         )
+
 
         if po_id in existing_merged_map:
             # UPDATE
