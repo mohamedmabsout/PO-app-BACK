@@ -52,10 +52,8 @@ total_rows=0
         column_mapping = {
             'ShipmentNO.': 'shipment_no', 'AcceptanceQty': 'acceptance_qty', 'ApplicationProcessed': 'application_processed_date',
             'PONo.': 'po_no', 'POLineNo.': 'po_line_no', 
-
         }
         acceptance_df.rename(columns=column_mapping, inplace=True)
-        
         # Basic validation and type conversion
         acceptance_df['application_processed_date'] = pd.to_datetime(acceptance_df['application_processed_date'])
         numeric_cols = [
