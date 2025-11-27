@@ -10,6 +10,9 @@ class UserRole(str, enum.Enum):
     ADMIN = "Admin"
 
 class ProjectType(str, enum.Enum):
+    FIXED_PRICE = "Fixed Price"
+    TIME_MATERIAL = "Time & Material"
     INTERNAL = "Internal"
-    CUSTOMER_FIXED_PRICE = "Customer - Fixed Price"
-    CUSTOMER_TIME_MATERIAL = "Customer - Time & Material"
+    # Add this line:
+    TBD = "TBD"
+    

@@ -72,3 +72,76 @@ def delete_project_endpoint(
     
     crud.delete_project(db=db, project_id=project_id)
     return {"ok": True} # Or just an empty response with 204
+
+@router.post("/site-rules", response_model=dict) # Change response model to return stats
+def create_site_assignment_rule(
+    rule: schemas.SiteAssignmentRuleCreate, 
+    db: Session = Depends(get_db)
+):
+    # 1. Create and Save the Rule
+    db_rule = models.SiteAssignmentRule(**rule.model_dump())
+    db.add(db_rule)
+    db.commit()
+    db.refresh(db_rule)
+    
+    # 2. TRIGGER RE-EVALUATION
+    # Immediately apply this rule to existing TBD data
+    affected_rows = crud.apply_rule_retrospective(db, db_rule)
+    
+    return {
+        "message": "Rule created successfully",
+        "rule_id": db_rule.id,
+        "affected_existing_pos": affected_rows # Tell the frontend how many items moved
+    }
+@router.post("/assign-site", response_model=dict)
+def assign_site_to_internal_project(
+    allocation_data: schemas.SiteAllocationCreate, 
+    db: Session = Depends(get_db)
+):
+    """
+    Manually assigns a Site to an Internal Project.
+    Applies GLOBALLY to all POs with this Site ID.
+    """
+    
+    # 1. Helper: We need a valid customer_project_id to satisfy the DB constraint.
+    # We grab the first one associated with this site from the MergedPO table.
+    # If the site is new and has no POs, we can't assign it yet (or use a placeholder).
+    sample_po = db.query(models.MergedPO).filter(
+        models.MergedPO.site_id == allocation_data.site_id
+    ).first()
+    
+    # Fallback ID if no POs exist (Use ID 1 or handle error)
+    # Ideally, you only assign sites that have data.
+    cust_proj_id = sample_po.customer_project_id if sample_po else 1 
+
+    # 2. Update or Create the Allocation Record
+    existing_allocation = db.query(models.SiteProjectAllocation).filter(
+        models.SiteProjectAllocation.site_id == allocation_data.site_id
+    ).first()
+
+    if existing_allocation:
+        existing_allocation.internal_project_id = allocation_data.internal_project_id
+    else:
+        new_allocation = models.SiteProjectAllocation(
+            site_id=allocation_data.site_id,
+            internal_project_id=allocation_data.internal_project_id,
+            customer_project_id=cust_proj_id # Just to satisfy the DB column
+        )
+        db.add(new_allocation)
+    
+    db.commit()
+
+    # 3. GLOBAL UPDATE: Move all POs for this site to the new Project
+    updated_rows = db.query(models.MergedPO).filter(
+        models.MergedPO.site_id == allocation_data.site_id
+    ).update(
+        {models.MergedPO.internal_project_id: allocation_data.internal_project_id},
+        synchronize_session=False
+    )
+    
+    db.commit()
+
+    return {
+        "message": "Site globally assigned successfully", 
+        "records_updated": updated_rows
+    }

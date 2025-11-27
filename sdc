@@ -29,7 +29,7 @@ DELETE FROM merged_pos;
 DELETE FROM raw_purchase_orders;
 DELETE FROM raw_acceptances;
 DELETE FROM sites;
-DELETE FROM project_assignment_rules;
+DELETE FROM customer_projects;
 DELETE FROM internal_projects;
 
 

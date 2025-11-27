@@ -142,13 +142,23 @@ class InternalProject(BaseModel):
 class CustomerProject(BaseModel):
     id: int
     name: str
-    internal_project: InternalProject
+    
     model_config = ConfigDict(from_attributes=True)
+    
+class SiteAssignmentRuleCreate(BaseModel):
+    rule_type: str # STARTS_WITH, ENDS_WITH, CONTAINS
+    pattern: str
+    internal_project_id: int
+class SiteAllocationCreate(BaseModel):
+    site_id: int
+    internal_project_id: int
 
 class MergedPOBase(BaseModel):
     po_id: str
     customer_project: CustomerProject # This will be a nested object
     site_code: Optional[str] = None
+    internal_project: Optional[InternalProject] = None 
+
     po_no: str
     po_line_no: int
     item_description: Optional[str] = None
@@ -162,7 +172,7 @@ class MergedPOBase(BaseModel):
     total_ac_amount: Optional[float] = None
     accepted_ac_amount: Optional[float] = None
     date_ac_ok: Optional[date] = None
-    
+  
     total_pac_amount: Optional[float] = None
     accepted_pac_amount: Optional[float] = None
     date_pac_ok: Optional[date] = None

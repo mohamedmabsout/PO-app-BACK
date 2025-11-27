@@ -52,6 +52,7 @@ class Site(Base):
     __tablename__ = 'sites'
     id = Column(Integer, primary_key=True, index=True)
     site_code = Column(String(300), unique=True, index=True, nullable=False)
+    site_name = Column(String(300), nullable=True) # Optional: nice to have
 
 class InternalProject(Base):
     __tablename__ = 'internal_projects'
@@ -59,16 +60,12 @@ class InternalProject(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(255), unique=True, index=True, nullable=False)
     
-    # --- CHANGE 1: Use the Enum for project_type ---
+    # Use your existing Enum
     project_type = Column(Enum(ProjectType))
     
     start_date = Column(Date)
     plan_end_date = Column(Date)
     has_extension_possibility = Column(Boolean, default=False)
-    
-    # We are removing 'project_manager_name'
-    #project_manager_name = Column(String(255)) 
-    
     forecast_plan_details = Column(String(1000))
     budget_assigned = Column(Float)
     budget_period = Column(String(50))
@@ -77,41 +74,40 @@ class InternalProject(Base):
     account_id = Column(Integer, ForeignKey("accounts.id"), nullable=True)
     direct_customer_id = Column(Integer, ForeignKey("customers.id"), nullable=True)
     final_customer_id = Column(Integer, ForeignKey("customers.id"), nullable=True)
-
-    # --- CHANGE 2: Add a ForeignKey to the User table ---
     project_manager_id = Column(Integer, ForeignKey("users.id"), nullable=True)
 
-    # SQLAlchemy relationship attributes
     account = relationship("Account")
     direct_customer = relationship("Customer", foreign_keys=[direct_customer_id])
     final_customer = relationship("Customer", foreign_keys=[final_customer_id])
     project_manager = relationship("User")
-    customer_projects = relationship("CustomerProject", back_populates="internal_project")
-    merged_pos = relationship(
-        "MergedPO",
-        secondary="customer_projects",
-        primaryjoin="InternalProject.id == CustomerProject.internal_project_id",
-        secondaryjoin="CustomerProject.id == MergedPO.customer_project_id",
-        viewonly=True
-    )
+
+    # --- CRITICAL FIX: REMOVED customer_projects relationship ---
+    # Since CustomerProject no longer has a foreign key to this table, 
+    # this relationship cannot exist.
+    
+    # Direct link to Merged POs
+    merged_pos = relationship("MergedPO", back_populates="internal_project")
+
 
 class CustomerProject(Base):
     __tablename__ = 'customer_projects'
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(255), unique=True, index=True, nullable=False)
     
-    # The crucial link UP to the parent InternalProject
-    internal_project_id = Column(Integer, ForeignKey("internal_projects.id"), nullable=False)
-    internal_project = relationship("InternalProject", back_populates="customer_projects")
+    # Correct: No internal_project_id here anymore.
+    
+    merged_pos = relationship("MergedPO", back_populates="customer_project")
 
 
-class ProjectAssignmentRule(Base):
-    __tablename__ = 'project_assignment_rules'
+class SiteAssignmentRule(Base):
+    # RENAMED from ProjectAssignmentRule to reflect it applies to SITES
+    __tablename__ = 'site_assignment_rules'
     
     id = Column(Integer, primary_key=True, index=True)
     
     # Rule definition
-    rule_type = Column(Enum("STARTS_WITH", "ENDS_WITH", "CONTAINS", name="rule_type_enum"), nullable=False)
+    # Changed enum name to avoid conflict with old tables
+    rule_type = Column(Enum("STARTS_WITH", "ENDS_WITH", "CONTAINS", name="site_rule_type_enum"), nullable=False)
     pattern = Column(String(255), nullable=False)
     
     # The outcome of the rule
@@ -119,42 +115,57 @@ class ProjectAssignmentRule(Base):
     internal_project = relationship("InternalProject")
 
 
+class SiteProjectAllocation(Base):
+    """
+    Manual Overrides: "Specific Site ID X belongs to Project Y, ignoring rules."
+    """
+    __tablename__ = "site_project_allocations"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    
+    customer_project_id = Column(Integer, ForeignKey("customer_projects.id"), nullable=False)
+    site_id = Column(Integer, ForeignKey("sites.id"), nullable=False)
+    internal_project_id = Column(Integer, ForeignKey("internal_projects.id"), nullable=False)
+
+    internal_project = relationship("InternalProject")
+    site = relationship("Site")
+
 
 class RawPurchaseOrder(Base):
-    __tablename__ = 'raw_purchase_orders' # A NEW table for raw data
+    __tablename__ = 'raw_purchase_orders'
 
     id = Column(Integer, primary_key=True, index=True)
     po_status = Column(String(50))
     unit_price = Column(Float)
     line_amount = Column(Float)
-    po_no = Column(String(100), index=True) # Index this for faster lookups
+    po_no = Column(String(100), index=True)
     po_line_no = Column(Integer)
-    item_description = Column(String(500), nullable=True) # New field for description
+    item_description = Column(String(500), nullable=True)
     requested_qty = Column(Float)
     publish_date = Column(DateTime)
-    payment_terms_raw = Column(String(500), nullable=True) # New field for the raw text
-    # Store IDs, not names
-    project_code = Column(String(260), nullable=True, index=True) # From Excel
+    payment_terms_raw = Column(String(500), nullable=True)
+    
+    project_code = Column(String(260), nullable=True, index=True)
+    
+    # Note: These are nullable because raw data might not match perfectly immediately
     internal_project_id = Column(Integer, ForeignKey("internal_projects.id"), nullable=True, index=True)
     site_id = Column(Integer, ForeignKey("sites.id"), nullable=True, index=True)
-    customer_id = Column(Integer, ForeignKey("customers.id"), nullable=True, index=True) # Assuming 'Customer' column in Excel
+    customer_id = Column(Integer, ForeignKey("customers.id"), nullable=True, index=True)
 
-    # Relationships to fetch the full objects
     internal_project = relationship("InternalProject")
     site = relationship("Site")
     customer = relationship("Customer")
-    # ----------------------------------------
     
     is_processed = Column(Boolean, default=False, index=True)
     uploaded_at = Column(DateTime, default=datetime.datetime.utcnow)
     uploader_id = Column(Integer, ForeignKey("users.id"))
     uploader = relationship("User")
 
+
 class RawAcceptance(Base):
     __tablename__ = "raw_acceptances"
     id = Column(Integer, primary_key=True, index=True)
     
-    # Columns from your Acceptance Excel file
     po_no = Column(String(100), index=True)
     po_line_no = Column(Integer)
     shipment_no = Column(Integer)
@@ -164,44 +175,42 @@ class RawAcceptance(Base):
     is_processed = Column(Boolean, default=False, index=True)
     uploaded_at = Column(DateTime, default=datetime.datetime.now(datetime.timezone.utc))
     
-    # Link to the user who uploaded it
     uploader_id = Column(Integer, ForeignKey("users.id"))
     uploader = relationship("User")
-
 
 
 class MergedPO(Base):
     __tablename__ = "merged_pos"
     id = Column(Integer, primary_key=True, index=True)
-    # --- NEW & TRANSFORMED FIELDS ---
-    po_id = Column(String(255), unique=True, index=True) # "PO NO - PO LINE"
+    
+    po_id = Column(String(255), unique=True, index=True)
     raw_po_id = Column(Integer, ForeignKey("raw_purchase_orders.id"), unique=True)
     raw_po = relationship("RawPurchaseOrder", backref="merged_po")
     
+    # --- RELATIONSHIPS (Corrected with back_populates) ---
     customer_project_id = Column(Integer, ForeignKey("customer_projects.id"), nullable=False)
-    customer_project = relationship("CustomerProject")
-    internal_project = relationship(
-        "InternalProject",
-        secondary="customer_projects", # The name of the intermediary table
-        primaryjoin="MergedPO.customer_project_id == CustomerProject.id",
-        secondaryjoin="CustomerProject.internal_project_id == InternalProject.id",
-        viewonly=True, # This relationship is for reading data, not writing
-        back_populates="merged_pos" # Assuming you add a relationship on InternalProject
-    )
+    customer_project = relationship("CustomerProject", back_populates="merged_pos")
+
+    # This is the computed field (Based on Rule or Manual Override)
+    internal_project_id = Column(Integer, ForeignKey("internal_projects.id"), nullable=True)
+    internal_project = relationship("InternalProject", back_populates="merged_pos") 
+    
     site_id = Column(Integer, ForeignKey("sites.id"), nullable=True)
+    site = relationship("Site")
+
     project_name = Column(String(255), nullable=True)   
     site_code = Column(String(100), nullable=True)
     po_no = Column(String(100), index=True)
     po_line_no = Column(Integer)
     item_description = Column(String(500), nullable=True)
-    payment_term = Column(String(100)) # The abbreviated version
+    payment_term = Column(String(100))
     unit_price = Column(Float)
     requested_qty = Column(Float)
-    internal_control = Column(Integer, default=1) # Defaults to 1
-    line_amount_hw = Column(Float) # The calculated amount
+    internal_control = Column(Integer, default=1)
+    line_amount_hw = Column(Float)
     publish_date = Column(DateTime)
 
-    category = Column(String(100), nullable=True) # For "Service", "Transportation", etc.
+    category = Column(String(100), nullable=True)
     
     total_ac_amount = Column(Float, nullable=True)
     accepted_ac_amount = Column(Float, nullable=True)
@@ -210,7 +219,6 @@ class MergedPO(Base):
     total_pac_amount = Column(Float, nullable=True)
     accepted_pac_amount = Column(Float, nullable=True)
     date_pac_ok = Column(Date, nullable=True)
-    site = relationship("Site")
     
 class UploadHistory(Base):
     __tablename__ = "upload_history"

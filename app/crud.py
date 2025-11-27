@@ -8,7 +8,8 @@ from sqlalchemy.orm import joinedload,Query
 import sqlalchemy as sa
 from sqlalchemy import func, case, extract, and_
 from sqlalchemy.sql.functions import coalesce # More explicit import
-
+from sqlalchemy.orm import aliased
+from .enum import ProjectType   
 PAYMENT_TERM_MAP = {
     "【TT】▍AC1 (80.00%, INV AC -15D, Complete 80%) / AC2 (20.00%, INV AC -15D, Complete 100%) ▍": "AC1 80 | PAC 20",
     "【TT】▍AC1 (80.00%, INV AC -30D, Complete 80%) / AC2 (20.00%, INV AC -30D, Complete 100%) ▍": "AC1 80 | PAC 20",
@@ -167,71 +168,107 @@ def get_internal_project_id_from_rules(db: Session, customer_project_name: str, 
 
 
 
+def resolve_internal_project(db: Session, site_id: int, site_code: str, tbd_project_id: int):
+    """
+    Decides the Internal Project for a Site.
+    Updated: Looks for Site Allocations GLOBALLY (ignoring Customer Project).
+    Priority: Manual Allocation > Pattern Rule > TBD
+    """
+    if not site_id:
+        return tbd_project_id
+
+    # 1. Check for Manual Allocation (Global for this Site)
+    # We take the first one found, assuming a site belongs to one PM.
+    allocation = db.query(models.SiteProjectAllocation).filter(
+        models.SiteProjectAllocation.site_id == site_id
+    ).first()
+
+    if allocation:
+        return allocation.internal_project_id
+
+    # 2. Check for Pattern Rules (if no site code, skip)
+    if not site_code:
+        return tbd_project_id
+        
+    rules = db.query(models.SiteAssignmentRule).all()
+    
+    for rule in rules:
+        match = False
+        if rule.rule_type == "STARTS_WITH" and site_code.startswith(rule.pattern):
+            match = True
+        elif rule.rule_type == "ENDS_WITH" and site_code.endswith(rule.pattern):
+            match = True
+        elif rule.rule_type == "CONTAINS" and rule.pattern in site_code:
+            match = True
+            
+        if match:
+            return rule.internal_project_id
+
+    # 3. Fallback
+    return tbd_project_id
+
 def process_and_merge_pos(db: Session):
-    """
-    Final, robust version: Processes unprocessed RawPurchaseOrders, de-duplicates,
-    applies rules, and inserts/updates the MergedPO table.
-    """
-    # 1. Get the "To Be Determined" project ID
+    # 1. Ensure "To Be Determined" Project exists
     tbd_project = db.query(models.InternalProject).filter_by(name="To Be Determined").first()
     if not tbd_project:
-        tbd_project = models.InternalProject(name="To Be Determined")
+        # Assuming you updated InternalProject to handle Enum or string for project_type
+        tbd_project = models.InternalProject(name="To Be Determined", project_type=ProjectType.TBD) 
         db.add(tbd_project)
         db.commit()
     tbd_project_id = tbd_project.id
 
-    # 2. Query for unprocessed raw POs and EAGERLY LOAD their related Site objects
-    unprocessed_pos_query = db.query(models.RawPurchaseOrder).filter(models.RawPurchaseOrder.is_processed == False)
-    unprocessed_pos = unprocessed_pos_query.options(joinedload(models.RawPurchaseOrder.site)).all()
+    # 2. Fetch Unprocessed Data
+    unprocessed_pos = db.query(models.RawPurchaseOrder).filter(
+        models.RawPurchaseOrder.is_processed == False
+    ).options(joinedload(models.RawPurchaseOrder.site)).all()
     
     if not unprocessed_pos:
         return 0
-    
-    # --- NEW: Hydrate the CustomerProject table ---
-    # 1. Get all unique customer project names from the raw data
+
+    # 3. Hydrate Customer Projects (Just creating labels now)
     customer_project_names = {po.project_code for po in unprocessed_pos if po.project_code}
-    
-    # 2. Find which ones already exist in our CustomerProject table
     existing_cust_projs = {p.name: p for p in db.query(models.CustomerProject).filter(models.CustomerProject.name.in_(customer_project_names)).all()}
     
-    # 3. For the new ones, apply rules and create them
     for name in customer_project_names:
         if name not in existing_cust_projs:
-            internal_project_id = get_internal_project_id_from_rules(db, name, tbd_project_id)
-            new_cust_proj = models.CustomerProject(name=name, internal_project_id=internal_project_id)
+            # Note: No internal_project_id passed here anymore
+            new_cust_proj = models.CustomerProject(name=name)
             db.add(new_cust_proj)
     
-    db.commit() # Commit all new customer projects
-    
-    # 4. Create a final map for lookup: Customer Project Name -> CustomerProject Object
+    db.commit()
     all_cust_projs_map = {p.name: p for p in db.query(models.CustomerProject).filter(models.CustomerProject.name.in_(customer_project_names)).all()}
-    # 3. De-duplicate the raw POs in memory to get the latest version of each line
+
+    # 4. De-duplicate logic (Same as before)
     unique_pos_map = {}
     for po in unprocessed_pos:
         key = (po.po_no, po.po_line_no)
-        # If the key already exists, only replace it if the new one has a later publish date
         if key not in unique_pos_map or po.publish_date > unique_pos_map[key].publish_date:
             unique_pos_map[key] = po
-            
     clean_pos_list = list(unique_pos_map.values())
 
-    # 4. Prepare for batch processing
+    # 5. Process Merge
     po_ids_to_check = [f"{po.po_no}-{po.po_line_no}" for po in clean_pos_list]
     existing_merged_map = {mp.po_id: mp for mp in db.query(models.MergedPO).filter(models.MergedPO.po_id.in_(po_ids_to_check)).all()}
 
-    # 5. Loop through the CLEAN list of PO objects
     for po in clean_pos_list:
         po_id = f"{po.po_no}-{po.po_line_no}"
-        # Get the CustomerProject object from our map
         customer_project = all_cust_projs_map.get(po.project_code)
-        if not customer_project: continue # Skip if no matching customer project was found
+        if not customer_project: continue
 
+        # --- THE KEY CHANGE IS HERE ---
+        # We determine the project based on the SITE CODE + Rules
+        final_internal_project_id = resolve_internal_project(
+            db, 
+            site_id=po.site_id, 
+            site_code=po.site.site_code if po.site else None,
+            customer_project_id=customer_project.id,
+            tbd_project_id=tbd_project_id
+        )
 
-        # --- UPDATE PATH ---
         if po_id in existing_merged_map:
+            # UPDATE
             merged_po = existing_merged_map[po_id]
             
-            # Your critical update logic
             if po.requested_qty == 0:
                 merged_po.requested_qty = 0
                 merged_po.line_amount_hw = 0
@@ -240,41 +277,39 @@ def process_and_merge_pos(db: Session):
                 merged_po.unit_price = po.unit_price
                 merged_po.line_amount_hw = (po.unit_price or 0) * (po.requested_qty or 0)
             
-            # Always update these fields on an update
-            # merged_po.internal_project_id = customer_project.internal_project_id
-            merged_po.customer_project_id = customer_project.id
             merged_po.publish_date = po.publish_date
             merged_po.site_id = po.site_id
             merged_po.site_code = po.site.site_code if po.site else None
-        
-        # --- INSERT PATH ---
+            
+            # Update assignment in case rules changed or site changed
+            merged_po.internal_project_id = final_internal_project_id
+
         else:
+            # INSERT
             new_merged_po = models.MergedPO(
                 po_id=po_id,
                 raw_po_id=po.id,
                 customer_project_id=customer_project.id,
+                internal_project_id=final_internal_project_id, # <--- Assigned here
                 site_id=po.site_id,
-                site_code=po.site.site_code if po.site else None, # We can access this because of `joinedload`
+                site_code=po.site.site_code if po.site else None,
                 po_no=po.po_no,
                 po_line_no=po.po_line_no,
                 item_description=po.item_description,
                 payment_term=PAYMENT_TERM_MAP.get(po.payment_terms_raw, "UNKNOWN"),
                 unit_price=po.unit_price,
                 requested_qty=po.requested_qty,
-                internal_control=1,
                 line_amount_hw=(po.unit_price or 0) * (po.requested_qty or 0),
                 publish_date=po.publish_date,
             )
             db.add(new_merged_po)
 
-    # 6. Mark ALL original unprocessed rows as processed in a single, efficient query
+    # 6. Cleanup
     unprocessed_ids = [po.id for po in unprocessed_pos]
-    if unprocessed_ids: # Ensure the list is not empty
+    if unprocessed_ids:
         db.query(models.RawPurchaseOrder).filter(models.RawPurchaseOrder.id.in_(unprocessed_ids)).update({"is_processed": True})
     
-    # 7. Commit all changes
     db.commit()
-
     return len(clean_pos_list)
 
 def get_all_po_data(db: Session):
@@ -539,6 +574,7 @@ def process_acceptance_dataframe(db: Session, acceptance_df: pd.DataFrame):
             merged_po_to_update.category = deduce_category(merged_po_to_update.item_description)
 
             # --- REVISED AC/PAC CALCULATION LOGIC ---
+            payment_term = merged_po_to_update.payment_term
 
             # Case 1: Processing a Shipment 1 record
             if shipment_no == 1:
@@ -584,24 +620,19 @@ def get_filtered_merged_pos(
     # Start with a base query and eagerly load relationships to prevent N+1 query problem.
     # This makes the API faster.
     query = db.query(models.MergedPO).options(
-        joinedload(models.MergedPO.customer_project).joinedload(models.CustomerProject.internal_project),
+        joinedload(models.MergedPO.customer_project),joinedload(models.MergedPO.internal_project),
         joinedload(models.MergedPO.site)
     )
 
    
     if internal_project_id:
-        # To filter on a related model, you must join it first.
-        # The filter is then applied on the joined model's column.
-        query = query.join(models.CustomerProject).filter(
-            models.CustomerProject.internal_project_id == internal_project_id
-        )
+        # FIX: Filter directly on MergedPO, not via CustomerProject join
+        query = query.filter(models.MergedPO.internal_project_id == internal_project_id)
     
     if customer_project_id:
-        # This filter is on the MergedPO model itself, so it's simpler.
         query = query.filter(models.MergedPO.customer_project_id == customer_project_id)
     
     if site_code:
-        # Your previous logic for site_code was referencing MergedPO, which is correct.
         query = query.filter(models.MergedPO.site_code == site_code)
 
     if start_date:
@@ -613,12 +644,15 @@ def get_filtered_merged_pos(
     if search:
         search_term = f"%{search}%"
         # Search on MergedPO fields AND related fields
-        query = query.join(models.CustomerProject, isouter=True).join(models.InternalProject, isouter=True)
+        # We join explicitly for the search columns
+        query = query.join(models.CustomerProject, isouter=True)\
+                     .join(models.InternalProject, isouter=True) # Direct join
+                     
         query = query.filter(
             (models.MergedPO.po_id.ilike(search_term)) |
             (models.MergedPO.item_description.ilike(search_term)) |
-            (models.InternalProject.name.ilike(search_term)) | # Search by Internal Project name
-            (models.CustomerProject.name.ilike(search_term))   # Search by Customer Project name
+            (models.InternalProject.name.ilike(search_term)) | 
+            (models.CustomerProject.name.ilike(search_term))
         )
         
     return query
@@ -638,18 +672,14 @@ def get_total_financial_summary(db: Session) -> dict:
         "remaining_gap": remaining_gap
     }
 def get_internal_projects_financial_summary(db: Session):
-    # This query groups by the InternalProject.
     results = db.query(
         models.InternalProject.id.label("project_id"),
         models.InternalProject.name.label("project_name"),
         func.sum(models.MergedPO.line_amount_hw).label("total_po_value"),
         (func.sum(models.MergedPO.accepted_ac_amount) + func.sum(models.MergedPO.accepted_pac_amount)).label("total_accepted")
-    ).select_from(models.MergedPO).join(
-        models.CustomerProject
-    ).join(
-        models.InternalProject
-    ).group_by(models.InternalProject.id, models.InternalProject.name).all()
-
+    ).select_from(models.MergedPO)\
+    .join(models.InternalProject, models.MergedPO.internal_project_id == models.InternalProject.id)\
+    .group_by(models.InternalProject.id, models.InternalProject.name).all() 
     summary_list = []
     for row in results:
         po_value = row.total_po_value or 0
@@ -718,18 +748,58 @@ def get_po_value_by_category(db: Session):
     # Now, the Python part is much simpler because the data is already clean.
     # The 'row' object will have attributes 'category_name' and 'total_value'.
     return [{"category": row.category_name, "value": row.total_value or 0} for row in results]
-def get_financial_summary_for_year(db: Session, year: int) -> dict:
-    """Calculates the financial summary for a specific year based on 'publish_date'."""
+def get_financial_summary_by_period(
+    db: Session, 
+    year: int, 
+    month: Optional[int] = None, 
+    week: Optional[int] = None
+) -> dict:
+    """
+    Calculates the financial summary for a specific period (year, month, or week)
+    using the correct date fields for each metric via conditional aggregation.
+    """
     
-    # Base query filtering by year
-    query = db.query(models.MergedPO).filter(
-        func.extract('year', models.MergedPO.publish_date) == year
-    )
+    # --- Define the date filters for each metric ---
+    # We will build a list of conditions for each date column
     
-    # Perform aggregations on the filtered query
-    total_po_value = query.with_entities(func.sum(models.MergedPO.line_amount_hw)).scalar() or 0.0
-    total_accepted_ac = query.with_entities(func.sum(models.MergedPO.accepted_ac_amount)).scalar() or 0.0
-    total_accepted_pac = query.with_entities(func.sum(models.MergedPO.accepted_pac_amount)).scalar() or 0.0
+    # Filter for Total PO Value (based on publish_date)
+    po_date_filters = [extract('year', models.MergedPO.publish_date) == year]
+    
+    # Filter for Accepted AC (based on date_ac_ok)
+    ac_date_filters = [extract('year', models.MergedPO.date_ac_ok) == year]
+    
+    # Filter for Accepted PAC (based on date_pac_ok)
+    pac_date_filters = [extract('year', models.MergedPO.date_pac_ok) == year]
+
+    # Add month or week filters if they are provided
+    if month:
+        po_date_filters.append(extract('month', models.MergedPO.publish_date) == month)
+        ac_date_filters.append(extract('month', models.MergedPO.date_ac_ok) == month)
+        pac_date_filters.append(extract('month', models.MergedPO.date_pac_ok) == month)
+
+    if week:
+        po_date_filters.append(extract('week', models.MergedPO.publish_date) == week)
+        ac_date_filters.append(extract('week', models.MergedPO.date_ac_ok) == week)
+        pac_date_filters.append(extract('week', models.MergedPO.date_pac_ok) == week)
+
+    # --- Perform the conditional aggregation in a single, efficient query ---
+    summary = db.query(
+        # 1. Sum line_amount_hw IF its publish_date matches the period
+        func.sum(case((and_(*po_date_filters), models.MergedPO.line_amount_hw), else_=0)).label("total_po_value"),
+        
+        # 2. Sum accepted_ac_amount IF its date_ac_ok matches the period
+        func.sum(case((and_(*ac_date_filters), models.MergedPO.accepted_ac_amount), else_=0)).label("total_accepted_ac"),
+        
+        # 3. Sum accepted_pac_amount IF its date_pac_ok matches the period
+        func.sum(case((and_(*pac_date_filters), models.MergedPO.accepted_pac_amount), else_=0)).label("total_accepted_pac")
+        
+    ).one() # .one() executes the query and returns the single row of results
+
+    # Process the results (this part is the same)
+    total_po_value = summary.total_po_value or 0.0
+    total_accepted_ac = summary.total_accepted_ac or 0.0
+    total_accepted_pac = summary.total_accepted_pac or 0.0
+    
     remaining_gap = total_po_value - (total_accepted_ac + total_accepted_pac)
     
     return {
@@ -737,73 +807,135 @@ def get_financial_summary_for_year(db: Session, year: int) -> dict:
         "total_accepted_ac": total_accepted_ac,
         "total_accepted_pac": total_accepted_pac,
         "remaining_gap": remaining_gap,
-        
     }
 
 
-def get_financial_summary_for_month(db: Session, year: int, month: int) -> dict:
-    """Calculates the financial summary for a specific month and year."""
-    
-    query = db.query(models.MergedPO).filter(
-        func.extract('year', models.MergedPO.publish_date) == year,
-        func.extract('month', models.MergedPO.publish_date) == month
-    )
-    
-    total_po_value = query.with_entities(func.sum(models.MergedPO.line_amount_hw)).scalar() or 0.0
-    total_accepted_ac = query.with_entities(func.sum(models.MergedPO.accepted_ac_amount)).scalar() or 0.0
-    total_accepted_pac = query.with_entities(func.sum(models.MergedPO.accepted_pac_amount)).scalar() or 0.0
-    
-    remaining_gap = total_po_value - (total_accepted_ac + total_accepted_pac)
-    
-    return {
-        "total_po_value": total_po_value,
-        "total_accepted_ac": total_accepted_ac,
-        "total_accepted_pac": total_accepted_pac,
-        "remaining_gap": remaining_gap,
-        
-    }
-
-
-def get_financial_summary_for_week(db: Session, year: int, week: int) -> dict:
-    """Calculates the financial summary for a specific week and year."""
-    
-    # 'week' in PostgreSQL/SQLAlchemy returns the week number (1-53)
-    query = db.query(models.MergedPO).filter(
-        func.extract('year', models.MergedPO.publish_date) == year,
-        func.extract('week', models.MergedPO.publish_date) == week
-    )
-    
-    total_po_value = query.with_entities(func.sum(models.MergedPO.line_amount_hw)).scalar() or 0.0
-    total_accepted_ac = query.with_entities(func.sum(models.MergedPO.accepted_ac_amount)).scalar() or 0.0
-    total_accepted_pac = query.with_entities(func.sum(models.MergedPO.accepted_pac_amount)).scalar() or 0.0
-    
-    remaining_gap = total_po_value - (total_accepted_ac + total_accepted_pac)
-    
-    return {
-        "total_po_value": total_po_value,
-        "total_accepted_ac": total_accepted_ac,
-        "total_accepted_pac": total_accepted_pac,
-        "remaining_gap": remaining_gap,
-        
-    }
-def get_yearly_chart_data(db: Session, year: int):
-    results = db.query(
-        extract('month', models.MergedPO.publish_date).label("month"),
-        func.sum(models.MergedPO.line_amount_hw).label("total_po_value"),
-        (func.sum(models.MergedPO.accepted_ac_amount) + func.sum(models.MergedPO.accepted_pac_amount)).label("total_paid")
-    ).filter(
-        extract('year', models.MergedPO.publish_date) == year
-    ).group_by("month").order_by("month").all()
-
-    return [{"month": r.month, "total_po_value": r.total_po_value or 0, "total_paid": r.total_paid or 0} for r in results]
+# --- Also, let's fix the get_yearly_chart_data function ---
 
 def get_yearly_chart_data(db: Session, year: int):
-    results = db.query(
-        extract('month', models.MergedPO.publish_date).label("month"),
-        func.sum(models.MergedPO.line_amount_hw).label("total_po_value"),
-        (func.sum(models.MergedPO.accepted_ac_amount) + func.sum(models.MergedPO.accepted_pac_amount)).label("total_paid")
+    # We need to get data for all 12 months
+    months = db.query(
+        extract('month', models.MergedPO.publish_date).label("month")
     ).filter(
         extract('year', models.MergedPO.publish_date) == year
-    ).group_by("month").order_by("month").all()
+    ).distinct().all()
 
-    return [{"month": r.month, "total_po_value": r.total_po_value or 0, "total_paid": r.total_paid or 0} for r in results]
+    monthly_data = []
+    for month_row in months:
+        month = month_row.month
+        if not month: continue
+
+        # For each month, run our powerful conditional aggregation
+        summary = get_financial_summary_by_period(db=db, year=year, month=month)
+        
+        total_paid = summary["total_accepted_ac"] + summary["total_accepted_pac"]
+        monthly_data.append({
+            "month": month,
+            "total_po_value": summary["total_po_value"],
+            "total_paid": total_paid
+        })
+        
+    return sorted(monthly_data, key=lambda x: x['month'])
+def get_export_dataframe(
+    db: Session,
+    internal_project_id: Optional[int] = None,
+    customer_project_id: Optional[int] = None,
+    site_code: Optional[str] = None,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    search: Optional[str] = None
+) -> pd.DataFrame:
+    """
+    Constructs a specific query for the Excel export.
+    Updated for Site-First Logic.
+    """
+    CustProj = aliased(models.CustomerProject)
+    IntProj = aliased(models.InternalProject)
+    
+    # 1. Select Columns
+    query = db.query(
+        IntProj.name.label("Internal Project"),
+        CustProj.name.label("Customer Project"),
+        models.MergedPO.site_code.label("Site Code"),
+        models.MergedPO.po_id.label("PO ID"),
+        models.MergedPO.po_no.label("PO No."),
+        models.MergedPO.po_line_no.label("PO Line No."),
+        models.MergedPO.item_description.label("Item Description"),
+        models.MergedPO.category.label("Category"),
+        models.MergedPO.publish_date.label("Publish Date"),
+        models.MergedPO.line_amount_hw.label("Line Amount"),
+        models.MergedPO.accepted_ac_amount.label("Accepted AC Amount"),
+        models.MergedPO.date_ac_ok.label("Date AC OK"),
+        models.MergedPO.accepted_pac_amount.label("Accepted PAC Amount"),
+        models.MergedPO.date_pac_ok.label("Date PAC OK")
+    ).select_from(models.MergedPO)
+
+    # 2. Fix Joins
+    # Join Customer Project
+    query = query.join(CustProj, models.MergedPO.customer_project_id == CustProj.id)
+    
+    # FIX: Join Internal Project DIRECTLY from MergedPO
+    query = query.join(IntProj, models.MergedPO.internal_project_id == IntProj.id, isouter=True)
+
+    # 3. Apply Filters
+    if internal_project_id:
+        query = query.filter(IntProj.id == internal_project_id)
+    if customer_project_id:
+        query = query.filter(CustProj.id == customer_project_id)
+    if site_code:
+        query = query.filter(models.MergedPO.site_code == site_code)
+    if start_date:
+        query = query.filter(sa.func.date(models.MergedPO.publish_date) >= start_date)
+    if end_date:
+        query = query.filter(sa.func.date(models.MergedPO.publish_date) <= end_date)
+    if search:
+        search_term = f"%{search}%"
+        query = query.filter(
+            (models.MergedPO.po_id.ilike(search_term)) |
+            (models.MergedPO.item_description.ilike(search_term)) |
+            (IntProj.name.ilike(search_term)) |
+            (CustProj.name.ilike(search_term))
+        )
+
+    df = pd.read_sql(query.statement, db.bind)
+    return df
+
+def apply_rule_retrospective(db: Session, rule: models.SiteAssignmentRule):
+    """
+    When a new rule is created, this function finds all MergedPOs that are 
+    currently 'To Be Determined' and matches the new rule pattern, 
+    then moves them to the correct project.
+    """
+    # 1. Get TBD Project ID
+    tbd_project = db.query(models.InternalProject).filter_by(name="To Be Determined").first()
+    if not tbd_project:
+        return 0 # Should not happen, but safety first
+    
+    # 2. Start building a query for MergedPOs currently assigned to TBD
+    query = db.query(models.MergedPO).filter(
+        models.MergedPO.internal_project_id == tbd_project.id,
+        models.MergedPO.site_code.isnot(None) # Ensure site code exists
+    )
+    
+    # 3. Apply the pattern filter based on the rule type
+    if rule.rule_type == "STARTS_WITH":
+        # SQLAlchemy .startswith() maps to SQL 'LIKE X%'
+        query = query.filter(models.MergedPO.site_code.startswith(rule.pattern))
+        
+    elif rule.rule_type == "ENDS_WITH":
+        # SQLAlchemy .endswith() maps to SQL 'LIKE %X'
+        query = query.filter(models.MergedPO.site_code.endswith(rule.pattern))
+        
+    elif rule.rule_type == "CONTAINS":
+        # SQLAlchemy .contains() maps to SQL 'LIKE %X%'
+        query = query.filter(models.MergedPO.site_code.contains(rule.pattern))
+
+    # 4. Perform a BULK UPDATE (Very efficient)
+    # synchronize_session=False is required for bulk updates in SQLAlchemy
+    updated_count = query.update(
+        {models.MergedPO.internal_project_id: rule.internal_project_id}, 
+        synchronize_session=False
+    )
+    
+    db.commit()
+    return updated_count
