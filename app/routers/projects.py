@@ -13,30 +13,42 @@ router = APIRouter(
     tags=["projects"]        # This groups them nicely in the auto-docs
 )
 
-@router.post("/", response_model=schemas.Project)
-def create_new_project(project: schemas.ProjectCreate, db: Session = Depends(get_db)):
-    db_project = crud.get_project_by_name(db, name=project.name)
-    if db_project:
-        raise HTTPException(status_code=400, detail="Project with this name already exists")
-    return crud.create_project(db=db, project=project)
+# @router.post("/", response_model=schemas.Project)
+# def create_new_project(project: schemas.ProjectCreate, db: Session = Depends(get_db)):
+#     db_project = crud.get_project_by_name(db, name=project.name)
+#     if db_project:
+#         raise HTTPException(status_code=400, detail="Project with this name already exists")
+#     return crud.create_project(db=db, project=project)
 
-@router.get("/", response_model=List[schemas.Project]) # Use List from typing
-def read_projects(
-    skip: int = 0, 
-    limit: int = 100, 
-    db: Session = Depends(get_db),
-    # --- THIS IS THE KEY CHANGE ---
-    current_user: models.User = Depends(auth.get_current_user)
-):
-    """
-    Retrieve a list of projects.
-    Only accessible to authenticated users.
-    """
-    projects = crud.get_projects(db, skip=skip, limit=limit)
-    return projects
+# @router.get("/", response_model=List[schemas.Project]) # Use List from typing
+# def read_projects(
+#     skip: int = 0, 
+#     limit: int = 100, 
+#     db: Session = Depends(get_db),
+#     # --- THIS IS THE KEY CHANGE ---
+#     current_user: models.User = Depends(auth.get_current_user)
+# ):
+#     """
+#     Retrieve a list of projects.
+#     Only accessible to authenticated users.
+#     """
+#     projects = crud.get_projects(db, skip=skip, limit=limit)
+#     return projects
 
-@router.get("/all", response_model=List[schemas.Project])
-def read_all_projects(db: Session = Depends(get_db)):
+# @router.get("/all", response_model=List[schemas.Project])
+# def read_all_projects(db: Session = Depends(get_db)):
+#     """
+#     Retrieve ALL projects without pagination.
+#     Ideal for populating filter dropdowns on the frontend.
+#     """
+#     # We will use the existing crud.get_projects but without a limit.
+#     # We can set a very high limit or create a new specific crud function.
+#     # Let's create a new CRUD function for clarity.
+#     return crud.get_all_projects(db=db)
+
+
+@router.get("/all-internal", response_model=List[schemas.InternalProject])
+def read_all_internal_projects(db: Session = Depends(get_db)):
     """
     Retrieve ALL projects without pagination.
     Ideal for populating filter dropdowns on the frontend.
@@ -44,34 +56,60 @@ def read_all_projects(db: Session = Depends(get_db)):
     # We will use the existing crud.get_projects but without a limit.
     # We can set a very high limit or create a new specific crud function.
     # Let's create a new CRUD function for clarity.
-    return crud.get_all_projects(db=db)
-
-
-@router.get("/{project_id}", response_model=schemas.Project)
-def read_project(
-    project_id: int, 
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user) # Optionally protect this too
+    return crud.get_all_internal_projects(db=db)
+@router.post("/internal", response_model=schemas.InternalProject)
+def create_internal_project(
+    project: schemas.InternalProjectCreate, 
+    db: Session = Depends(get_db)
 ):
-    db_project = crud.get_project(db, project_id=project_id)
+    # 1. Check for duplicates
+    db_project = crud.get_internal_project_by_name(db, name=project.name)
+    if db_project:
+        raise HTTPException(status_code=400, detail="Internal Project with this name already exists")
+    
+    # 2. Create
+    return crud.create_internal_project(db=db, project=project)
+
+@router.get("/internal/{project_id}", response_model=schemas.InternalProject)
+def read_internal_project(project_id: int, db: Session = Depends(get_db)):
+    db_project = crud.get_internal_project(db, project_id=project_id)
     if db_project is None:
         raise HTTPException(status_code=404, detail="Project not found")
     return db_project
 
-from starlette import status # Add this import
+@router.get("/internal/{project_id}/sites", response_model=List[schemas.Site])
+def read_internal_project_sites(project_id: int, db: Session = Depends(get_db)):
+    """
+    Returns all sites currently handled by this Internal Project.
+    """
+    return crud.get_sites_for_internal_project(db, project_id=project_id)
 
-@router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_project_endpoint(
-    project_id: int,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user)
-):
-    db_project = crud.get_project(db, project_id=project_id)
-    if db_project is None:
-        raise HTTPException(status_code=404, detail="Project not found")
+
+# @router.get("/{project_id}", response_model=schemas.Project)
+# def read_project(
+#     project_id: int, 
+#     db: Session = Depends(get_db),
+#     current_user: models.User = Depends(auth.get_current_user) # Optionally protect this too
+# ):
+#     db_project = crud.get_project(db, project_id=project_id)
+#     if db_project is None:
+#         raise HTTPException(status_code=404, detail="Project not found")
+#     return db_project
+
+# from starlette import status # Add this import
+
+# @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
+# def delete_project_endpoint(
+#     project_id: int,
+#     db: Session = Depends(get_db),
+#     current_user: models.User = Depends(auth.get_current_user)
+# ):
+#     db_project = crud.get_project(db, project_id=project_id)
+#     if db_project is None:
+#         raise HTTPException(status_code=404, detail="Project not found")
     
-    crud.delete_project(db=db, project_id=project_id)
-    return {"ok": True} # Or just an empty response with 204
+#     crud.delete_project(db=db, project_id=project_id)
+#     return {"ok": True} # Or just an empty response with 204
 
 @router.post("/site-rules", response_model=dict) # Change response model to return stats
 def create_site_assignment_rule(

@@ -68,7 +68,9 @@ def get_projects(db: Session, skip: int = 0, limit: int = 100):
 def get_all_projects(db: Session):
     """Returns all project records from the database."""
     return db.query(models.Project).order_by(models.Project.name).all()
-
+def get_all_internal_projects(db: Session):
+    """Returns all internal project records from the database."""
+    return db.query(models.InternalProject).order_by(models.InternalProject.name).all()
 def get_all_sites(db:Session):
     return db.query(models.Site).order_by(models.Site.site_code).all()
 
@@ -939,3 +941,29 @@ def apply_rule_retrospective(db: Session, rule: models.SiteAssignmentRule):
     
     db.commit()
     return updated_count
+
+def get_internal_project_by_name(db: Session, name: str):
+    return db.query(models.InternalProject).filter(models.InternalProject.name == name).first()
+
+def get_internal_project(db: Session, project_id: int):
+    return db.query(models.InternalProject).filter(models.InternalProject.id == project_id).first()
+
+def create_internal_project(db: Session, project: schemas.InternalProjectCreate):
+    # Convert Pydantic model to dictionary
+    db_project = models.InternalProject(**project.model_dump())
+    db.add(db_project)
+    db.commit()
+    db.refresh(db_project)
+    return db_project
+
+def get_sites_for_internal_project(db: Session, project_id: int):
+    """
+    Returns a list of all unique Sites currently assigned to this Internal Project.
+    We derive this from the MergedPO table to see what is *actually* active.
+    """
+    # Query distinct sites associated with this project in the MergedPO table
+    sites = db.query(models.Site).join(models.MergedPO).filter(
+        models.MergedPO.internal_project_id == project_id
+    ).distinct().all()
+    
+    return sites

@@ -137,7 +137,38 @@ class RawPurchaseOrder(PurchaseOrderBase):
 class InternalProject(BaseModel):
     id: int
     name: str
+    project_manager: Optional[User] = None
+    project_type: Optional[ProjectType] = None
+    start_date: Optional[FormattedDate] = None
+    plan_end_date: Optional[FormattedDate] = None
+    has_extension_possibility: Optional[bool] = None
+    forecast_plan_details: Optional[str] = None
+    budget_assigned: Optional[float] = None
+    budget_period: Optional[str] = None
+    account: Optional[Account] = None
+    direct_customer: Optional[Customer] = None
+    final_customer: Optional[Customer] = None
+
     model_config = ConfigDict(from_attributes=True)
+class InternalProjectCreate(BaseModel):
+    name: str
+    # Use the Enum here
+    project_type: ProjectType 
+    
+    # Dates can be passed as YYYY-MM-DD strings, Pydantic handles the parsing
+    start_date: Optional[date] = None
+    plan_end_date: Optional[date] = None
+    
+    has_extension_possibility: bool = False
+    forecast_plan_details: Optional[str] = None
+    budget_assigned: Optional[float] = None
+    budget_period: Optional[str] = None
+    
+    # Foreign Keys
+    project_manager_id: Optional[int] = None
+    account_id: Optional[int] = None
+    direct_customer_id: Optional[int] = None
+    final_customer_id: Optional[int] = None
 
 class CustomerProject(BaseModel):
     id: int
