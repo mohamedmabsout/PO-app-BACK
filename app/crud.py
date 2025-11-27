@@ -803,7 +803,7 @@ def get_financial_summary_by_period(
     total_accepted_pac = summary.total_accepted_pac or 0.0
     
     remaining_gap = total_po_value - (total_accepted_ac + total_accepted_pac)
-    
+
     return {
         "total_po_value": total_po_value,
         "total_accepted_ac": total_accepted_ac,

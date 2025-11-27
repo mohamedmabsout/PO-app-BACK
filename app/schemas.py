@@ -273,3 +273,13 @@ class MonthlyChartData(BaseModel):
     month: int
     total_po_value: float
     total_paid: float
+    
+class ProjectTargetSummary(BaseModel):
+    project_name: str
+    pm_name: str
+    planned_budget: float
+    actual_spent: float
+    target_budget: float
+    completion_rate: float
+
+    model_config = ConfigDict(from_attributes=True)
