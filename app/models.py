@@ -117,9 +117,6 @@ class SiteAssignmentRule(Base): # Inherit from Base, not Pydantic BaseModel (Typ
     min_publish_date = Column(Date, nullable=True)
     max_publish_date = Column(Date, nullable=True)
     
-    # --- 4. Logic Control ---
-    priority = Column(Integer, default=1, index=True) # Higher number = Higher priority
-    
     # --- 5. Outcome ---
     internal_project_id = Column(Integer, ForeignKey("internal_projects.id"), nullable=False)
     

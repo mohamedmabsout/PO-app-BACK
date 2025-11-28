@@ -199,7 +199,7 @@ def resolve_internal_project(
     # 2. Fetch Rules ordered by Priority (Highest first)
     # Optimization: In a huge system, cache this list in Redis or memory
     rules = db.query(models.SiteAssignmentRule).order_by(
-        models.SiteAssignmentRule.priority.desc()
+        models.SiteAssignmentRule.id.desc()
     ).all()
 
     # 3. Iterate and Check Conditions

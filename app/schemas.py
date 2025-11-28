@@ -187,9 +187,7 @@ class SiteAssignmentRuleCreate(BaseModel):
     
     min_publish_date: Optional[date] = None
     max_publish_date: Optional[date] = None
-    
-    priority: int = 1 # Default priority
-    
+        
     internal_project_id: int # Mandatory target
 
 class SiteAssignmentRule(SiteAssignmentRuleCreate):
