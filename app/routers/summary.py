@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from .. import crud, schemas, auth
 from ..dependencies import get_db
 from fastapi import HTTPException
-
+from datetime import date
 router = APIRouter(
     prefix="/api/summary",
     tags=["Dashboard Summaries"],
