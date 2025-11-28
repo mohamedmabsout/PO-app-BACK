@@ -1,6 +1,6 @@
 # Create a new file: backend/app/routers/summary.py
 
-from typing import List
+from typing import List, Optional
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from .. import crud, schemas, auth
@@ -19,9 +19,7 @@ def get_financial_overview(db: Session = Depends(get_db)):
     Provides a high-level financial overview of all processed POs.
     """
     return crud.get_total_financial_summary(db=db)
-# summary.py router
 
-# ... (imports) ...
 
 @router.get("/internal-projects-overview", response_model=List[schemas.ProjectFinancials])
 def get_internal_projects_overview(db: Session = Depends(get_db)):
