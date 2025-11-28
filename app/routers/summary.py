@@ -55,3 +55,24 @@ def get_weekly_overview(year: int, week: int, db: Session = Depends(get_db)):
 def get_yearly_chart_data(year: int, db: Session = Depends(get_db)):
     """Returns correctly calculated aggregated data for each month of a year."""
     return crud.get_yearly_chart_data(db=db, year=year)
+
+@router.get("/user-performance", response_model=schemas.UserPerformanceSummary)
+def get_user_performance(
+    user_id: int,
+    year: int, 
+    month: Optional[int] = None, 
+    week: Optional[int] = None,
+    db: Session = Depends(get_db)
+):
+    """
+    Returns performance stats for a specific user (PM/Admin/CEO) based on 
+    the projects they manage.
+    """
+    return crud.get_user_performance_stats(
+        db=db, 
+        user_id=user_id, 
+        year=year, 
+        month=month, 
+        week=week
+    )
+
