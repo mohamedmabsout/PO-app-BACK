@@ -1021,50 +1021,41 @@ def update_internal_project(db: Session, project_id: int, updates: schemas.Inter
 def get_user_performance_stats(
     db: Session, 
     user_id: int,
-    year: int, 
-    month: Optional[int] = None, 
-    week: Optional[int] = None
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None
 ) -> dict:
     """
-    Calculates financial performance for a specific Project Manager (User)
-    over a specific period.
+    Calculates financial performance for a specific PM over a flexible Date Range.
     """
     
-    # Base filters for the Join
-    # We only care about POs assigned to Internal Projects managed by this user
-    base_filters = [
-        models.InternalProject.project_manager_id == user_id
-    ]
+    # Base filter: Only projects managed by this user
+    base_filters = [models.InternalProject.project_manager_id == user_id]
 
-    # Date Filters for PO Value (publish_date)
-    po_filters = base_filters + [extract('year', models.MergedPO.publish_date) == year]
-    
-    # Date Filters for AC (date_ac_ok)
-    ac_filters = base_filters + [extract('year', models.MergedPO.date_ac_ok) == year]
-    
-    # Date Filters for PAC (date_pac_ok)
-    pac_filters = base_filters + [extract('year', models.MergedPO.date_pac_ok) == year]
+    # Initialize filters for each metric
+    po_filters = base_filters.copy()
+    ac_filters = base_filters.copy()
+    pac_filters = base_filters.copy()
 
-    # Append Month/Week if provided
-    if month:
-        po_filters.append(extract('month', models.MergedPO.publish_date) == month)
-        ac_filters.append(extract('month', models.MergedPO.date_ac_ok) == month)
-        pac_filters.append(extract('month', models.MergedPO.date_pac_ok) == month)
+    # Apply Date Range Logic
+    if start_date:
+        po_filters.append(func.date(models.MergedPO.publish_date) >= start_date)
+        ac_filters.append(models.MergedPO.date_ac_ok >= start_date)
+        pac_filters.append(models.MergedPO.date_pac_ok >= start_date)
 
-    if week:
-        po_filters.append(extract('week', models.MergedPO.publish_date) == week)
-        ac_filters.append(extract('week', models.MergedPO.date_ac_ok) == week)
-        pac_filters.append(extract('week', models.MergedPO.date_pac_ok) == week)
+    if end_date:
+        po_filters.append(func.date(models.MergedPO.publish_date) <= end_date)
+        ac_filters.append(models.MergedPO.date_ac_ok <= end_date)
+        pac_filters.append(models.MergedPO.date_pac_ok <= end_date)
 
-    # Execute Query
+    # Execute Conditional Aggregation
     summary = db.query(
-        # Sum Line Amount
+        # 1. PO Value (Based on Publish Date)
         func.sum(case((and_(*po_filters), models.MergedPO.line_amount_hw), else_=0)).label("total_po_value"),
         
-        # Sum AC
+        # 2. AC Value (Based on AC Date)
         func.sum(case((and_(*ac_filters), models.MergedPO.accepted_ac_amount), else_=0)).label("total_accepted_ac"),
         
-        # Sum PAC
+        # 3. PAC Value (Based on PAC Date)
         func.sum(case((and_(*pac_filters), models.MergedPO.accepted_pac_amount), else_=0)).label("total_accepted_pac")
         
     ).join(
@@ -1072,14 +1063,11 @@ def get_user_performance_stats(
         models.MergedPO.internal_project_id == models.InternalProject.id
     ).one()
 
-    # Process Results
+    # Calculate Totals
     total_po = summary.total_po_value or 0.0
-    total_ac = summary.total_accepted_ac or 0.0
-    total_pac = summary.total_accepted_pac or 0.0
-    total_accepted = total_ac + total_pac
+    total_accepted = (summary.total_accepted_ac or 0.0) + (summary.total_accepted_pac or 0.0)
     remaining = total_po - total_accepted
     
-    # Avoid division by zero
     completion = (total_accepted / total_po * 100) if total_po > 0 else 0.0
 
     return {

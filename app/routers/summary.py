@@ -57,20 +57,13 @@ def get_yearly_chart_data(year: int, db: Session = Depends(get_db)):
 @router.get("/user-performance", response_model=schemas.UserPerformanceSummary)
 def get_user_performance(
     user_id: int,
-    year: int, 
-    month: Optional[int] = None, 
-    week: Optional[int] = None,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
     db: Session = Depends(get_db)
 ):
-    """
-    Returns performance stats for a specific user (PM/Admin/CEO) based on 
-    the projects they manage.
-    """
     return crud.get_user_performance_stats(
         db=db, 
         user_id=user_id, 
-        year=year, 
-        month=month, 
-        week=week
+        start_date=start_date, 
+        end_date=end_date
     )
-
