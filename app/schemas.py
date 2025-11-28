@@ -300,3 +300,8 @@ class ProjectTargetSummary(BaseModel):
     completion_rate: float
 
     model_config = ConfigDict(from_attributes=True)
+class UserPerformanceSummary(BaseModel):
+    total_po_value: float
+    total_accepted: float
+    remaining_gap: float
+    completion_percentage: float

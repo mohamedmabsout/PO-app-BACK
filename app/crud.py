@@ -1018,3 +1018,61 @@ def update_internal_project(db: Session, project_id: int, updates: schemas.Inter
     db.commit()
     db.refresh(db_project)
     return db_project
+def get_user_performance_stats(
+    db: Session, 
+    user_id: int,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None
+) -> dict:
+    """
+    Calculates financial performance for a specific PM over a flexible Date Range.
+    """
+    
+    # Base filter: Only projects managed by this user
+    base_filters = [models.InternalProject.project_manager_id == user_id]
+
+    # Initialize filters for each metric
+    po_filters = base_filters.copy()
+    ac_filters = base_filters.copy()
+    pac_filters = base_filters.copy()
+
+    # Apply Date Range Logic
+    if start_date:
+        po_filters.append(func.date(models.MergedPO.publish_date) >= start_date)
+        ac_filters.append(models.MergedPO.date_ac_ok >= start_date)
+        pac_filters.append(models.MergedPO.date_pac_ok >= start_date)
+
+    if end_date:
+        po_filters.append(func.date(models.MergedPO.publish_date) <= end_date)
+        ac_filters.append(models.MergedPO.date_ac_ok <= end_date)
+        pac_filters.append(models.MergedPO.date_pac_ok <= end_date)
+
+    # Execute Conditional Aggregation
+    summary = db.query(
+        # 1. PO Value (Based on Publish Date)
+        func.sum(case((and_(*po_filters), models.MergedPO.line_amount_hw), else_=0)).label("total_po_value"),
+        
+        # 2. AC Value (Based on AC Date)
+        func.sum(case((and_(*ac_filters), models.MergedPO.accepted_ac_amount), else_=0)).label("total_accepted_ac"),
+        
+        # 3. PAC Value (Based on PAC Date)
+        func.sum(case((and_(*pac_filters), models.MergedPO.accepted_pac_amount), else_=0)).label("total_accepted_pac")
+        
+    ).join(
+        models.InternalProject, 
+        models.MergedPO.internal_project_id == models.InternalProject.id
+    ).one()
+
+    # Calculate Totals
+    total_po = summary.total_po_value or 0.0
+    total_accepted = (summary.total_accepted_ac or 0.0) + (summary.total_accepted_pac or 0.0)
+    remaining = total_po - total_accepted
+    
+    completion = (total_accepted / total_po * 100) if total_po > 0 else 0.0
+
+    return {
+        "total_po_value": total_po,
+        "total_accepted": total_accepted,
+        "remaining_gap": remaining,
+        "completion_percentage": completion
+    }

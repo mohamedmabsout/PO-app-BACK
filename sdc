@@ -32,6 +32,8 @@ DELETE FROM sites;
 DELETE FROM customer_projects;
 DELETE FROM internal_projects;
 
+rm -rf alembic/versions/* alembic/versions/__pycache__
+
 
 # 1. Go to project folder
 cd /var/www/po-app-backend

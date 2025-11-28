@@ -1,12 +1,12 @@
 # Create a new file: backend/app/routers/summary.py
 
-from typing import List
+from typing import List, Optional
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from .. import crud, schemas, auth
 from ..dependencies import get_db
 from fastapi import HTTPException
-
+from datetime import date
 router = APIRouter(
     prefix="/api/summary",
     tags=["Dashboard Summaries"],
@@ -19,9 +19,7 @@ def get_financial_overview(db: Session = Depends(get_db)):
     Provides a high-level financial overview of all processed POs.
     """
     return crud.get_total_financial_summary(db=db)
-# summary.py router
 
-# ... (imports) ...
 
 @router.get("/internal-projects-overview", response_model=List[schemas.ProjectFinancials])
 def get_internal_projects_overview(db: Session = Depends(get_db)):
@@ -55,3 +53,17 @@ def get_weekly_overview(year: int, week: int, db: Session = Depends(get_db)):
 def get_yearly_chart_data(year: int, db: Session = Depends(get_db)):
     """Returns correctly calculated aggregated data for each month of a year."""
     return crud.get_yearly_chart_data(db=db, year=year)
+
+@router.get("/user-performance", response_model=schemas.UserPerformanceSummary)
+def get_user_performance(
+    user_id: int,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    db: Session = Depends(get_db)
+):
+    return crud.get_user_performance_stats(
+        db=db, 
+        user_id=user_id, 
+        start_date=start_date, 
+        end_date=end_date
+    )
