@@ -305,3 +305,26 @@ class UserPerformanceSummary(BaseModel):
     total_accepted: float
     remaining_gap: float
     completion_percentage: float
+class UserTargetCreate(BaseModel):
+    user_id: int
+    year: int
+    month: int
+    target_po_amount: Optional[float] = 0.0
+    target_invoice_amount: Optional[float] = 0.0
+
+class PerformanceMatrixRow(BaseModel):
+    user_id: int
+    user_name: str
+    
+    # Column: Total GAP (Actual PO - Actual Paid)
+    total_gap: float 
+
+    # Section: PO Received
+    plan_po: float
+    actual_po: float
+    percent_po: float
+
+    # Section: Invoice (Paid)
+    plan_invoice: float
+    actual_invoice: float
+    percent_invoice: float

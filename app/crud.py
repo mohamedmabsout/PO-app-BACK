@@ -1076,3 +1076,99 @@ def get_user_performance_stats(
         "remaining_gap": remaining,
         "completion_percentage": completion
     }
+def set_user_target(db: Session, target: schemas.UserTargetCreate):
+    """
+    Creates or Updates a target (Upsert).
+    """
+    db_target = db.query(models.UserPerformanceTarget).filter(
+        models.UserPerformanceTarget.user_id == target.user_id,
+        models.UserPerformanceTarget.year == target.year,
+        models.UserPerformanceTarget.month == target.month
+    ).first()
+
+    if db_target:
+        # Update existing
+        if target.target_po_amount is not None:
+            db_target.target_po_amount = target.target_po_amount
+        if target.target_invoice_amount is not None:
+            db_target.target_invoice_amount = target.target_invoice_amount
+    else:
+        # Create new
+        db_target = models.UserPerformanceTarget(**target.model_dump())
+        db.add(db_target)
+    
+    db.commit()
+    return db_target
+
+def get_performance_matrix(db: Session, year: int, month: Optional[int] = None):
+    """
+    Generates the data for both Monthly and Yearly widgets.
+    If month is None, it aggregates for the whole year.
+    """
+    
+    # 1. Get all Project Managers (Users involved in Internal Projects)
+    # Or simply all users with role PM. Let's get users who actually have projects or targets.
+    pms = db.query(models.User).filter(models.User.role.in_(['PM', 'ADMIN', 'CEO'])).all()
+    
+    results = []
+
+    for pm in pms:
+        # A. Fetch Targets (Plan)
+        target_query = db.query(
+            func.sum(models.UserPerformanceTarget.target_po_amount),
+            func.sum(models.UserPerformanceTarget.target_invoice_amount)
+        ).filter(
+            models.UserPerformanceTarget.user_id == pm.id,
+            models.UserPerformanceTarget.year == year
+        )
+        
+        if month:
+            target_query = target_query.filter(models.UserPerformanceTarget.month == month)
+            
+        plan_po, plan_invoice = target_query.first()
+        plan_po = plan_po or 0.0
+        plan_invoice = plan_invoice or 0.0
+
+        # B. Fetch Actuals (From MergedPO)
+        # We reuse the logic from get_user_performance_stats but specific to the period
+        
+        # Base filter: Projects managed by this PM
+        base_filters = [models.InternalProject.project_manager_id == pm.id]
+        
+        # Date filters
+        po_date_filters = base_filters + [extract('year', models.MergedPO.publish_date) == year]
+        ac_date_filters = base_filters + [extract('year', models.MergedPO.date_ac_ok) == year]
+        pac_date_filters = base_filters + [extract('year', models.MergedPO.date_pac_ok) == year]
+        
+        if month:
+            po_date_filters.append(extract('month', models.MergedPO.publish_date) == month)
+            ac_date_filters.append(extract('month', models.MergedPO.date_ac_ok) == month)
+            pac_date_filters.append(extract('month', models.MergedPO.date_pac_ok) == month)
+
+        summary = db.query(
+            func.sum(case((and_(*po_date_filters), models.MergedPO.line_amount_hw), else_=0)),
+            func.sum(case((and_(*ac_date_filters), models.MergedPO.accepted_ac_amount), else_=0)),
+            func.sum(case((and_(*pac_date_filters), models.MergedPO.accepted_pac_amount), else_=0))
+        ).join(
+            models.InternalProject, models.MergedPO.internal_project_id == models.InternalProject.id
+        ).first()
+
+        actual_po = summary[0] or 0.0
+        actual_paid = (summary[1] or 0.0) + (summary[2] or 0.0)
+        
+        # Total Gap (Remaining to be paid on what was produced)
+        total_gap = actual_po - actual_paid
+
+        results.append({
+            "user_id": pm.id,
+            "user_name": f"{pm.first_name} {pm.last_name}",
+            "total_gap": total_gap,
+            "plan_po": plan_po,
+            "actual_po": actual_po,
+            "percent_po": (actual_po / plan_po * 100) if plan_po > 0 else 0,
+            "plan_invoice": plan_invoice,
+            "actual_invoice": actual_paid,
+            "percent_invoice": (actual_paid / plan_invoice * 100) if plan_invoice > 0 else 0,
+        })
+        
+    return results
