@@ -12,10 +12,8 @@ router = APIRouter(
     tags=["authentication"],
 )
 
-
 @router.post("/login", response_model=schemas.Token)
 def login_for_access_token(db: Session = Depends(get_db), form_data: OAuth2PasswordRequestForm = Depends()):
-    # ... no changes to the code inside this function
     user = crud.get_user_by_username(db, username=form_data.username)
     if not user or not auth.verify_password(form_data.password, user.hashed_password):
         raise HTTPException(
@@ -24,11 +22,17 @@ def login_for_access_token(db: Session = Depends(get_db), form_data: OAuth2Passw
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    access_token_expires = timedelta(
-        days=config.settings.ACCESS_TOKEN_EXPIRE_DAYS
-    )
+    access_token_expires = timedelta(days=config.settings.ACCESS_TOKEN_EXPIRE_DAYS)
+    
+    # --- CHANGE IS HERE ---
+    # We add the role to the payload
     access_token = auth.create_access_token(
-        data={"sub": user.username}, expires_delta=access_token_expires
+        data={
+            "sub": user.username, 
+            "role": user.role.value, # Convert Enum to string
+            "id": user.id 
+        }, 
+        expires_delta=access_token_expires
     )
 
     return {"access_token": access_token, "token_type": "bearer"}

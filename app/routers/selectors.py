@@ -3,9 +3,11 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 from typing import List
 
-from .. import models, schemas, auth
+from .. import models, schemas, auth,crud
 from ..dependencies import get_db
 from ..enum import UserRole
+from ..dependencies import get_current_user
+
 
 router = APIRouter(
     prefix="/api/selectors",
@@ -50,15 +52,13 @@ def get_project_manager_selector(
 def get_internal_project_selector(
     search: str = Query(None, min_length=1, max_length=50),
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user)
+    current_user: models.User = Depends(get_current_user)
 ):
     """
     Provides a list of internal projects for dropdowns, with optional search.
     """
-    query = db.query(models.InternalProject)
-    if search:
-        query = query.filter(models.InternalProject.name.ilike(f"%{search}%"))
-    return query.limit(20).all()
+    return crud.get_internal_project_selector_for_user(db, current_user, search)
+
 
 @router.get("/customer-projects", response_model=List[schemas.CustomerProject])
 def get_customer_project_selector(

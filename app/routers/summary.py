@@ -7,6 +7,10 @@ from .. import crud, schemas, auth
 from ..dependencies import get_db
 from fastapi import HTTPException
 from datetime import date
+from ..models import UserRole
+from .. import models
+from ..dependencies import get_current_user
+
 router = APIRouter(
     prefix="/api/summary",
     tags=["Dashboard Summaries"],
@@ -59,11 +63,13 @@ def get_user_performance(
     user_id: int,
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
 ):
-    return crud.get_user_performance_stats(
-        db=db, 
-        user_id=user_id, 
-        start_date=start_date, 
-        end_date=end_date
-    )
+     # SECURITY CHECK
+    # 1. If I am Admin, I can see anyone.
+    # 2. If I am NOT Admin, I can only see myself.
+    if current_user.role != UserRole.ADMIN and current_user.id != user_id:
+        raise HTTPException(status_code=403, detail="You cannot view performance data of other managers.")
+
+    return crud.get_user_performance_stats(db, user_id, start_date, end_date)

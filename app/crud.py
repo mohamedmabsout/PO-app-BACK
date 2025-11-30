@@ -9,7 +9,7 @@ import sqlalchemy as sa
 from sqlalchemy import func, case, extract, and_
 from sqlalchemy.sql.functions import coalesce # More explicit import
 from sqlalchemy.orm import aliased
-from .enum import ProjectType   
+from .enum import ProjectType, UserRole
 PAYMENT_TERM_MAP = {
     "【TT】▍AC1 (80.00%, INV AC -15D, Complete 80%) / AC2 (20.00%, INV AC -15D, Complete 100%) ▍": "AC1 80 | PAC 20",
     "【TT】▍AC1 (80.00%, INV AC -30D, Complete 80%) / AC2 (20.00%, INV AC -30D, Complete 100%) ▍": "AC1 80 | PAC 20",
@@ -1100,19 +1100,29 @@ def set_user_target(db: Session, target: schemas.UserTargetCreate):
     db.commit()
     return db_target
 
-def get_performance_matrix(db: Session, year: int, month: Optional[int] = None):
+def get_performance_matrix(
+    db: Session, 
+    year: int, 
+    month: Optional[int] = None, 
+    filter_user_id: Optional[int] = None # <--- NEW PARAMETER
+):
     """
     Generates the data for both Monthly and Yearly widgets.
-    If month is None, it aggregates for the whole year.
     """
     
-    # 1. Get all Project Managers (Users involved in Internal Projects)
-    # Or simply all users with role PM. Let's get users who actually have projects or targets.
-    pms = db.query(models.User).filter(models.User.role.in_(['PM', 'ADMIN', 'CEO'])).all()
+    # 1. Start query for eligible users (PMs, Admins, CEOs)
+    query = db.query(models.User).filter(models.User.role.in_(['PM', 'ADMIN', 'CEO']))
+    
+    # 2. Apply Security Filter (Row-Level Security)
+    if filter_user_id:
+        query = query.filter(models.User.id == filter_user_id)
+        
+    pms = query.all()
     
     results = []
 
     for pm in pms:
+
         # A. Fetch Targets (Plan)
         target_query = db.query(
             func.sum(models.UserPerformanceTarget.target_po_amount),
@@ -1172,3 +1182,36 @@ def get_performance_matrix(db: Session, year: int, month: Optional[int] = None):
         })
         
     return results
+def get_internal_projects_for_user(db: Session, user: models.User):
+    """
+    Returns projects based on role:
+    - Admin: All projects
+    - PM/PD: Only projects where they are the manager
+    - Others: Empty list (or all, depending on your needs)
+    """
+    query = db.query(models.InternalProject)
+    
+    if user.role == UserRole.ADMIN:
+        return query.order_by(models.InternalProject.name).all()
+    
+    elif user.role in [UserRole.PM, UserRole.PD]:
+        return query.filter(models.InternalProject.project_manager_id == user.id).order_by(models.InternalProject.name).all()
+    
+    else:
+        return [] # Or raise error
+
+# Update the selector too
+def get_internal_project_selector_for_user(db: Session, user: models.User, search: str = None):
+    query = db.query(models.InternalProject)
+    
+    # 1. Apply Security Filter
+    if user.role != UserRole.ADMIN:
+        # If not admin, restrict to own projects
+        # (Assuming only PMs/PDs use this selector to see their work)
+        query = query.filter(models.InternalProject.project_manager_id == user.id)
+
+    # 2. Apply Search Filter
+    if search:
+        query = query.filter(models.InternalProject.name.ilike(f"%{search}%"))
+        
+    return query.limit(20).all()
