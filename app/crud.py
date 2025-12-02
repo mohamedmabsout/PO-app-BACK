@@ -831,6 +831,61 @@ def get_po_value_by_category(db: Session):
     # Now, the Python part is much simpler because the data is already clean.
     # The 'row' object will have attributes 'category_name' and 'total_value'.
     return [{"category": row.category_name, "value": row.total_value or 0} for row in results]
+
+# backend/app/crud.py
+
+def get_remaining_to_accept(db: Session):
+    """
+    Fetches POs that have a remaining balance > 0.01 (to ignore float errors).
+    Categorizes them into 'Waiting for AC' or 'Waiting for PAC'.
+    """
+    
+    # 1. Calculate Remaining in SQL
+    # Logic: LineAmount - (AcceptedAC + AcceptedPAC)
+    remaining_expression = models.MergedPO.line_amount_hw - (
+        func.coalesce(models.MergedPO.accepted_ac_amount, 0) + 
+        func.coalesce(models.MergedPO.accepted_pac_amount, 0)
+    )
+
+    # 2. Filter: Absolute value must be greater than 0.01 (Tolerance)
+    query = db.query(
+        models.MergedPO,
+        remaining_expression.label("remaining_amount")
+    ).filter(
+        func.abs(remaining_expression) > 0.01
+    ).options(
+        joinedload(models.MergedPO.internal_project),
+        joinedload(models.MergedPO.customer_project)
+    )
+
+    results = query.all()
+    
+    # 3. Process Logic in Python (Easier to read than complex SQL Case)
+    output = []
+    for po, rem_amount in results:
+        stage = "UNKNOWN"
+        
+        # Logic: 
+        # If Date AC is NULL => We are waiting for AC
+        if po.date_ac_ok is None:
+            stage = "WAITING_AC"
+            
+        # If Date AC is OK but Date PAC is NULL => We are waiting for PAC
+        elif po.date_ac_ok is not None and po.date_pac_ok is None:
+            stage = "WAITING_PAC"
+            
+        # Optional: If both dates exist but money remains (Partial payment scenario)
+        elif po.date_ac_ok is not None and po.date_pac_ok is not None:
+            stage = "PARTIAL_GAP"
+
+        # Convert SQLAlchemy model to dict and append extra fields
+        po_dict = po.__dict__
+        po_dict['remaining_amount'] = rem_amount
+        po_dict['remaining_stage'] = stage
+        output.append(po_dict)
+
+    return output
+
 def get_financial_summary_by_period(
     db: Session, 
     year: int, 

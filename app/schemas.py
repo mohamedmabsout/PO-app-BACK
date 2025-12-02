@@ -229,6 +229,11 @@ class MergedPOBase(BaseModel):
 class MergedPO(MergedPOBase):
     id: int
     model_config = ConfigDict(from_attributes=True)
+class RemainingPO(MergedPO):
+    remaining_amount: float
+    remaining_stage: str # "AC" or "PAC"
+    
+    model_config = ConfigDict(from_attributes=True)
 
 class Token(BaseModel):
     access_token: str
