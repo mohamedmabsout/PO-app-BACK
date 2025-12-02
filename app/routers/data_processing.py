@@ -272,9 +272,18 @@ def export_merged_pos_report(
         raise HTTPException(
             status_code=500, detail="Could not generate the Excel report."
         )
-@router.get("/remaining-to-accept", response_model=List[schemas.RemainingPO])
+@router.get("/remaining-to-accept")
 def get_remaining_pos(
+    page: int = 1,
+    size: int = 20,
+    filter_stage: str = "ALL",
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
-    return crud.get_remaining_to_accept(db)
+    data = crud.get_remaining_to_accept_paginated(db, page, size, filter_stage)
+    stats = crud.get_remaining_stats(db) # Fetch summary stats separately
+    
+    return {
+        "data": data,
+        "stats": stats
+    }

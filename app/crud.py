@@ -834,57 +834,88 @@ def get_po_value_by_category(db: Session):
 
 # backend/app/crud.py
 
-def get_remaining_to_accept(db: Session):
+def get_remaining_to_accept_paginated(
+    db: Session, 
+    page: int = 1, 
+    size: int = 20, 
+    filter_stage: str = "ALL"
+):
     """
-    Fetches POs that have a remaining balance > 0.01 (to ignore float errors).
-    Categorizes them into 'Waiting for AC' or 'Waiting for PAC'.
+    Optimized version: Calculates everything in SQL and returns paginated results.
     """
     
-    # 1. Calculate Remaining in SQL
-    # Logic: LineAmount - (AcceptedAC + AcceptedPAC)
-    remaining_expression = models.MergedPO.line_amount_hw - (
+    # 1. Define SQL Expressions
+    # Calculate Remaining
+    remaining_expr = models.MergedPO.line_amount_hw - (
         func.coalesce(models.MergedPO.accepted_ac_amount, 0) + 
         func.coalesce(models.MergedPO.accepted_pac_amount, 0)
     )
-
-    # 2. Filter: Absolute value must be greater than 0.01 (Tolerance)
-    query = db.query(
-        models.MergedPO,
-        remaining_expression.label("remaining_amount")
-    ).filter(
-        func.abs(remaining_expression) > 0.01
-    ).options(
-        joinedload(models.MergedPO.internal_project),
-        joinedload(models.MergedPO.customer_project)
+    
+    # Calculate Stage Logic in SQL
+    stage_expr = case(
+        (models.MergedPO.date_ac_ok.is_(None), "WAITING_AC"),
+        (and_(models.MergedPO.date_ac_ok.isnot(None), models.MergedPO.date_pac_ok.is_(None)), "WAITING_PAC"),
+        else_="PARTIAL_GAP"
     )
 
-    results = query.all()
-    
-    # 3. Process Logic in Python (Easier to read than complex SQL Case)
-    output = []
-    for po, rem_amount in results:
-        stage = "UNKNOWN"
-        
-        # Logic: 
-        # If Date AC is NULL => We are waiting for AC
-        if po.date_ac_ok is None:
-            stage = "WAITING_AC"
-            
-        # If Date AC is OK but Date PAC is NULL => We are waiting for PAC
-        elif po.date_ac_ok is not None and po.date_pac_ok is None:
-            stage = "WAITING_PAC"
-            
-        # Optional: If both dates exist but money remains (Partial payment scenario)
-        elif po.date_ac_ok is not None and po.date_pac_ok is not None:
-            stage = "PARTIAL_GAP"
+    # 2. Build Base Query
+    query = db.query(
+        models.MergedPO,
+        remaining_expr.label("remaining_amount"),
+        stage_expr.label("remaining_stage")
+    ).filter(
+        # Filter 1: Only items with money remaining (Tolerance > 0.01)
+        func.abs(remaining_expr) > 0.01
+    )
 
-        # Convert SQLAlchemy model to dict and append extra fields
+    # 3. Apply Stage Filter (Server-side filtering)
+    if filter_stage != "ALL":
+        query = query.filter(stage_expr == filter_stage)
+
+    # 4. Get Total Count (for pagination)
+    total_items = query.count()
+
+    # 5. Get Data (Paginated)
+    results = query.offset((page - 1) * size).limit(size).all()
+
+    # 6. Format Output
+    items = []
+    for po, rem_amount, stage in results:
+        # Merge the SQL results into the Pydantic shape
         po_dict = po.__dict__
         po_dict['remaining_amount'] = rem_amount
         po_dict['remaining_stage'] = stage
-        output.append(po_dict)
+        items.append(po_dict)
 
-    return output
+    return {
+        "items": items,
+        "total_items": total_items,
+        "page": page,
+        "total_pages": (total_items + size - 1) // size
+    }
+
+# NEW HELPER: Get Stats efficiently without fetching all rows
+def get_remaining_stats(db: Session):
+    remaining_expr = models.MergedPO.line_amount_hw - (
+        func.coalesce(models.MergedPO.accepted_ac_amount, 0) + func.coalesce(models.MergedPO.accepted_pac_amount, 0)
+    )
+    stage_expr = case(
+        (models.MergedPO.date_ac_ok.is_(None), "WAITING_AC"),
+        (and_(models.MergedPO.date_ac_ok.isnot(None), models.MergedPO.date_pac_ok.is_(None)), "WAITING_PAC"),
+        else_="PARTIAL_GAP"
+    )
+    
+    # We group by stage and sum the gap
+    stats = db.query(
+        stage_expr.label("stage"),
+        func.count(models.MergedPO.id).label("count"),
+        func.sum(remaining_expr).label("total_gap")
+    ).filter(
+        func.abs(remaining_expr) > 0.01
+    ).group_by(stage_expr).all()
+    
+    return {row.stage: {"count": row.count, "gap": row.total_gap or 0} for row in stats}
+
 
 def get_financial_summary_by_period(
     db: Session, 
