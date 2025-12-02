@@ -48,7 +48,24 @@ def create_user(db: Session, user: schemas.UserCreate):
     db.refresh(db_user)
     return db_user
 
+def update_user(db: Session, db_user: models.User, user_update: schemas.UserUpdate):
+    """
+    Updates a user record based on the provided Pydantic schema.
+    Only updates fields that were actually sent in the request (exclude_unset=True).
+    """
+    # 1. Generate a dictionary of updates, ignoring fields that weren't sent
+    update_data = user_update.model_dump(exclude_unset=True)
 
+    # 2. Iterate through the dictionary and update the SQLAlchemy object
+    for key, value in update_data.items():
+        setattr(db_user, key, value)
+
+    # 3. Save changes
+    db.add(db_user)
+    db.commit()
+    db.refresh(db_user)
+    
+    return db_user
 def get_users(db: Session, skip: int = 0, limit: int = 100):
     return db.query(models.User).offset(skip).limit(limit).all()
 
