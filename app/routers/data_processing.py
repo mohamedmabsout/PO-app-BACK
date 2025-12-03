@@ -272,16 +272,26 @@ def export_merged_pos_report(
         raise HTTPException(
             status_code=500, detail="Could not generate the Excel report."
         )
+# backend/app/routers/data_processing.py
+
 @router.get("/remaining-to-accept")
 def get_remaining_pos(
     page: int = 1,
     size: int = 20,
     filter_stage: str = "ALL",
+    search: Optional[str] = None,
+    internal_project_id: Optional[int] = None,
+    customer_project_id: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
-    data = crud.get_remaining_to_accept_paginated(db, page, size, filter_stage)
-    stats = crud.get_remaining_stats(db) # Fetch summary stats separately
+    data = crud.get_remaining_to_accept_paginated(
+        db, page, size, filter_stage, 
+        search, internal_project_id, customer_project_id
+    )
+    # Note: Stats are usually global, calculating them with filters might be expensive 
+    # but let's keep the global stats for the cards at the top
+    stats = crud.get_remaining_stats(db) 
     
     return {
         "data": data,

@@ -834,63 +834,77 @@ def get_po_value_by_category(db: Session):
 
 # backend/app/crud.py
 
+# backend/app/crud.py
+
 def get_remaining_to_accept_paginated(
     db: Session, 
     page: int = 1, 
     size: int = 20, 
-    filter_stage: str = "ALL"
+    filter_stage: str = "ALL",
+    # --- NEW FILTERS ---
+    search: Optional[str] = None,
+    internal_project_id: Optional[int] = None,
+    customer_project_id: Optional[int] = None
 ):
-    """
-    Optimized version: Calculates everything in SQL and returns paginated results.
-    """
-    
-    # 1. Define SQL Expressions
-    # Calculate Remaining
+    # 1. Define SQL Expressions (Same as before)
     remaining_expr = models.MergedPO.line_amount_hw - (
         func.coalesce(models.MergedPO.accepted_ac_amount, 0) + 
         func.coalesce(models.MergedPO.accepted_pac_amount, 0)
     )
     
-    # Calculate Stage Logic in SQL
     stage_expr = case(
         (models.MergedPO.date_ac_ok.is_(None), "WAITING_AC"),
         (and_(models.MergedPO.date_ac_ok.isnot(None), models.MergedPO.date_pac_ok.is_(None)), "WAITING_PAC"),
         else_="PARTIAL_GAP"
     )
 
-    # 2. Build Base Query
+    # 2. Build Base Query (Only items with remaining money)
     query = db.query(
         models.MergedPO,
         remaining_expr.label("remaining_amount"),
         stage_expr.label("remaining_stage")
     ).filter(
-        # Filter 1: Only items with money remaining (Tolerance > 0.01)
         func.abs(remaining_expr) > 0.01
     )
 
-    # 3. Apply Stage Filter (Server-side filtering)
+    # 3. Apply Filters
     if filter_stage != "ALL":
         query = query.filter(stage_expr == filter_stage)
+        
+    if internal_project_id:
+        query = query.filter(models.MergedPO.internal_project_id == internal_project_id)
+        
+    if customer_project_id:
+        query = query.filter(models.MergedPO.customer_project_id == customer_project_id)
 
-    # 4. Get Total Count (for pagination)
+    if search:
+        term = f"%{search}%"
+        query = query.filter(
+            (models.MergedPO.po_no.ilike(term)) | 
+            (models.MergedPO.site_code.ilike(term)) |
+            (models.MergedPO.item_description.ilike(term))
+        )
+
+    # 4. Pagination
     total_items = query.count()
+    results = query.order_by(models.MergedPO.publish_date.desc())\
+                   .offset((page - 1) * size).limit(size).all()
 
-    # 5. Get Data (Paginated)
-    results = query.offset((page - 1) * size).limit(size).all()
-
-    # 6. Format Output
+    # 5. Format Output
     items = []
     for po, rem_amount, stage in results:
-        # Merge the SQL results into the Pydantic shape
         po_dict = po.__dict__
         po_dict['remaining_amount'] = rem_amount
         po_dict['remaining_stage'] = stage
+        # Eager loading might put objects here, ensure we return serializable data
+        if po.internal_project: po_dict['internal_project_name'] = po.internal_project.name
         items.append(po_dict)
 
     return {
         "items": items,
         "total_items": total_items,
         "page": page,
+        "size": size,
         "total_pages": (total_items + size - 1) // size
     }
 
@@ -1318,3 +1332,93 @@ def get_internal_project_selector_for_user(db: Session, user: models.User, searc
         query = query.filter(models.InternalProject.name.ilike(f"%{search}%"))
         
     return query.limit(20).all()
+def get_remaining_to_accept_paginated(
+    db: Session, 
+    page: int = 1, 
+    size: int = 20, 
+    filter_stage: str = "ALL",
+    search: Optional[str] = None,
+    internal_project_id: Optional[int] = None,
+    customer_project_id: Optional[int] = None
+):
+    # 1. Expressions
+    remaining_expr = models.MergedPO.line_amount_hw - (
+        func.coalesce(models.MergedPO.accepted_ac_amount, 0) + 
+        func.coalesce(models.MergedPO.accepted_pac_amount, 0)
+    )
+    
+    stage_expr = case(
+        (models.MergedPO.date_ac_ok.is_(None), "WAITING_AC"),
+        (and_(models.MergedPO.date_ac_ok.isnot(None), models.MergedPO.date_pac_ok.is_(None)), "WAITING_PAC"),
+        else_="PARTIAL_GAP"
+    )
+
+    # 2. Base Query with Eager Loading (To get Project Names)
+    query = db.query(
+        models.MergedPO,
+        remaining_expr.label("remaining_amount"),
+        stage_expr.label("remaining_stage")
+    ).options(
+        joinedload(models.MergedPO.internal_project), # <--- Critical for Project Name
+        joinedload(models.MergedPO.customer_project)  # <--- Critical for Customer Project Name
+    ).filter(
+        func.abs(remaining_expr) > 0.01
+    )
+
+    # 3. APPLY FILTERS (This is the part that was likely failing)
+    
+    # Stage Filter
+    if filter_stage != "ALL":
+        query = query.filter(stage_expr == filter_stage)
+        
+    # Internal Project Filter
+    if internal_project_id:
+        query = query.filter(models.MergedPO.internal_project_id == internal_project_id)
+        
+    # Customer Project Filter
+    if customer_project_id:
+        query = query.filter(models.MergedPO.customer_project_id == customer_project_id)
+
+    # Search Filter
+    if search:
+        term = f"%{search}%"
+        query = query.filter(
+            (models.MergedPO.po_no.ilike(term)) | 
+            (models.MergedPO.site_code.ilike(term)) |
+            (models.MergedPO.item_description.ilike(term))
+        )
+
+    # 4. Pagination
+    total_items = query.count()
+    results = query.order_by(models.MergedPO.publish_date.desc())\
+                   .offset((page - 1) * size).limit(size).all()
+
+    # 5. Format Output
+    items = []
+    for po, rem_amount, stage in results:
+        po_dict = po.__dict__.copy() # Copy to avoid mutation issues
+        if '_sa_instance_state' in po_dict: del po_dict['_sa_instance_state']
+        
+        po_dict['remaining_amount'] = rem_amount
+        po_dict['remaining_stage'] = stage
+        
+        # --- FIX: Populate Names manually if serialization fails ---
+        if po.internal_project:
+            po_dict['internal_project_name'] = po.internal_project.name
+        else:
+            po_dict['internal_project_name'] = "—"
+            
+        if po.customer_project:
+            po_dict['customer_project_name'] = po.customer_project.name
+        else:
+            po_dict['customer_project_name'] = "—"
+
+        items.append(po_dict)
+
+    return {
+        "items": items,
+        "total_items": total_items,
+        "page": page,
+        "size": size,
+        "total_pages": (total_items + size - 1) // size
+    }
