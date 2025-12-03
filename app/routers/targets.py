@@ -38,3 +38,6 @@ def get_matrix(
         filter_id = current_user.id
         
     return crud.get_performance_matrix(db, year, month, filter_user_id=filter_id)
+@router.get("/yearly-matrix", response_model=List[dict]) # Use generic dict or define strict schema
+def get_yearly_matrix(year: int, db: Session = Depends(get_db)):
+    return crud.get_yearly_matrix_data(db, year)
