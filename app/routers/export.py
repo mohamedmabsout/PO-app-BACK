@@ -15,29 +15,28 @@ router = APIRouter(
 )
 
 @router.get("/remaining-to-accept")
-async def export_remaining_to_accept(
-    # On utilise les mêmes paramètres de filtre que la page principale
-    filter_stage: str = Query("ALL"),
-    search: Optional[str] = Query(None),
-    internal_project_id: Optional[int] = Query(None),
-    customer_project_id: Optional[int] = Query(None),
+def export_remaining_to_accept(
+    # --- On ajoute les mêmes paramètres de filtre que le frontend envoie ---
+    filter_stage: str = "ALL",
+    search: Optional[str] = None,
+    internal_project_id: Optional[int] = None,
+    customer_project_id: Optional[int] = None,
     db: Session = Depends(get_db)
 ):
     """
-    Exporte les données 'Remaining to Accept' filtrées vers un fichier Excel.
+    Génère et renvoie un fichier Excel en se basant sur les filtres fournis.
     """
-    # 1. On appelle la nouvelle fonction CRUD pour obtenir toutes les données filtrées
+    # On passe tous les filtres à la fonction CRUD
     df = crud.get_remaining_to_accept_dataframe(
-        db, 
-        filter_stage=filter_stage, 
-        search=search, 
-        internal_project_id=internal_project_id, 
+        db=db,
+        filter_stage=filter_stage,
+        search=search,
+        internal_project_id=internal_project_id,
         customer_project_id=customer_project_id
     )
 
     if df.empty:
         raise HTTPException(status_code=404, detail="No data to export for the selected filters.")
-
     # 2. On prépare le fichier Excel en mémoire
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:

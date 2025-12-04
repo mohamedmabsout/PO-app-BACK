@@ -6,6 +6,8 @@ from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, Text, 
 from .database import Base
 from sqlalchemy.orm import relationship
 import sqlalchemy as sa 
+from sqlalchemy.sql import func # <--- AJOUTER CET IMPORT
+
 class User(Base):
     __tablename__ = "users"
 
@@ -168,7 +170,7 @@ class RawPurchaseOrder(Base):
     customer = relationship("Customer")
     
     is_processed = Column(Boolean, default=False, index=True)
-    uploaded_at = Column(DateTime, default=datetime.datetime.utcnow)
+    uploaded_at = Column(DateTime, server_default=func.now()) # <--- CHANGER POUR server_default
     uploader_id = Column(Integer, ForeignKey("users.id"))
     uploader = relationship("User")
 

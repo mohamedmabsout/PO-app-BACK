@@ -6,7 +6,7 @@ from . import models, schemas
 import pandas as pd
 from sqlalchemy.orm import joinedload,Query
 import sqlalchemy as sa
-from sqlalchemy import func, case, extract, and_, or_
+from sqlalchemy import func, case, extract, and_
 from sqlalchemy.sql.functions import coalesce # More explicit import
 from sqlalchemy.orm import aliased
 from .enum import ProjectType, UserRole
@@ -1498,71 +1498,81 @@ def get_remaining_to_accept_paginated(
     }
 
 def get_remaining_to_accept_dataframe(
-    db,
+    db: Session,
     filter_stage: str = "ALL",
-    search: str | None = None,
-    internal_project_id: int | None = None,
-    customer_project_id: int | None = None,
+    search: Optional[str] = None,
+    internal_project_id: Optional[int] = None,
+    customer_project_id: Optional[int] = None
 ) -> pd.DataFrame:
-    InternalProject = aliased(models.InternalProject)
-    CustomerProject = aliased(models.CustomerProject)
-
-    # Base query : on JOINT les tables nécessaires
-    query = (
-        db.query(
-            models.MergedPO.id.label("id"),
-            models.MergedPO.po_no.label("po_no"),
-            models.MergedPO.site_code.label("site_code"),
-            models.MergedPO.item_description.label("item_description"),
-            InternalProject.name.label("internal_project_name"),
-            CustomerProject.name.label("customer_project_name"),
-            models.MergedPO.line_amount_hw.label("line_amount_hw"),
-            models.MergedPO.accepted_ac_amount.label("accepted_ac_amount"),
-            models.MergedPO.accepted_pac_amount.label("accepted_pac_amount"),
-            models.MergedPO.remaining_amount.label("remaining_amount"),
-            models.MergedPO.remaining_stage.label("remaining_stage"),
-            models.MergedPO.date_ac_ok.label("date_ac_ok"),
-            models.MergedPO.date_pac_ok.label("date_pac_ok"),
-        )
-        .outerjoin(
-            InternalProject,
-            models.MergedPO.internal_project_id == InternalProject.id,
-        )
-        .outerjoin(
-            CustomerProject,
-            models.MergedPO.customer_project_id == CustomerProject.id,
-        )
+    """
+    Construit une requête pour l'export "Remaining To Accept" en se basant sur les filtres,
+    et retourne un DataFrame Pandas prêt à être exporté.
+    """
+    remaining_expr = models.MergedPO.line_amount_hw - (
+        func.coalesce(models.MergedPO.accepted_ac_amount, 0) + 
+        func.coalesce(models.MergedPO.accepted_pac_amount, 0)
+    )
+    stage_expr = case(
+        (models.MergedPO.date_ac_ok.is_(None), "WAITING_AC"),
+        (and_(models.MergedPO.date_ac_ok.isnot(None), models.MergedPO.date_pac_ok.is_(None)), "WAITING_PAC"),
+        else_="PARTIAL_GAP"
     )
 
-    # Filtres
+    # --- CORRECTION DE LA REQUÊTE AVEC LES BONNES JOINTURES ---
+    query = db.query(
+        models.MergedPO.po_no,
+        models.MergedPO.site_code,
+        models.MergedPO.item_description,
+        models.InternalProject.name.label("internal_project_name"), # On sélectionne le nom depuis la table jointe
+        models.CustomerProject.name.label("customer_project_name"), # Idem pour le projet client
+        models.MergedPO.line_amount_hw,
+        models.MergedPO.accepted_ac_amount,
+        models.MergedPO.accepted_pac_amount,
+        remaining_expr.label("remaining_amount"),
+        stage_expr.label("remaining_stage"),
+        models.MergedPO.publish_date
+    ).select_from(models.MergedPO).outerjoin(
+        models.InternalProject, models.MergedPO.internal_project_id == models.InternalProject.id
+    ).outerjoin(
+        models.CustomerProject, models.MergedPO.customer_project_id == models.CustomerProject.id
+    ).filter(
+        func.abs(remaining_expr) > 0.01
+    )
+
+    # 3. On applique les mêmes filtres que pour la pagination
     if filter_stage != "ALL":
-        query = query.filter(models.MergedPO.remaining_stage == filter_stage)
-
-    if search:
-        pattern = f"%{search}%"
-        query = query.filter(
-            or_(
-                models.MergedPO.po_no.ilike(pattern),
-                models.MergedPO.site_code.ilike(pattern),
-                models.MergedPO.item_description.ilike(pattern),
-            )
-        )
-
+        query = query.filter(stage_expr == filter_stage)
     if internal_project_id:
-        query = query.filter(
-            models.MergedPO.internal_project_id == internal_project_id
-        )
-
+        query = query.filter(models.MergedPO.internal_project_id == internal_project_id)
     if customer_project_id:
+        query = query.filter(models.MergedPO.customer_project_id == customer_project_id)
+    if search:
+        term = f"%{search}%"
         query = query.filter(
-            models.MergedPO.customer_project_id == customer_project_id
+            (models.MergedPO.po_no.ilike(term)) | 
+            (models.MergedPO.site_code.ilike(term)) |
+            (models.MergedPO.item_description.ilike(term))
         )
+    
+    # 4. On exécute la requête et on la charge dans un DataFrame SANS pagination
+    df = pd.read_sql(query.statement, db.bind)
 
-    rows = query.all()
-    if not rows:
-        # DataFrame vide mais valide → df.empty = True
+    if df.empty:
         return pd.DataFrame()
 
-    # rows est une liste de Row / tuple → on convertit en dict
-    data = [dict(r._mapping) for r in rows]
-    return pd.DataFrame(data)
+    # 5. On renomme les colonnes pour le fichier Excel
+    df.rename(columns={
+        'po_no': 'PO Number',
+        'site_code': 'Site Code',
+        'item_description': 'Item Description',
+        'name': 'Internal Project', # Nom de colonne après la jointure
+        'line_amount_hw': 'Total PO Value',
+        'accepted_ac_amount': 'Accepted AC',
+        'accepted_pac_amount': 'Accepted PAC',
+        'remaining_amount': 'Remaining to Accept',
+        'remaining_stage': 'Stage',
+        'publish_date': 'Publish Date'
+    }, inplace=True)
+    
+    return df
+    
