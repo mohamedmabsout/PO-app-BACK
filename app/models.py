@@ -5,6 +5,7 @@ from .enum import ProjectType, UserRole
 from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, Text, Date, Enum, ForeignKey
 from .database import Base
 from sqlalchemy.orm import relationship
+import sqlalchemy as sa 
 class User(Base):
     __tablename__ = "users"
 
@@ -247,3 +248,24 @@ class UploadHistory(Base):
     # Who
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     uploader = relationship("User")
+# backend/app/models.py
+
+class UserPerformanceTarget(Base):
+    __tablename__ = "user_performance_targets"
+
+    id = Column(Integer, primary_key=True, index=True)
+    
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    year = Column(Integer, nullable=False)  # e.g., 2025
+    month = Column(Integer, nullable=False) # 1-12
+    
+    # The Admin Inputs
+    target_po_amount = Column(Float, default=0.0)      # "Plan" for PO Received
+    target_invoice_amount = Column(Float, default=0.0) # "Plan" for Invoicing (Paid)
+
+    # Constraint: One target per user per month
+    __table_args__ = (
+        sa.UniqueConstraint('user_id', 'year', 'month', name='uix_user_year_month'),
+    )
+    
+    user = relationship("User")

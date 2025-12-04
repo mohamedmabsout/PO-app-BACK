@@ -6,7 +6,7 @@ from typing import List
 from .. import auth, models
 
 from .. import crud, schemas
-from ..dependencies import get_db
+from ..dependencies import get_db, get_current_user, require_admin, require_management
 
 router = APIRouter(
     prefix="/api/projects",  # All routes in this file will start with /api/projects
@@ -48,7 +48,10 @@ router = APIRouter(
 
 
 @router.get("/all-internal", response_model=List[schemas.InternalProject])
-def read_all_internal_projects(db: Session = Depends(get_db)):
+def read_all_internal_projects(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user) # Anyone logged in can try
+):
     """
     Retrieve ALL projects without pagination.
     Ideal for populating filter dropdowns on the frontend.
@@ -56,11 +59,13 @@ def read_all_internal_projects(db: Session = Depends(get_db)):
     # We will use the existing crud.get_projects but without a limit.
     # We can set a very high limit or create a new specific crud function.
     # Let's create a new CRUD function for clarity.
-    return crud.get_all_internal_projects(db=db)
+    return crud.get_internal_projects_for_user(db, current_user)
+
 @router.post("/internal", response_model=schemas.InternalProject)
 def create_internal_project(
     project: schemas.InternalProjectCreate, 
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_admin) # <--- STOP PMs HERE
 ):
     # 1. Check for duplicates
     db_project = crud.get_internal_project_by_name(db, name=project.name)
@@ -68,7 +73,7 @@ def create_internal_project(
         raise HTTPException(status_code=400, detail="Internal Project with this name already exists")
     
     # 2. Create
-    return crud.create_internal_project(db=db, project=project)
+    return crud.create_internal_project(db, project)
 
 @router.get("/internal/{project_id}", response_model=schemas.InternalProject)
 def read_internal_project(project_id: int, db: Session = Depends(get_db)):
@@ -114,7 +119,8 @@ def read_internal_project_sites(project_id: int, db: Session = Depends(get_db)):
 @router.post("/site-rules", response_model=dict) # Change response model to return stats
 def create_site_assignment_rule(
     rule: schemas.SiteAssignmentRuleCreate, 
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_admin)
 ):
     # 1. Create and Save the Rule
     db_rule = models.SiteAssignmentRule(**rule.model_dump())
@@ -134,7 +140,8 @@ def create_site_assignment_rule(
 @router.post("/assign-site", response_model=dict)
 def assign_site_to_internal_project(
     allocation_data: schemas.SiteAllocationCreate, 
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_admin)
 ):
     """
     Manually assigns a Site to an Internal Project.

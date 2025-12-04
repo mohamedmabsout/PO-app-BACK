@@ -9,7 +9,7 @@ import sqlalchemy as sa
 from sqlalchemy import func, case, extract, and_
 from sqlalchemy.sql.functions import coalesce # More explicit import
 from sqlalchemy.orm import aliased
-from .enum import ProjectType   
+from .enum import ProjectType, UserRole
 PAYMENT_TERM_MAP = {
     "【TT】▍AC1 (80.00%, INV AC -15D, Complete 80%) / AC2 (20.00%, INV AC -15D, Complete 100%) ▍": "AC1 80 | PAC 20",
     "【TT】▍AC1 (80.00%, INV AC -30D, Complete 80%) / AC2 (20.00%, INV AC -30D, Complete 100%) ▍": "AC1 80 | PAC 20",
@@ -48,7 +48,24 @@ def create_user(db: Session, user: schemas.UserCreate):
     db.refresh(db_user)
     return db_user
 
+def update_user(db: Session, db_user: models.User, user_update: schemas.UserUpdate):
+    """
+    Updates a user record based on the provided Pydantic schema.
+    Only updates fields that were actually sent in the request (exclude_unset=True).
+    """
+    # 1. Generate a dictionary of updates, ignoring fields that weren't sent
+    update_data = user_update.model_dump(exclude_unset=True)
 
+    # 2. Iterate through the dictionary and update the SQLAlchemy object
+    for key, value in update_data.items():
+        setattr(db_user, key, value)
+
+    # 3. Save changes
+    db.add(db_user)
+    db.commit()
+    db.refresh(db_user)
+    
+    return db_user
 def get_users(db: Session, skip: int = 0, limit: int = 100):
     return db.query(models.User).offset(skip).limit(limit).all()
 
@@ -814,6 +831,106 @@ def get_po_value_by_category(db: Session):
     # Now, the Python part is much simpler because the data is already clean.
     # The 'row' object will have attributes 'category_name' and 'total_value'.
     return [{"category": row.category_name, "value": row.total_value or 0} for row in results]
+
+# backend/app/crud.py
+
+# backend/app/crud.py
+
+def get_remaining_to_accept_paginated(
+    db: Session, 
+    page: int = 1, 
+    size: int = 20, 
+    filter_stage: str = "ALL",
+    # --- NEW FILTERS ---
+    search: Optional[str] = None,
+    internal_project_id: Optional[int] = None,
+    customer_project_id: Optional[int] = None
+):
+    # 1. Define SQL Expressions (Same as before)
+    remaining_expr = models.MergedPO.line_amount_hw - (
+        func.coalesce(models.MergedPO.accepted_ac_amount, 0) + 
+        func.coalesce(models.MergedPO.accepted_pac_amount, 0)
+    )
+    
+    stage_expr = case(
+        (models.MergedPO.date_ac_ok.is_(None), "WAITING_AC"),
+        (and_(models.MergedPO.date_ac_ok.isnot(None), models.MergedPO.date_pac_ok.is_(None)), "WAITING_PAC"),
+        else_="PARTIAL_GAP"
+    )
+
+    # 2. Build Base Query (Only items with remaining money)
+    query = db.query(
+        models.MergedPO,
+        remaining_expr.label("remaining_amount"),
+        stage_expr.label("remaining_stage")
+    ).filter(
+        func.abs(remaining_expr) > 0.01
+    )
+
+    # 3. Apply Filters
+    if filter_stage != "ALL":
+        query = query.filter(stage_expr == filter_stage)
+        
+    if internal_project_id:
+        query = query.filter(models.MergedPO.internal_project_id == internal_project_id)
+        
+    if customer_project_id:
+        query = query.filter(models.MergedPO.customer_project_id == customer_project_id)
+
+    if search:
+        term = f"%{search}%"
+        query = query.filter(
+            (models.MergedPO.po_no.ilike(term)) | 
+            (models.MergedPO.site_code.ilike(term)) |
+            (models.MergedPO.item_description.ilike(term))
+        )
+
+    # 4. Pagination
+    total_items = query.count()
+    results = query.order_by(models.MergedPO.publish_date.desc())\
+                   .offset((page - 1) * size).limit(size).all()
+
+    # 5. Format Output
+    items = []
+    for po, rem_amount, stage in results:
+        po_dict = po.__dict__
+        po_dict['remaining_amount'] = rem_amount
+        po_dict['remaining_stage'] = stage
+        # Eager loading might put objects here, ensure we return serializable data
+        if po.internal_project: po_dict['internal_project_name'] = po.internal_project.name
+        items.append(po_dict)
+
+    return {
+        "items": items,
+        "total_items": total_items,
+        "page": page,
+        "size": size,
+        "total_pages": (total_items + size - 1) // size
+    }
+
+# NEW HELPER: Get Stats efficiently without fetching all rows
+def get_remaining_stats(db: Session):
+    remaining_expr = models.MergedPO.line_amount_hw - (
+        func.coalesce(models.MergedPO.accepted_ac_amount, 0) + func.coalesce(models.MergedPO.accepted_pac_amount, 0)
+    )
+    stage_expr = case(
+        (models.MergedPO.date_ac_ok.is_(None), "WAITING_AC"),
+        (and_(models.MergedPO.date_ac_ok.isnot(None), models.MergedPO.date_pac_ok.is_(None)), "WAITING_PAC"),
+        else_="PARTIAL_GAP"
+    )
+    
+    # We group by stage and sum the gap
+    stats = db.query(
+        stage_expr.label("stage"),
+        func.count(models.MergedPO.id).label("count"),
+        func.sum(remaining_expr).label("total_gap")
+    ).filter(
+        func.abs(remaining_expr) > 0.01
+    ).group_by(stage_expr).all()
+    
+    return {row.stage: {"count": row.count, "gap": row.total_gap or 0} for row in stats}
+
+
 def get_financial_summary_by_period(
     db: Session, 
     year: int, 
@@ -1075,4 +1192,306 @@ def get_user_performance_stats(
         "total_accepted": total_accepted,
         "remaining_gap": remaining,
         "completion_percentage": completion
+    }
+def set_user_target(db: Session, target: schemas.UserTargetCreate):
+    """
+    Creates or Updates a target (Upsert).
+    """
+    db_target = db.query(models.UserPerformanceTarget).filter(
+        models.UserPerformanceTarget.user_id == target.user_id,
+        models.UserPerformanceTarget.year == target.year,
+        models.UserPerformanceTarget.month == target.month
+    ).first()
+
+    if db_target:
+        # Update existing
+        if target.target_po_amount is not None:
+            db_target.target_po_amount = target.target_po_amount
+        if target.target_invoice_amount is not None:
+            db_target.target_invoice_amount = target.target_invoice_amount
+    else:
+        # Create new
+        db_target = models.UserPerformanceTarget(**target.model_dump())
+        db.add(db_target)
+    
+    db.commit()
+    return db_target
+
+def get_performance_matrix(
+    db: Session, 
+    year: int, 
+    month: Optional[int] = None, 
+    filter_user_id: Optional[int] = None # <--- NEW PARAMETER
+):
+    """
+    Generates the data for both Monthly and Yearly widgets.
+    """
+    
+    # 1. Start query for eligible users (PMs, Admins, CEOs)
+    query = db.query(models.User).filter(models.User.role.in_(['PM', 'ADMIN', 'PD']))
+    
+    # 2. Apply Security Filter (Row-Level Security)
+    if filter_user_id:
+        query = query.filter(models.User.id == filter_user_id)
+        
+    pms = query.all()
+    
+    results = []
+
+    for pm in pms:
+
+        # A. Fetch Targets (Plan)
+        target_query = db.query(
+            func.sum(models.UserPerformanceTarget.target_po_amount),
+            func.sum(models.UserPerformanceTarget.target_invoice_amount)
+        ).filter(
+            models.UserPerformanceTarget.user_id == pm.id,
+            models.UserPerformanceTarget.year == year
+        )
+        
+        if month:
+            target_query = target_query.filter(models.UserPerformanceTarget.month == month)
+            
+        plan_po, plan_invoice = target_query.first()
+        plan_po = plan_po or 0.0
+        plan_invoice = plan_invoice or 0.0
+
+        # B. Fetch Actuals (From MergedPO)
+        # We reuse the logic from get_user_performance_stats but specific to the period
+        
+        # Base filter: Projects managed by this PM
+        base_filters = [models.InternalProject.project_manager_id == pm.id]
+        
+        # Date filters
+        po_date_filters = base_filters + [extract('year', models.MergedPO.publish_date) == year]
+        ac_date_filters = base_filters + [extract('year', models.MergedPO.date_ac_ok) == year]
+        pac_date_filters = base_filters + [extract('year', models.MergedPO.date_pac_ok) == year]
+        
+        if month:
+            po_date_filters.append(extract('month', models.MergedPO.publish_date) == month)
+            ac_date_filters.append(extract('month', models.MergedPO.date_ac_ok) == month)
+            pac_date_filters.append(extract('month', models.MergedPO.date_pac_ok) == month)
+
+        summary = db.query(
+            func.sum(case((and_(*po_date_filters), models.MergedPO.line_amount_hw), else_=0)),
+            func.sum(case((and_(*ac_date_filters), models.MergedPO.accepted_ac_amount), else_=0)),
+            func.sum(case((and_(*pac_date_filters), models.MergedPO.accepted_pac_amount), else_=0))
+        ).join(
+            models.InternalProject, models.MergedPO.internal_project_id == models.InternalProject.id
+        ).first()
+
+        actual_po = summary[0] or 0.0
+        actual_paid = (summary[1] or 0.0) + (summary[2] or 0.0)
+        
+        # Total Gap (Remaining to be paid on what was produced)
+        total_gap = actual_po - actual_paid
+
+        results.append({
+            "user_id": pm.id,
+            "user_name": f"{pm.first_name} {pm.last_name}",
+            "total_gap": total_gap,
+            "plan_po": plan_po,
+            "actual_po": actual_po,
+            "percent_po": (actual_po / plan_po * 100) if plan_po > 0 else 0,
+            "plan_invoice": plan_invoice,
+            "actual_invoice": actual_paid,
+            "percent_invoice": (actual_paid / plan_invoice * 100) if plan_invoice > 0 else 0,
+        })
+        
+    return results
+def get_yearly_matrix_data(db: Session, year: int):
+    # 1. Get all PMs
+    pms = db.query(models.User).filter(models.User.role.in_(['PM', 'ADMIN', 'CEO'])).all()
+    
+    matrix_data = []
+
+    for pm in pms:
+        # Initialize arrays for 12 months (0.0)
+        target_po_monthly = [0.0] * 12
+        actual_po_monthly = [0.0] * 12
+        target_inv_monthly = [0.0] * 12
+        actual_inv_monthly = [0.0] * 12
+
+        # 2. Fetch ALL Targets for this year for this PM
+        targets = db.query(models.UserPerformanceTarget).filter(
+            models.UserPerformanceTarget.user_id == pm.id,
+            models.UserPerformanceTarget.year == year
+        ).all()
+
+        for t in targets:
+            # Month is 1-based, array is 0-based
+            if 1 <= t.month <= 12:
+                target_po_monthly[t.month - 1] = t.target_po_amount
+                target_inv_monthly[t.month - 1] = t.target_invoice_amount
+
+        # 3. Fetch ALL Actuals (Grouped by Month)
+        # We do 2 queries: one for PO (publish_date), one for Invoice (AC/PAC dates)
+        
+        # A. Actual POs
+        po_results = db.query(
+            extract('month', models.MergedPO.publish_date).label('month'),
+            func.sum(models.MergedPO.line_amount_hw)
+        ).join(models.InternalProject).filter(
+            models.InternalProject.project_manager_id == pm.id,
+            extract('year', models.MergedPO.publish_date) == year
+        ).group_by('month').all()
+
+        for m, val in po_results:
+            if m: actual_po_monthly[int(m) - 1] = val or 0
+
+        # B. Actual Invoices (Paid) - This is trickier because AC and PAC have different dates.
+        # We iterate 1-12 and query efficiently or fetch all and aggregate in python.
+        # Let's fetch all accepted items for this PM and year and bucket them in Python.
+        
+        # (Simplified logic for performance: Fetch items where EITHER date is in year)
+        paid_items = db.query(models.MergedPO).join(models.InternalProject).filter(
+            models.InternalProject.project_manager_id == pm.id,
+            (extract('year', models.MergedPO.date_ac_ok) == year) | (extract('year', models.MergedPO.date_pac_ok) == year)
+        ).all()
+
+        for item in paid_items:
+            # Add AC amount to the AC month
+            if item.date_ac_ok and item.date_ac_ok.year == year:
+                actual_inv_monthly[item.date_ac_ok.month - 1] += (item.accepted_ac_amount or 0)
+            
+            # Add PAC amount to the PAC month
+            if item.date_pac_ok and item.date_pac_ok.year == year:
+                actual_inv_monthly[item.date_pac_ok.month - 1] += (item.accepted_pac_amount or 0)
+
+        # 4. Construct the Rows
+        rows = [
+            { "name": "Target PO Received", "values": target_po_monthly, "total": sum(target_po_monthly) },
+            { "name": "Actual PO Received", "values": actual_po_monthly, "total": sum(actual_po_monthly) },
+            { "name": "Target Invoice", "values": target_inv_monthly, "total": sum(target_inv_monthly) },
+            { "name": "Actual Invoice", "values": actual_inv_monthly, "total": sum(actual_inv_monthly) }
+        ]
+
+        matrix_data.append({
+            "pm_name": f"{pm.first_name} {pm.last_name}",
+            "milestones": rows
+        })
+
+    return matrix_data
+def get_internal_projects_for_user(db: Session, user: models.User):
+    """
+    Returns projects based on role:
+    - Admin: All projects
+    - PM/PD: Only projects where they are the manager
+    - Others: Empty list (or all, depending on your needs)
+    """
+    query = db.query(models.InternalProject)
+    
+    if user.role == UserRole.ADMIN:
+        return query.order_by(models.InternalProject.name).all()
+    
+    elif user.role in [UserRole.PM, UserRole.PD]:
+        return query.filter(models.InternalProject.project_manager_id == user.id).order_by(models.InternalProject.name).all()
+    
+    else:
+        return [] # Or raise error
+
+# Update the selector too
+def get_internal_project_selector_for_user(db: Session, user: models.User, search: str = None):
+    query = db.query(models.InternalProject)
+    
+    # 1. Apply Security Filter
+    if user.role != UserRole.ADMIN:
+        # If not admin, restrict to own projects
+        # (Assuming only PMs/PDs use this selector to see their work)
+        query = query.filter(models.InternalProject.project_manager_id == user.id)
+
+    # 2. Apply Search Filter
+    if search:
+        query = query.filter(models.InternalProject.name.ilike(f"%{search}%"))
+        
+    return query.limit(20).all()
+def get_remaining_to_accept_paginated(
+    db: Session, 
+    page: int = 1, 
+    size: int = 20, 
+    filter_stage: str = "ALL",
+    search: Optional[str] = None,
+    internal_project_id: Optional[int] = None,
+    customer_project_id: Optional[int] = None
+):
+    # 1. Expressions
+    remaining_expr = models.MergedPO.line_amount_hw - (
+        func.coalesce(models.MergedPO.accepted_ac_amount, 0) + 
+        func.coalesce(models.MergedPO.accepted_pac_amount, 0)
+    )
+    
+    stage_expr = case(
+        (models.MergedPO.date_ac_ok.is_(None), "WAITING_AC"),
+        (and_(models.MergedPO.date_ac_ok.isnot(None), models.MergedPO.date_pac_ok.is_(None)), "WAITING_PAC"),
+        else_="PARTIAL_GAP"
+    )
+
+    # 2. Base Query with Eager Loading (To get Project Names)
+    query = db.query(
+        models.MergedPO,
+        remaining_expr.label("remaining_amount"),
+        stage_expr.label("remaining_stage")
+    ).options(
+        joinedload(models.MergedPO.internal_project), # <--- Critical for Project Name
+        joinedload(models.MergedPO.customer_project)  # <--- Critical for Customer Project Name
+    ).filter(
+        func.abs(remaining_expr) > 0.01
+    )
+
+    # 3. APPLY FILTERS (This is the part that was likely failing)
+    
+    # Stage Filter
+    if filter_stage != "ALL":
+        query = query.filter(stage_expr == filter_stage)
+        
+    # Internal Project Filter
+    if internal_project_id:
+        query = query.filter(models.MergedPO.internal_project_id == internal_project_id)
+        
+    # Customer Project Filter
+    if customer_project_id:
+        query = query.filter(models.MergedPO.customer_project_id == customer_project_id)
+
+    # Search Filter
+    if search:
+        term = f"%{search}%"
+        query = query.filter(
+            (models.MergedPO.po_no.ilike(term)) | 
+            (models.MergedPO.site_code.ilike(term)) |
+            (models.MergedPO.item_description.ilike(term))
+        )
+
+    # 4. Pagination
+    total_items = query.count()
+    results = query.order_by(models.MergedPO.publish_date.desc())\
+                   .offset((page - 1) * size).limit(size).all()
+
+    # 5. Format Output
+    items = []
+    for po, rem_amount, stage in results:
+        po_dict = po.__dict__.copy() # Copy to avoid mutation issues
+        if '_sa_instance_state' in po_dict: del po_dict['_sa_instance_state']
+        
+        po_dict['remaining_amount'] = rem_amount
+        po_dict['remaining_stage'] = stage
+        
+        # --- FIX: Populate Names manually if serialization fails ---
+        if po.internal_project:
+            po_dict['internal_project_name'] = po.internal_project.name
+        else:
+            po_dict['internal_project_name'] = "—"
+            
+        if po.customer_project:
+            po_dict['customer_project_name'] = po.customer_project.name
+        else:
+            po_dict['customer_project_name'] = "—"
+
+        items.append(po_dict)
+
+    return {
+        "items": items,
+        "total_items": total_items,
+        "page": page,
+        "size": size,
+        "total_pages": (total_items + size - 1) // size
     }
