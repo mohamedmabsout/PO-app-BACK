@@ -429,11 +429,14 @@ def create_upload_history_record(
         user_id=user_id,
         total_rows=total_rows,
         error_message=error_msg,
+        # --- ADD THIS LINE ---
+        uploaded_at=datetime.utcnow() # Explicitly set the timestamp here
     )
     db.add(history_record)
     db.commit()
+    # You might need to refresh the object to see the new value
+    db.refresh(history_record) 
     return history_record
-
 
 def get_upload_history(db: Session, skip: int = 0, limit: int = 100):
     # Use order_by to get the most recent uploads first
