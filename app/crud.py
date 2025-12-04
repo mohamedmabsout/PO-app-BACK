@@ -6,7 +6,7 @@ from . import models, schemas
 import pandas as pd
 from sqlalchemy.orm import joinedload,Query
 import sqlalchemy as sa
-from sqlalchemy import func, case, extract, and_
+from sqlalchemy import func, case, extract, and_, or_
 from sqlalchemy.sql.functions import coalesce # More explicit import
 from sqlalchemy.orm import aliased
 from .enum import ProjectType, UserRole
@@ -867,6 +867,7 @@ def get_remaining_to_accept_paginated(
         func.abs(remaining_expr) > 0.01
     )
 
+
     # 3. Apply Filters
     if filter_stage != "ALL":
         query = query.filter(stage_expr == filter_stage)
@@ -1495,3 +1496,73 @@ def get_remaining_to_accept_paginated(
         "size": size,
         "total_pages": (total_items + size - 1) // size
     }
+
+def get_remaining_to_accept_dataframe(
+    db,
+    filter_stage: str = "ALL",
+    search: str | None = None,
+    internal_project_id: int | None = None,
+    customer_project_id: int | None = None,
+) -> pd.DataFrame:
+    InternalProject = aliased(models.InternalProject)
+    CustomerProject = aliased(models.CustomerProject)
+
+    # Base query : on JOINT les tables nécessaires
+    query = (
+        db.query(
+            models.MergedPO.id.label("id"),
+            models.MergedPO.po_no.label("po_no"),
+            models.MergedPO.site_code.label("site_code"),
+            models.MergedPO.item_description.label("item_description"),
+            InternalProject.name.label("internal_project_name"),
+            CustomerProject.name.label("customer_project_name"),
+            models.MergedPO.line_amount_hw.label("line_amount_hw"),
+            models.MergedPO.accepted_ac_amount.label("accepted_ac_amount"),
+            models.MergedPO.accepted_pac_amount.label("accepted_pac_amount"),
+            models.MergedPO.remaining_amount.label("remaining_amount"),
+            models.MergedPO.remaining_stage.label("remaining_stage"),
+            models.MergedPO.date_ac_ok.label("date_ac_ok"),
+            models.MergedPO.date_pac_ok.label("date_pac_ok"),
+        )
+        .outerjoin(
+            InternalProject,
+            models.MergedPO.internal_project_id == InternalProject.id,
+        )
+        .outerjoin(
+            CustomerProject,
+            models.MergedPO.customer_project_id == CustomerProject.id,
+        )
+    )
+
+    # Filtres
+    if filter_stage != "ALL":
+        query = query.filter(models.MergedPO.remaining_stage == filter_stage)
+
+    if search:
+        pattern = f"%{search}%"
+        query = query.filter(
+            or_(
+                models.MergedPO.po_no.ilike(pattern),
+                models.MergedPO.site_code.ilike(pattern),
+                models.MergedPO.item_description.ilike(pattern),
+            )
+        )
+
+    if internal_project_id:
+        query = query.filter(
+            models.MergedPO.internal_project_id == internal_project_id
+        )
+
+    if customer_project_id:
+        query = query.filter(
+            models.MergedPO.customer_project_id == customer_project_id
+        )
+
+    rows = query.all()
+    if not rows:
+        # DataFrame vide mais valide → df.empty = True
+        return pd.DataFrame()
+
+    # rows est une liste de Row / tuple → on convertit en dict
+    data = [dict(r._mapping) for r in rows]
+    return pd.DataFrame(data)

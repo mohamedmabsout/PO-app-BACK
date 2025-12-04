@@ -286,8 +286,8 @@ def get_remaining_pos(
     current_user: models.User = Depends(auth.get_current_user)
 ):
     data = crud.get_remaining_to_accept_paginated(
-        db, page, size, filter_stage, 
-        search, internal_project_id, customer_project_id
+                db, page, size, filter_stage, 
+                search, internal_project_id, customer_project_id
     )
     # Note: Stats are usually global, calculating them with filters might be expensive 
     # but let's keep the global stats for the cards at the top
