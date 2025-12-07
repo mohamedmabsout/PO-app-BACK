@@ -333,3 +333,61 @@ class PerformanceMatrixRow(BaseModel):
     plan_invoice: float
     actual_invoice: float
     percent_invoice: float
+class BCItemCreate(BaseModel):
+    merged_po_id: int
+    rate_sbc: float      # e.g., 0.85
+    quantity_sbc: float  # e.g., 5.0
+
+class BCCreate(BaseModel):
+    internal_project_id: int
+    sbc_id: int
+    items: List[BCItemCreate]
+
+class SBCCreate(BaseModel):
+    short_name: str
+    name: str
+    ceo_name: Optional[str] = None
+    email: Optional[str] = None
+    rib: Optional[str] = None
+    bank_name: Optional[str] = None
+    bank_address: Optional[str] = None
+    cnss: Optional[str] = None
+    tax_id: Optional[str] = None
+    activity_sector: Optional[str] = None
+    phone_number: Optional[str] = None
+    address: Optional[str] = None
+
+
+class SBCResponse(BaseModel):
+    short_name: str
+    sbc_code: str
+    status: str
+    name: str
+    ceo_name: Optional[str] = None
+    email: Optional[str] = None
+    rib: Optional[str] = None
+    bank_name: Optional[str] = None
+    bank_address: Optional[str] = None
+    cnss: Optional[str] = None
+    tax_id: Optional[str] = None
+    activity_sector: Optional[str] = None
+    phone_number: Optional[str] = None
+    address: Optional[str] = None
+    created_at: datetime
+class BCItemResponse(BCItemCreate):
+    id: int
+    unit_price_sbc: float
+    line_amount_sbc: float
+    applied_tax_rate: float
+    model_config = ConfigDict(from_attributes=True)
+
+class BCResponse(BaseModel):
+    id: int
+    bc_number: str
+    status: str
+    total_amount_ht: float
+    total_tax_amount: float
+    total_amount_ttc: float
+    created_at: datetime
+    items: List[BCItemResponse]
+    model_config = ConfigDict(from_attributes=True)
