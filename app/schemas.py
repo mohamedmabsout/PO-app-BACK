@@ -50,8 +50,7 @@ class UserUpdate(BaseModel):
     email: Optional[EmailStr] = None
     role: Optional[str] = None
 
-    class Config:
-        orm_mode = True
+model_config = ConfigDict(from_attributes=True)
 class AccountBase(BaseModel):
     name: str
 

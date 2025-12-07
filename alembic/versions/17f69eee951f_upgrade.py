@@ -1,8 +1,8 @@
-"""advanced_rules_schema
+"""upgrade
 
-Revision ID: 9b3fe32c3034
+Revision ID: 17f69eee951f
 Revises: 
-Create Date: 2025-11-27 21:55:23.181623
+Create Date: 2025-12-04 11:58:23.078609
 
 """
 from typing import Sequence, Union
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision: str = '9b3fe32c3034'
+revision: str = '17f69eee951f'
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -128,6 +128,18 @@ def upgrade() -> None:
     sa.PrimaryKeyConstraint('id')
     )
     op.create_index(op.f('ix_upload_history_id'), 'upload_history', ['id'], unique=False)
+    op.create_table('user_performance_targets',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('user_id', sa.Integer(), nullable=False),
+    sa.Column('year', sa.Integer(), nullable=False),
+    sa.Column('month', sa.Integer(), nullable=False),
+    sa.Column('target_po_amount', sa.Float(), nullable=True),
+    sa.Column('target_invoice_amount', sa.Float(), nullable=True),
+    sa.ForeignKeyConstraint(['user_id'], ['users.id'], ),
+    sa.PrimaryKeyConstraint('id'),
+    sa.UniqueConstraint('user_id', 'year', 'month', name='uix_user_year_month')
+    )
+    op.create_index(op.f('ix_user_performance_targets_id'), 'user_performance_targets', ['id'], unique=False)
     op.create_table('raw_purchase_orders',
     sa.Column('id', sa.Integer(), nullable=False),
     sa.Column('po_status', sa.String(length=50), nullable=True),
@@ -167,14 +179,12 @@ def upgrade() -> None:
     sa.Column('customer_project_id', sa.Integer(), nullable=True),
     sa.Column('min_publish_date', sa.Date(), nullable=True),
     sa.Column('max_publish_date', sa.Date(), nullable=True),
-    sa.Column('priority', sa.Integer(), nullable=True),
     sa.Column('internal_project_id', sa.Integer(), nullable=False),
     sa.ForeignKeyConstraint(['customer_project_id'], ['customer_projects.id'], ),
     sa.ForeignKeyConstraint(['internal_project_id'], ['internal_projects.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
     op.create_index(op.f('ix_site_assignment_rules_id'), 'site_assignment_rules', ['id'], unique=False)
-    op.create_index(op.f('ix_site_assignment_rules_priority'), 'site_assignment_rules', ['priority'], unique=False)
     op.create_table('site_project_allocations',
     sa.Column('id', sa.Integer(), nullable=False),
     sa.Column('customer_project_id', sa.Integer(), nullable=False),
@@ -233,7 +243,6 @@ def downgrade() -> None:
     op.drop_table('merged_pos')
     op.drop_index(op.f('ix_site_project_allocations_id'), table_name='site_project_allocations')
     op.drop_table('site_project_allocations')
-    op.drop_index(op.f('ix_site_assignment_rules_priority'), table_name='site_assignment_rules')
     op.drop_index(op.f('ix_site_assignment_rules_id'), table_name='site_assignment_rules')
     op.drop_table('site_assignment_rules')
     op.drop_index(op.f('ix_raw_purchase_orders_site_id'), table_name='raw_purchase_orders')
@@ -244,6 +253,8 @@ def downgrade() -> None:
     op.drop_index(op.f('ix_raw_purchase_orders_id'), table_name='raw_purchase_orders')
     op.drop_index(op.f('ix_raw_purchase_orders_customer_id'), table_name='raw_purchase_orders')
     op.drop_table('raw_purchase_orders')
+    op.drop_index(op.f('ix_user_performance_targets_id'), table_name='user_performance_targets')
+    op.drop_table('user_performance_targets')
     op.drop_index(op.f('ix_upload_history_id'), table_name='upload_history')
     op.drop_table('upload_history')
     op.drop_index(op.f('ix_raw_acceptances_po_no'), table_name='raw_acceptances')

@@ -10,6 +10,12 @@ from sqlalchemy import func, case, extract, and_
 from sqlalchemy.sql.functions import coalesce # More explicit import
 from sqlalchemy.orm import aliased
 from .enum import ProjectType, UserRole
+
+import os
+import shutil
+from pathlib import Path
+
+UPLOAD_DIR = "uploads/sbc_docs"
 PAYMENT_TERM_MAP = {
     "【TT】▍AC1 (80.00%, INV AC -15D, Complete 80%) / AC2 (20.00%, INV AC -15D, Complete 100%) ▍": "AC1 80 | PAC 20",
     "【TT】▍AC1 (80.00%, INV AC -30D, Complete 80%) / AC2 (20.00%, INV AC -30D, Complete 100%) ▍": "AC1 80 | PAC 20",
@@ -429,14 +435,11 @@ def create_upload_history_record(
         user_id=user_id,
         total_rows=total_rows,
         error_message=error_msg,
-        # --- ADD THIS LINE ---
-        uploaded_at=datetime.utcnow() # Explicitly set the timestamp here
     )
     db.add(history_record)
     db.commit()
-    # You might need to refresh the object to see the new value
-    db.refresh(history_record) 
     return history_record
+
 
 def get_upload_history(db: Session, skip: int = 0, limit: int = 100):
     # Use order_by to get the most recent uploads first
@@ -905,6 +908,7 @@ def get_remaining_to_accept_paginated(
     ).filter(
         func.abs(remaining_expr) > 0.01
     )
+
 
     # 3. Apply Filters
     if filter_stage != "ALL":
@@ -1534,26 +1538,119 @@ def get_remaining_to_accept_paginated(
         "size": size,
         "total_pages": (total_items + size - 1) // size
     }
-def get_eligible_pos_for_bc(
+
+def get_remaining_to_accept_dataframe(
+    db: Session,
+    filter_stage: str = "ALL",
+    search: Optional[str] = None,
+    internal_project_id: Optional[int] = None,
+    customer_project_id: Optional[int] = None
+) -> pd.DataFrame:
+    """
+    Construit une requête pour l'export "Remaining To Accept" en se basant sur les filtres,
+    et retourne un DataFrame Pandas prêt à être exporté.
+    """
+    remaining_expr = models.MergedPO.line_amount_hw - (
+        func.coalesce(models.MergedPO.accepted_ac_amount, 0) + 
+        func.coalesce(models.MergedPO.accepted_pac_amount, 0)
+    )
+    stage_expr = case(
+        (models.MergedPO.date_ac_ok.is_(None), "WAITING_AC"),
+        (and_(models.MergedPO.date_ac_ok.isnot(None), models.MergedPO.date_pac_ok.is_(None)), "WAITING_PAC"),
+        else_="PARTIAL_GAP"
+    )
+
+    # --- CORRECTION DE LA REQUÊTE AVEC LES BONNES JOINTURES ---
+    query = db.query(
+        models.MergedPO.po_no,
+        models.MergedPO.site_code,
+        models.MergedPO.item_description,
+        models.InternalProject.name.label("internal_project_name"), # On sélectionne le nom depuis la table jointe
+        models.CustomerProject.name.label("customer_project_name"), # Idem pour le projet client
+        models.MergedPO.line_amount_hw,
+        models.MergedPO.accepted_ac_amount,
+        models.MergedPO.accepted_pac_amount,
+        remaining_expr.label("remaining_amount"),
+        stage_expr.label("remaining_stage"),
+        models.MergedPO.publish_date
+    ).select_from(models.MergedPO).outerjoin(
+        models.InternalProject, models.MergedPO.internal_project_id == models.InternalProject.id
+    ).outerjoin(
+        models.CustomerProject, models.MergedPO.customer_project_id == models.CustomerProject.id
+    ).filter(
+        func.abs(remaining_expr) > 0.01
+    )
+
+    # 3. On applique les mêmes filtres que pour la pagination
+    if filter_stage != "ALL":
+        query = query.filter(stage_expr == filter_stage)
+    if internal_project_id:
+        query = query.filter(models.MergedPO.internal_project_id == internal_project_id)
+    if customer_project_id:
+        query = query.filter(models.MergedPO.customer_project_id == customer_project_id)
+    if search:
+        term = f"%{search}%"
+        query = query.filter(
+            (models.MergedPO.po_no.ilike(term)) | 
+            (models.MergedPO.site_code.ilike(term)) |
+            (models.MergedPO.item_description.ilike(term))
+        )
+    
+    # 4. On exécute la requête et on la charge dans un DataFrame SANS pagination
+    df = pd.read_sql(query.statement, db.bind)
+
+    if df.empty:
+        return pd.DataFrame()
+
+    # 5. On renomme les colonnes pour le fichier Excel
+    df.rename(columns={
+        'po_no': 'PO Number',
+        'site_code': 'Site Code',
+        'item_description': 'Item Description',
+        'name': 'Internal Project', # Nom de colonne après la jointure
+        'line_amount_hw': 'Total PO Value',
+        'accepted_ac_amount': 'Accepted AC',
+        'accepted_pac_amount': 'Accepted PAC',
+        'remaining_amount': 'Remaining to Accept',
+        'remaining_stage': 'Stage',
+        'publish_date': 'Publish Date'
+    }, inplace=True)
+    
+    return df
+    def get_eligible_pos_for_bc(
     db: Session, 
     project_id: int, 
     site_codes: Optional[List[str]] = None, # Expects a list now
     start_date: Optional[date] = None,
     end_date: Optional[date] = None
 ):
+def get_eligible_pos_for_bc(
+    db: Session, 
+    project_id: int, 
+    site_codes: Optional[List[str]] = None,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None
+):
     """
-    Fetches MergedPOs that belong to the project.
-    Supports Batch Site Filtering.
+    Fetches POs for the project that have REMAINING Quantity > 0.
     """
-    query = db.query(models.MergedPO).filter(
+    # Subquery: Sum of quantities used in existing BCs per PO
+    used_subquery = db.query(
+        models.BCItem.merged_po_id,
+        func.sum(models.BCItem.quantity_sbc).label("used_qty")
+    ).group_by(models.BCItem.merged_po_id).subquery()
+
+    # Main Query: Left Join MergedPO with the Usage Subquery
+    query = db.query(models.MergedPO).outerjoin(
+        used_subquery, models.MergedPO.id == used_subquery.c.merged_po_id
+    ).filter(
         models.MergedPO.internal_project_id == project_id,
-        # Optional: Filter out POs that are fully consumed (qty remaining <= 0)
-        # For now, we return all, frontend can disable fully used ones.
+        # CRITICAL FILTER: Requested Qty must be greater than Used Qty (treating NULL as 0)
+        models.MergedPO.requested_qty > func.coalesce(used_subquery.c.used_qty, 0)
     )
 
-    # Batch Site Filter
+    # Standard Filters
     if site_codes and len(site_codes) > 0:
-        # Clean the list (trim spaces)
         clean_codes = [c.strip() for c in site_codes if c.strip()]
         if clean_codes:
             query = query.filter(models.MergedPO.site_code.in_(clean_codes))
@@ -1564,6 +1661,7 @@ def get_eligible_pos_for_bc(
         query = query.filter(func.date(models.MergedPO.publish_date) <= end_date)
         
     return query.all()
+
 def generate_bc_number(db: Session):
     """
     Generates ID based on Date: BC + YYYYMMDD + XX (Daily Sequence)

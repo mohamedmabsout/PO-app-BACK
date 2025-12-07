@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException
 from sqlalchemy.orm import Session
 from typing import Optional
 from .. import crud, schemas, auth, models
-from ..dependencies import get_db
+from ..dependencies  import get_db
 
 router = APIRouter(prefix="/api/sbcs", tags=["SBC Management"])
 
