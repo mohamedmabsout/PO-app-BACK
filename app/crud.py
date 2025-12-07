@@ -1841,11 +1841,11 @@ def create_sbc(db: Session, form_data: dict, contract_file, tax_file, creator_id
         # Contract
         contract_ref=form_data.get('contract_ref'),
         # We store the DATE of upload if file exists
-        contract_upload_date=datetime.datetime.now() if contract_path else None,
+        contract_upload_date=datetime.now() if contract_path else None,
         has_contract_attachment=True if contract_path else False,
         
         # Tax
-        tax_reg_upload_date=datetime.datetime.now() if tax_path else None,
+        tax_reg_upload_date=datetime.now() if tax_path else None,
         has_tax_regularization=True if tax_path else False,
         tax_reg_end_date=form_data.get('tax_reg_end_date')
     )
