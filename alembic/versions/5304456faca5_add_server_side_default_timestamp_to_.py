@@ -1,7 +1,7 @@
 """Add server-side default timestamp to upload_history
 
 Revision ID: 5304456faca5
-Revises: 2b8f7782057f
+Revises: 
 Create Date: 2025-12-04 13:36:32.615224
 
 """
@@ -13,7 +13,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = '5304456faca5'
-down_revision: Union[str, Sequence[str], None] = '2b8f7782057f'
+down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

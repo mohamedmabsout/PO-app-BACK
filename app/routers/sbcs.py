@@ -41,7 +41,7 @@ def create_new_sbc(
     
     return crud.create_sbc(db, form_data, contract_file, tax_file, current_user.id)
 
-    @router.get("/pending", response_model=List[schemas.SBCResponse])
+@router.get("/pending", response_model=List[schemas.SBCResponse])
 def get_pending_sbcs_list(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)

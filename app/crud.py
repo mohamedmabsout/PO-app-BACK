@@ -1617,13 +1617,7 @@ def get_remaining_to_accept_dataframe(
     }, inplace=True)
     
     return df
-    def get_eligible_pos_for_bc(
-    db: Session, 
-    project_id: int, 
-    site_codes: Optional[List[str]] = None, # Expects a list now
-    start_date: Optional[date] = None,
-    end_date: Optional[date] = None
-):
+   
 def get_eligible_pos_for_bc(
     db: Session, 
     project_id: int, 
