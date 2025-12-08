@@ -460,9 +460,12 @@ def create_upload_history_record(
         user_id=user_id,
         total_rows=total_rows,
         error_message=error_msg,
+        uploaded_at=datetime.utcnow()
     )
     db.add(history_record)
     db.commit()
+    db.refresh(history_record) 
+
     return history_record
 
 
