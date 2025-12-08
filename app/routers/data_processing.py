@@ -355,19 +355,3 @@ def download_bc_pdf(bc_id: int, db: Session = Depends(get_db)):
     
     pdf_path = generate_bc_pdf(bc) # Returns path to generated file
     return FileResponse(pdf_path, filename=f"{bc.bc_number}.pdf", media_type='application/pdf')
-@router.get("/bc/{bc_id}/pdf")
-def download_bc_pdf(bc_id: int, db: Session = Depends(get_db)):
-    bc = db.query(models.BonDeCommande).get(bc_id)
-    if not bc:
-        raise HTTPException(status_code=404, detail="BC not found")
-        
-    # Check status if you want to restrict draft downloads
-    # if bc.status == models.BCStatus.DRAFT: ...
-
-    pdf_path = generate_bc_pdf(bc)
-    
-    return FileResponse(
-        pdf_path, 
-        filename=f"{bc.bc_number}.pdf", 
-        media_type='application/pdf'
-    )

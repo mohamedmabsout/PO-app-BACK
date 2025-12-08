@@ -40,15 +40,14 @@ def generate_bc_pdf(bc):
     # Logo (Left) and Title (Right)
     logo_path = "logo.png" # Make sure this file exists in root or provide absolute path
     if os.path.exists(logo_path):
-        logo = Image(logo_path, width=4*cm, height=1.5*cm)
+        logo = Image(logo_path, width=4*cm, height=2*cm)
     else:
         logo = Paragraph("<b>[LOGO]</b>", style_title)
 
     # Top Header Table
     header_data = [
         [logo, Paragraph("<b>Purchase Order</b>", style_title)],
-        [Paragraph(f"<b>Subcontract No.:</b> {bc.bc_number}", style_bold), 
-         Paragraph(f"<b>PO/Rel.Ver.:</b> 0", style_normal)]
+        [Paragraph(f"<b>Subcontract No.:</b> {bc.bc_number}", style_bold), Paragraph(f"<b>Date:</b> {bc.created_at.strftime('%Y-%m-%d')}", style_bold)]
     ]
     
     t_header = Table(header_data, colWidths=[10*cm, 9*cm])
@@ -69,7 +68,6 @@ def generate_bc_pdf(bc):
         [Paragraph("<b>Ship To / Supplier:</b>", style_bold)],
         [Paragraph(f"<b>Name:</b> {bc.sbc.ceo_name or ''}", style_normal)],
         [Paragraph(f"<b>Company:</b> {bc.sbc.name}", style_normal)],
-        [Paragraph(f"<b>Address:</b> {bc.sbc.address or 'N/A'}", style_normal)],
         [Paragraph(f"<b>Phone:</b> {bc.sbc.phone_1 or ''}", style_normal)],
         [Paragraph(f"<b>Fax:</b> -", style_normal)],
         [Paragraph(f"<b>Currency:</b> MAD", style_normal)],
