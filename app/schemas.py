@@ -332,3 +332,23 @@ class PerformanceMatrixRow(BaseModel):
     plan_invoice: float
     actual_invoice: float
     percent_invoice: float
+
+class SiteAssignByCodeRequest(BaseModel):
+    """
+    Assigner 1 seul site à un projet interne
+    en utilisant le site_code + le nom du projet interne.
+    """
+    site_code: str
+    internal_project_name: str
+
+
+class BulkSiteAssignByCodeRequest(BaseModel):
+    """
+    Assigner plusieurs sites à un projet interne
+    en utilisant les site_codes + le nom du projet interne.
+    """
+    site_codes: List[str]
+    internal_project_name: str
+    
+class SiteCodeList(BaseModel):
+    site_codes: List[str]

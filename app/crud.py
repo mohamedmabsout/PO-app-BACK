@@ -396,7 +396,32 @@ def process_and_merge_pos(db: Session):
     return len(clean_pos_list)
 
 def get_all_po_data(db: Session):
-    return db.query(models.MergedPO).all()
+    """
+    Retourne les MergedPO avec le nom du projet interne dans le champ project_name
+    pour que le frontend puisse l'utiliser directement.
+    """
+    rows = (
+        db.query(models.MergedPO)
+        .options(
+            joinedload(models.MergedPO.internal_project)  # charge la relation
+        )
+        .all()
+    )
+
+    result = []
+    for po in rows:
+        d = po.__dict__.copy()
+        # On enlève l’état SQLAlchemy qui casse la serialisation JSON
+        d.pop("_sa_instance_state", None)
+
+        # 👉 ICI : on injecte le nom du projet
+        d["project_name"] = (
+            po.internal_project.name if po.internal_project else None
+        )
+
+        result.append(d)
+
+    return result
 
 
 def create_po_data_from_dataframe(db: Session, df: pd.DataFrame, user_id: int):
@@ -1575,4 +1600,133 @@ def get_remaining_to_accept_dataframe(
     }, inplace=True)
     
     return df
+
+
+def assign_site_to_internal_project_by_code(
+    db: Session,
+    site_code: str,
+    internal_project_name: str,
+) -> int:
     
+    """
+    Assigne UN site (via site_code) à un projet interne (via nom du projet).
+    - Crée/Maj l'entrée SiteProjectAllocation
+    - Met à jour tous les MergedPO de ce site pour pointer vers ce projet interne
+    Retourne le nombre de lignes MergedPO mises à jour.
+    """
+
+    # 1. Récupérer le site
+    site = (
+        db.query(models.Site)
+        .filter(models.Site.site_code == site_code)
+        .first()
+    )
+    if not site:
+        # Pas d'erreur ici, on renvoie 0, le router décidera quoi faire
+        return 0
+
+    # 2. Récupérer le projet interne par son nom
+    internal_project = (
+        db.query(models.InternalProject)
+        .filter(models.InternalProject.name == internal_project_name)
+        .first()
+    )
+    if not internal_project:
+        return 0
+
+    # 3. Créer ou mettre à jour l’allocation manuelle site ↔ projet
+    allocation = (
+        db.query(models.SiteProjectAllocation)
+        .filter(models.SiteProjectAllocation.site_id == site.id)
+        .first()
+    )
+    if allocation:
+        allocation.internal_project_id = internal_project.id
+    else:
+        allocation = models.SiteProjectAllocation(
+            site_id=site.id,
+            internal_project_id=internal_project.id,
+        )
+        db.add(allocation)
+
+    # 4. Mettre à jour tous les MergedPO pour ce site
+    updated_rows = (
+        db.query(models.MergedPO)
+        .filter(models.MergedPO.site_id == site.id)
+        .update(
+            {models.MergedPO.internal_project_id: internal_project.id},
+            synchronize_session=False,
+        )
+    )
+
+    db.commit()
+    return updated_rows
+
+
+def bulk_assign_sites_to_internal_project_by_code(
+    db: Session,
+    site_codes: List[str],
+    internal_project_name: str,
+) -> int:
+    
+    """
+    Assigne PLUSIEURS sites (via liste de site_code)
+    à un PROJET INTERNE (via nom).
+    Retourne le nombre total de lignes MergedPO mises à jour.
+    """
+
+    if not site_codes:
+        return 0
+
+    # 1. Récupérer le projet interne
+    internal_project = (
+        db.query(models.InternalProject)
+        .filter(models.InternalProject.name == internal_project_name)
+        .first()
+    )
+    if not internal_project:
+        return 0
+
+    # 2. Récupérer tous les sites correspondants
+    sites = (
+        db.query(models.Site)
+        .filter(models.Site.site_code.in_(site_codes))
+        .all()
+    )
+    if not sites:
+        return 0
+
+    site_ids = [s.id for s in sites]
+
+    # 3. Créer / mettre à jour les allocations SiteProjectAllocation
+    existing_allocs = (
+        db.query(models.SiteProjectAllocation)
+        .filter(models.SiteProjectAllocation.site_id.in_(site_ids))
+        .all()
+    )
+    alloc_by_site_id = {a.site_id: a for a in existing_allocs}
+
+    for site in sites:
+        alloc = alloc_by_site_id.get(site.id)
+        if alloc:
+            alloc.internal_project_id = internal_project.id
+        else:
+            db.add(
+                models.SiteProjectAllocation(
+                    site_id=site.id,
+                    internal_project_id=internal_project.id,
+                )
+            )
+
+    # 4. Mise à jour massive des MergedPO
+    total_updated = (
+        db.query(models.MergedPO)
+        .filter(models.MergedPO.site_id.in_(site_ids))
+        .update(
+            {models.MergedPO.internal_project_id: internal_project.id},
+            synchronize_session=False,
+        )
+    )
+
+    db.commit()
+    return total_updated
