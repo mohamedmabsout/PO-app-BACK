@@ -7,6 +7,7 @@ from .. import auth, models
 
 from .. import crud, schemas
 from ..dependencies import get_db, get_current_user, require_admin, require_management
+from ..schemas import SiteCodeList
 
 router = APIRouter(
     prefix="/api/projects",  # All routes in this file will start with /api/projects
@@ -206,3 +207,72 @@ def update_internal_project(
     if updated_project is None:
         raise HTTPException(status_code=404, detail="Project not found")
     return updated_project
+    
+@router.post("/assign-site-by-code", response_model=dict)
+def assign_site_by_code(
+    payload: schemas.SiteAssignByCodeRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),  # plus strict : require_management
+):
+    site = crud.assign_site_to_internal_project_by_code(
+        db=db,
+        site_code=payload.site_code,
+        internal_project_name=payload.internal_project_name,
+    )
+    return {"status": "ok", "site_id": site.id, "internal_project_id": site.internal_project_id}
+
+
+@router.post("/bulk-assign-sites", dependencies=[Depends(require_management)])
+def bulk_assign_sites(
+    payload: schemas.BulkSiteAssignByCodeRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    
+    """
+    Assignation massive : plusieurs sites sélectionnés → 1 projet interne.
+    Utilisé quand tu coches plusieurs codes site et tu cliques "Assign in bulk".
+    """
+
+    if not payload.site_ids:
+        raise HTTPException(status_code=400, detail="No site IDs provided")
+
+    project = db.query(models.InternalProject).filter(
+        models.InternalProject.id == payload.internal_project_id
+    ).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Internal project not found")
+
+    result = crud.bulk_assign_sites_to_internal_project(
+        db,
+        site_ids=payload.site_ids,
+        internal_project_id=payload.internal_project_id,
+    )
+
+    return {"status": "ok", **result}
+@router.post("/merged-pos/search-by-sites")
+def search_merged_po_by_sites(payload: SiteCodeList, db: Session = Depends(get_db)):
+
+    if not payload.site_codes or len(payload.site_codes) == 0:
+        raise HTTPException(status_code=400, detail="site_codes list is empty.")
+
+    results = (
+        db.query(models.MergedPO)
+        .filter(models.MergedPO.site_code.in_(payload.site_codes))
+        .all()
+    )
+
+    return [
+        {
+            "id": r.id,
+            "site_code": r.site_code,
+            "po_id": r.po_id,
+            "po_no": r.po_no,
+            "po_line_no": r.po_line_no,
+            "internal_project_name": r.internal_project.name if r.internal_project else None,
+            "customer_project_name": r.customer_project.name if r.customer_project else None,
+            "line_amount_hw": r.line_amount_hw,
+            "publish_date": r.publish_date,
+        }
+        for r in results
+    ]
