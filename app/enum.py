@@ -13,7 +13,6 @@ class ProjectType(str, enum.Enum):
     FIXED_PRICE = "Fixed Price"
     TIME_MATERIAL = "Time & Material"
     INTERNAL = "Internal"
-    # Add this line:
     TBD = "TBD"
 class SBCStatus(str, enum.Enum):
     UNDER_APPROVAL = "Under Approval"
@@ -21,8 +20,9 @@ class SBCStatus(str, enum.Enum):
     BLACKLISTED = "Blacklisted"
     DRAFT = "Draft" # Optional, if RAF saves before submitting
 class BCStatus(str, enum.Enum):
-    PD_APPROVAL = "Under PD Approval"
+    PENDING_L2 = "PENDING_L2"
     CEO_APPROVAL = "Under CEO Approval"
-    ACTIVE = "Active"
-    BLACKLISTED = "Blacklisted"
-    DRAFT = "Draft" # Optional, if RAF saves before submitting
+    ACTIVE = "ACTIVE"
+    BLACKLISTED = "BLACKLISTED"
+    DRAFT = "DRAFT" # Optional, if RAF saves before submitting
+    APPROVED = "APPROVED"

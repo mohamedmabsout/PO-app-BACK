@@ -12,7 +12,9 @@ from ..dependencies import get_db
 from .. import crud, models, auth, schemas
 from datetime import datetime, date
 from xlsxwriter.utility import xl_col_to_name
-
+from ..utils.pdf_generator import generate_bc_pdf # Import the function
+from fastapi.responses import FileResponse
+ 
 router = APIRouter(prefix="/api/data", tags=["data_processing"])
 logger = logging.getLogger(__name__)
 
@@ -329,3 +331,27 @@ def generate_bc(
     except Exception as e:
         print(e)
         raise HTTPException(status_code=500, detail="Failed to generate BC")
+@router.get("/bc/list/{status}", response_model=List[schemas.BCResponse])
+def list_bcs(status: str, db: Session = Depends(get_db)):
+    # Map string to Enum
+    status_enum = models.BCStatus(status) 
+    return crud.get_bcs_by_status(db, status_enum)
+
+@router.post("/bc/{bc_id}/approve-l1")
+def approve_l1(bc_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
+    # Check if PD
+    return crud.approve_bc_l1(db, bc_id, current_user.id)
+
+@router.post("/bc/{bc_id}/approve-l2")
+def approve_l2(bc_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
+    # Check if Admin
+    return crud.approve_bc_l2(db, bc_id, current_user.id)
+
+@router.get("/bc/{bc_id}/pdf")
+def download_bc_pdf(bc_id: int, db: Session = Depends(get_db)):
+    bc = db.query(models.BonDeCommande).get(bc_id)
+    if not bc or bc.status != models.BCStatus.APPROVED:
+        raise HTTPException(status_code=400, detail="BC not approved yet")
+    
+    pdf_path = generate_bc_pdf(bc) # Returns path to generated file
+    return FileResponse(pdf_path, filename=f"{bc.bc_number}.pdf", media_type='application/pdf')

@@ -1907,8 +1907,90 @@ def reject_sbc(db: Session, sbc_id: int):
     sbc.status = models.SBCStatus.BLACKLISTED # Or return to Draft logic if you prefer
     db.commit()
     return sbc
+def get_bcs_by_status(db: Session, status: models.BCStatus):
+    return db.query(models.BonDeCommande).filter(models.BonDeCommande.status == status).all()
+
+def approve_bc_l1(db: Session, bc_id: int, approver_id: int):
+    bc = db.query(models.BonDeCommande).get(bc_id)
+    if not bc or bc.status != models.BCStatus.DRAFT:
+        raise ValueError("BC not found or not in Draft status")
     
-def search_merged_pos_by_site_codes(
+    bc.status = models.BCStatus.PENDING_L2 # Move to Admin
+    bc.approver_l1_id = approver_id
+    db.commit()
+    return bc
+
+def approve_bc_l2(db: Session, bc_id: int, approver_id: int):
+    bc = db.query(models.BonDeCommande).get(bc_id)
+    if not bc or bc.status != models.BCStatus.PENDING_L2:
+        raise ValueError("BC not found or not ready for L2 approval")
+    
+    bc.status = models.BCStatus.APPROVED # Final
+    bc.approver_l2_id = approver_id
+    db.commit()
+    return bc
+def assign_site_to_internal_project_by_code(
+    db: Session,
+    site_code: str,
+    internal_project_name: str,
+) -> int:
+    
+    """
+    Assigne UN site (via site_code) à un projet interne (via nom du projet).
+    - Crée/Maj l'entrée SiteProjectAllocation
+    - Met à jour tous les MergedPO de ce site pour pointer vers ce projet interne
+    Retourne le nombre de lignes MergedPO mises à jour.
+    """
+
+    # 1. Récupérer le site
+    site = (
+        db.query(models.Site)
+        .filter(models.Site.site_code == site_code)
+        .first()
+    )
+    if not site:
+        # Pas d'erreur ici, on renvoie 0, le router décidera quoi faire
+        return 0
+
+    # 2. Récupérer le projet interne par son nom
+    internal_project = (
+        db.query(models.InternalProject)
+        .filter(models.InternalProject.name == internal_project_name)
+        .first()
+    )
+    if not internal_project:
+        return 0
+
+    # 3. Créer ou mettre à jour l’allocation manuelle site ↔ projet
+    allocation = (
+        db.query(models.SiteProjectAllocation)
+        .filter(models.SiteProjectAllocation.site_id == site.id)
+        .first()
+    )
+    if allocation:
+        allocation.internal_project_id = internal_project.id
+    else:
+        allocation = models.SiteProjectAllocation(
+            site_id=site.id,
+            internal_project_id=internal_project.id,
+        )
+        db.add(allocation)
+
+    # 4. Mettre à jour tous les MergedPO pour ce site
+    updated_rows = (
+        db.query(models.MergedPO)
+        .filter(models.MergedPO.site_id == site.id)
+        .update(
+            {models.MergedPO.internal_project_id: internal_project.id},
+            synchronize_session=False,
+        )
+    )
+
+    db.commit()
+    return updated_rows
+
+
+def bulk_assign_sites_to_internal_project_by_code(
     db: Session,
     site_codes: List[str],
     start_date: Optional[date] = None,
@@ -1937,7 +2019,14 @@ def search_merged_pos_by_site_codes(
     if end_date:
         query = query.filter(func.date(models.MergedPO.publish_date) <= end_date)
 
-    # tu peux ajouter order_by si tu veux
-    query = query.order_by(models.MergedPO.site_code, models.MergedPO.po_no)
+    # 4. Mise à jour massive des MergedPO
+    total_updated = (
+        db.query(models.MergedPO)
+        .filter(models.MergedPO.site_id.in_(site_ids))
+        .update(
+            {models.MergedPO.internal_project_id: internal_project.id},
+            synchronize_session=False,
+        )
+    )
 
-    return query.all()
+    db.commit()
