@@ -1882,3 +1882,25 @@ def reject_sbc(db: Session, sbc_id: int):
     sbc.status = models.SBCStatus.BLACKLISTED # Or return to Draft logic if you prefer
     db.commit()
     return sbc
+def get_bcs_by_status(db: Session, status: models.BCStatus):
+    return db.query(models.BonDeCommande).filter(models.BonDeCommande.status == status).all()
+
+def approve_bc_l1(db: Session, bc_id: int, approver_id: int):
+    bc = db.query(models.BonDeCommande).get(bc_id)
+    if not bc or bc.status != models.BCStatus.DRAFT:
+        raise ValueError("BC not found or not in Draft status")
+    
+    bc.status = models.BCStatus.PENDING_L2 # Move to Admin
+    bc.approver_l1_id = approver_id
+    db.commit()
+    return bc
+
+def approve_bc_l2(db: Session, bc_id: int, approver_id: int):
+    bc = db.query(models.BonDeCommande).get(bc_id)
+    if not bc or bc.status != models.BCStatus.PENDING_L2:
+        raise ValueError("BC not found or not ready for L2 approval")
+    
+    bc.status = models.BCStatus.APPROVED # Final
+    bc.approver_l2_id = approver_id
+    db.commit()
+    return bc

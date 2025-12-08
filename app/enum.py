@@ -21,7 +21,7 @@ class SBCStatus(str, enum.Enum):
     BLACKLISTED = "Blacklisted"
     DRAFT = "Draft" # Optional, if RAF saves before submitting
 class BCStatus(str, enum.Enum):
-    PD_APPROVAL = "Under PD Approval"
+    PENDING_L2 = "Under PD Approval"
     CEO_APPROVAL = "Under CEO Approval"
     ACTIVE = "Active"
     BLACKLISTED = "Blacklisted"
