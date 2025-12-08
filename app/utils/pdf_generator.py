@@ -5,6 +5,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import cm, mm
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image
 from reportlab.lib.enums import TA_LEFT, TA_RIGHT, TA_CENTER
+from xml.sax.saxutils import escape # Import this
 
 def generate_bc_pdf(bc):
     # 1. Setup File Path
@@ -116,11 +117,15 @@ def generate_bc_pdf(bc):
         start = item.merged_po.publish_date.strftime('%Y-%m-%d') if item.merged_po.publish_date else "-"
         # End date logic? For now assume +3 months or same as start
         end = "-" 
+        raw_desc = item.merged_po.item_description or ""
+        clean_desc = escape(raw_desc) # Converts '<' to '&lt;', '&' to '&amp;' etc.
         
+        raw_site = item.merged_po.site_code or ""
+        clean_site = escape(raw_site)
         row = [
             str(idx + 1),
-            Paragraph(item.merged_po.site_code or "", style_normal),
-            Paragraph(item.merged_po.item_description or "", style_normal),
+            Paragraph(clean_site or "", style_normal),
+            Paragraph(clean_desc or "", style_normal),
             "Unit", # UOM
             f"{item.unit_price_sbc:,.2f}",
             str(item.quantity_sbc),
