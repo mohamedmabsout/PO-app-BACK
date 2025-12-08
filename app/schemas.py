@@ -358,6 +358,7 @@ class SBCCreate(BaseModel):
 
 
 class SBCResponse(BaseModel):
+    id: int
     short_name: str
     sbc_code: str
     status: str
