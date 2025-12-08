@@ -1993,43 +1993,43 @@ def assign_site_to_internal_project_by_code(
     return updated_rows
 
 
-def bulk_assign_sites_to_internal_project_by_code(
-    db: Session,
-    site_codes: List[str],
-    start_date: Optional[date] = None,
-    end_date: Optional[date] = None,
-):
-    """
-    Batch search des MergedPO par liste de site_codes.
-    Utilisé par le Site Dispatcher (batch search).
-    """
+# def bulk_assign_sites_to_internal_project_by_code(
+#     db: Session,
+#     site_codes: List[str],
+#     start_date: Optional[date] = None,
+#     end_date: Optional[date] = None,
+# ):
+#     """
+#     Batch search des MergedPO par liste de site_codes.
+#     Utilisé par le Site Dispatcher (batch search).
+#     """
 
-    # Nettoyage des codes (trim, retirer les vides / doublons)
-    clean_codes = {
-        c.strip()
-        for c in site_codes
-        if c and c.strip()
-    }
-    if not clean_codes:
-        return []
+#     # Nettoyage des codes (trim, retirer les vides / doublons)
+#     clean_codes = {
+#         c.strip()
+#         for c in site_codes
+#         if c and c.strip()
+#     }
+#     if not clean_codes:
+#         return []
 
-    query = db.query(models.MergedPO).filter(
-        models.MergedPO.site_code.in_(clean_codes)
-    )
+#     query = db.query(models.MergedPO).filter(
+#         models.MergedPO.site_code.in_(clean_codes)
+#     )
 
-    if start_date:
-        query = query.filter(func.date(models.MergedPO.publish_date) >= start_date)
-    if end_date:
-        query = query.filter(func.date(models.MergedPO.publish_date) <= end_date)
+#     if start_date:
+#         query = query.filter(func.date(models.MergedPO.publish_date) >= start_date)
+#     if end_date:
+#         query = query.filter(func.date(models.MergedPO.publish_date) <= end_date)
 
-    # 4. Mise à jour massive des MergedPO
-    total_updated = (
-        db.query(models.MergedPO)
-        .filter(models.MergedPO.site_id.in_(site_ids))
-        .update(
-            {models.MergedPO.internal_project_id: internal_project.id},
-            synchronize_session=False,
-        )
-    )
+#     # 4. Mise à jour massive des MergedPO
+#     total_updated = (
+#         db.query(models.MergedPO)
+#         .filter(models.MergedPO.site_code.in_(clean_codes))
+#         .update(
+#             {models.MergedPO.internal_project_id: internal_project.id},
+#             synchronize_session=False,
+#         )
+#     )
 
-    db.commit()
+#     db.commit()
