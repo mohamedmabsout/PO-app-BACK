@@ -1,13 +1,14 @@
 # in app/routers/projects.py
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
-from typing import List
-
+from sqlalchemy.orm import Session, joinedload,Query
+from sqlalchemy import func
+from typing import List, Optional
+from datetime import date
 from .. import auth, models
 
 from .. import crud, schemas
 from ..dependencies import get_db, get_current_user, require_admin, require_management
-from ..schemas import SiteCodeList
+from ..schemas import SiteCodeList, MergedPOSimple
 
 router = APIRouter(
     prefix="/api/projects",  # All routes in this file will start with /api/projects
@@ -191,12 +192,14 @@ def assign_site_to_internal_project(
         "message": "Site globally assigned successfully", 
         "records_updated": updated_rows
     }
+
 @router.get("/site-rules", response_model=List[schemas.SiteAssignmentRule])
 def get_site_assignment_rules(db: Session = Depends(get_db)):
     """
     Fetch all active site assignment rules.
     """
     return db.query(models.SiteAssignmentRule).all()
+
 @router.put("/internal/{project_id}", response_model=schemas.InternalProject)
 def update_internal_project(
     project_id: int, 
@@ -207,72 +210,41 @@ def update_internal_project(
     if updated_project is None:
         raise HTTPException(status_code=404, detail="Project not found")
     return updated_project
-    
-@router.post("/assign-site-by-code", response_model=dict)
-def assign_site_by_code(
-    payload: schemas.SiteAssignByCodeRequest,
+
+@router.post(
+    "/merged-pos/search-by-sites",
+    response_model=List[MergedPOSimple],
+)
+def search_pos_by_sites(
+    payload: SiteCodeList,                      # <<< ICI : objet Pydantic
+    start_date: Optional[date] = Query(None),
+    end_date: Optional[date] = Query(None),
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),  # plus strict : require_management
+    current_user: models.User = Depends(get_current_user),
 ):
-    site = crud.assign_site_to_internal_project_by_code(
+    """
+    Batch search utilisé par le Site Dispatcher.
+    Body JSON : { "site_codes": ["CODE1", "CODE2", ...] }
+    Query params optionnels : start_date, end_date.
+    """
+
+    # On récupère la liste de codes depuis le modèle Pydantic
+    raw_codes = payload.site_codes or []
+
+    # Nettoyage basique (trim, dédoublonnage, suppression des vides)
+    clean_codes = sorted(
+        set(c.strip() for c in raw_codes if c and c.strip())
+    )
+
+    if not clean_codes:
+        return []
+
+    # Appel au CRUD qui fait la vraie requête SQLAlchemy
+    results = crud.get_merged_pos_by_site_codes(
         db=db,
-        site_code=payload.site_code,
-        internal_project_name=payload.internal_project_name,
-    )
-    return {"status": "ok", "site_id": site.id, "internal_project_id": site.internal_project_id}
-
-
-@router.post("/bulk-assign-sites", dependencies=[Depends(require_management)])
-def bulk_assign_sites(
-    payload: schemas.BulkSiteAssignByCodeRequest,
-    db: Session = Depends(get_db),
-    current_user=Depends(get_current_user),
-):
-    
-    """
-    Assignation massive : plusieurs sites sélectionnés → 1 projet interne.
-    Utilisé quand tu coches plusieurs codes site et tu cliques "Assign in bulk".
-    """
-
-    if not payload.site_ids:
-        raise HTTPException(status_code=400, detail="No site IDs provided")
-
-    project = db.query(models.InternalProject).filter(
-        models.InternalProject.id == payload.internal_project_id
-    ).first()
-    if not project:
-        raise HTTPException(status_code=404, detail="Internal project not found")
-
-    result = crud.bulk_assign_sites_to_internal_project(
-        db,
-        site_ids=payload.site_ids,
-        internal_project_id=payload.internal_project_id,
+        site_codes=clean_codes,
+        start_date=start_date,
+        end_date=end_date,
     )
 
-    return {"status": "ok", **result}
-@router.post("/merged-pos/search-by-sites")
-def search_merged_po_by_sites(payload: SiteCodeList, db: Session = Depends(get_db)):
-
-    if not payload.site_codes or len(payload.site_codes) == 0:
-        raise HTTPException(status_code=400, detail="site_codes list is empty.")
-
-    results = (
-        db.query(models.MergedPO)
-        .filter(models.MergedPO.site_code.in_(payload.site_codes))
-        .all()
-    )
-
-    return [
-        {
-            "id": r.id,
-            "site_code": r.site_code,
-            "po_id": r.po_id,
-            "po_no": r.po_no,
-            "po_line_no": r.po_line_no,
-            "internal_project_name": r.internal_project.name if r.internal_project else None,
-            "customer_project_name": r.customer_project.name if r.customer_project else None,
-            "line_amount_hw": r.line_amount_hw,
-            "publish_date": r.publish_date,
-        }
-        for r in results
-    ]
+    return results
