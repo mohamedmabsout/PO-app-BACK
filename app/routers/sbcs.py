@@ -48,6 +48,13 @@ def get_pending_sbcs_list(
 ):
     # Optional: Check if user is PD or Admin
     return crud.get_pending_sbcs(db)
+@router.get("/active", response_model=List[schemas.SBCResponse])
+def get_pending_sbcs_list(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    # Optional: Check if user is PD or Admin
+    return crud.get_active_sbcs(db)
 
 @router.post("/{sbc_id}/approve")
 def approve_sbc_endpoint(

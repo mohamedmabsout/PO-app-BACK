@@ -1858,6 +1858,10 @@ def get_pending_sbcs(db: Session):
     return db.query(models.SBC).filter(
         models.SBC.status == models.SBCStatus.UNDER_APPROVAL
     ).all()
+def get_active_sbcs(db: Session):
+    return db.query(models.SBC).filter(
+        models.SBC.status == models.SBCStatus.ACTIVE
+    ).all()
 
 def approve_sbc(db: Session, sbc_id: int, approver_id: int):
     sbc = db.query(models.SBC).get(sbc_id)
