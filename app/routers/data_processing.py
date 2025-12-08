@@ -297,3 +297,35 @@ def get_remaining_pos(
         "data": data,
         "stats": stats
     }
+@router.get("/bc-candidates", response_model=List[schemas.MergedPO]) # Use MergedPO schema
+def get_bc_candidates(
+    project_id: int,
+    site_codes: Optional[str] = Query(None, description="Comma separated codes"),
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    db: Session = Depends(get_db)
+):
+    """
+    Returns list of POs eligible for BC creation based on filters.
+    """
+    code_list = []
+    if site_codes:
+        # Split by newline (Excel paste) or comma
+        code_list = site_codes.replace('\n', ',').split(',')
+        
+    return crud.get_eligible_pos_for_bc(
+        db, project_id, code_list, start_date, end_date
+    )
+@router.post("/create-bc", response_model=schemas.BCResponse)
+def generate_bc(
+    bc_data: schemas.BCCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    try:
+        return crud.create_bon_de_commande(db, bc_data, current_user.id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        print(e)
+        raise HTTPException(status_code=500, detail="Failed to generate BC")

@@ -1,7 +1,7 @@
 import datetime
 from sqlalchemy import Boolean, Column, Date, Enum, ForeignKey, Integer, String, Float, DateTime
 
-from .enum import ProjectType, UserRole
+from .enum import ProjectType, UserRole, SBCStatus, BCStatus
 from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, Text, Date, Enum, ForeignKey
 from .database import Base
 from sqlalchemy.orm import relationship
@@ -271,3 +271,112 @@ class UserPerformanceTarget(Base):
     )
     
     user = relationship("User")
+
+# --- 1. TAX CONFIGURATION TABLE ---
+class TaxRule(Base):
+    __tablename__ = 'tax_rules'
+    
+    id = Column(Integer, primary_key=True, index=True)
+    category = Column(String(50), nullable=False) # "Service", "Transportation", etc.
+    year = Column(Integer, nullable=False) # e.g. 2025
+    tax_rate = Column(Float, nullable=False) # e.g. 0.20 for 20%
+    
+    # Unique constraint: Only one rate per Category per Year
+    __table_args__ = (
+        sa.UniqueConstraint('category', 'year', name='uix_tax_category_year'),
+    )
+
+class SBC(Base):
+    __tablename__ = 'sbcs'
+
+    id = Column(Integer, primary_key=True, index=True)
+    
+    # --- IDENTITY & ACCESS ---
+    sbc_code = Column(String(50), unique=True, index=True, nullable=False) # "ID SBC"
+    password_hash = Column(String(255)) # "Password" (Stored securely)
+    short_name = Column(String(50), nullable=False) # "SBC Short Name"
+    name = Column(String(255), nullable=False) # "SBC Name (Complete Name)"
+    
+    start_date = Column(Date) # "Date Start"
+    
+    # "Status SBC (Active; Blacklisted; under approval)"
+    status = Column(Enum(SBCStatus), default=SBCStatus.UNDER_APPROVAL) 
+    
+    # --- CONTACT INFO ---
+    ceo_name = Column(String(255)) # "CEO Subcontractor"
+    phone_1 = Column(String(50)) # "Phone 1"
+    phone_2 = Column(String(50)) # "Phone 2"
+    email = Column(String(255)) # "Mail"
+    
+    # --- CONTRACTUAL INFO ---
+    contract_ref = Column(String(100)) # "Contract" (Reference Number)
+    has_contract_attachment = Column(Boolean, default=False) # "Attachment Contract Exist"
+    contract_upload_date = Column(DateTime) # "Date upload Contract"
+    
+    # --- TAX REGULARIZATION ---
+    has_tax_regularization = Column(Boolean, default=False) # "Attestation de regularisation fiscal"
+    tax_reg_upload_date = Column(DateTime) # "Date upload" (for tax doc)
+    tax_reg_end_date = Column(Date) # "Plan end date of Reg Fiscal"
+    
+    # --- FINANCIAL INFO ---
+    rib = Column(String(50)) # "RIB"
+    bank_name = Column(String(100)) # "Name of the Bank"
+    
+    # --- METADATA & APPROVALS ---
+    created_at = Column(DateTime, default=datetime.datetime.utcnow) # "Date creation"
+    
+    # "Creator of the SBC (RAF)"
+    creator_id = Column(Integer, ForeignKey("users.id"))
+    
+    # "Approver L1 (PD)"
+    approver_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    
+    # Relationships
+    creator = relationship("User", foreign_keys=[creator_id])
+    approver = relationship("User", foreign_keys=[approver_id])
+class BonDeCommande(Base):
+    __tablename__ = 'bon_de_commandes'
+
+    id = Column(Integer, primary_key=True, index=True)
+    bc_number = Column(String(100), unique=True, index=True) # BC-25-TEL-001
+    year = Column(Integer) 
+
+    project_id = Column(Integer, ForeignKey("internal_projects.id"), nullable=False)
+    sbc_id = Column(Integer, ForeignKey("sbcs.id"), nullable=False)
+    
+    # Financials
+    total_amount_ht = Column(Float, default=0.0) # Sum of lines (Unit * Qty)
+    total_tax_amount = Column(Float, default=0.0) # Sum of (Line Amount * Tax Rate)
+    total_amount_ttc = Column(Float, default=0.0) # HT + Tax
+    
+    status = Column(Enum(BCStatus), default=BCStatus.DRAFT)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    
+    creator_id = Column(Integer, ForeignKey("users.id"))
+    
+    # Relationships
+    internal_project = relationship("InternalProject")
+    sbc = relationship("SBC")
+    items = relationship("BCItem", back_populates="bc")
+
+# --- 4. BC ITEMS ---
+class BCItem(Base):
+    __tablename__ = 'bc_items'
+
+    id = Column(Integer, primary_key=True, index=True)
+    bc_id = Column(Integer, ForeignKey("bon_de_commandes.id"), nullable=False)
+    merged_po_id = Column(Integer, ForeignKey("merged_pos.id"), nullable=False)
+    
+    # Inputs
+    rate_sbc = Column(Float, default=0.0) 
+    quantity_sbc = Column(Float)
+    
+    # Calculations
+    unit_price_sbc = Column(Float) 
+    line_amount_sbc = Column(Float)
+    
+    # Tax Snapshot (We store it here in case rates change later)
+    applied_tax_rate = Column(Float, default=0.0) 
+    
+    bc = relationship("BonDeCommande", back_populates="items")
+    merged_po = relationship("MergedPO")

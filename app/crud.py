@@ -10,6 +10,12 @@ from sqlalchemy import func, case, extract, and_
 from sqlalchemy.sql.functions import coalesce # More explicit import
 from sqlalchemy.orm import aliased
 from .enum import ProjectType, UserRole
+
+import os
+import shutil
+from pathlib import Path
+
+UPLOAD_DIR = "uploads/sbc_docs"
 PAYMENT_TERM_MAP = {
     "【TT】▍AC1 (80.00%, INV AC -15D, Complete 80%) / AC2 (20.00%, INV AC -15D, Complete 100%) ▍": "AC1 80 | PAC 20",
     "【TT】▍AC1 (80.00%, INV AC -30D, Complete 80%) / AC2 (20.00%, INV AC -30D, Complete 100%) ▍": "AC1 80 | PAC 20",
@@ -470,7 +476,43 @@ def get_upload_history(db: Session, skip: int = 0, limit: int = 100):
         .all()
     )
 
+def get_eligible_pos_for_bc(
+    db: Session, 
+    project_id: int, 
+    site_codes: Optional[List[str]] = None, # Expects a list now
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None
+):
+    """
+    Fetches POs for the project that have REMAINING Quantity > 0.
+    """
+    # Subquery: Sum of quantities used in existing BCs per PO
+    used_subquery = db.query(
+        models.BCItem.merged_po_id,
+        func.sum(models.BCItem.quantity_sbc).label("used_qty")
+    ).group_by(models.BCItem.merged_po_id).subquery()
 
+    # Main Query: Left Join MergedPO with the Usage Subquery
+    query = db.query(models.MergedPO).outerjoin(
+        used_subquery, models.MergedPO.id == used_subquery.c.merged_po_id
+    ).filter(
+        models.MergedPO.internal_project_id == project_id,
+        # CRITICAL FILTER: Requested Qty must be greater than Used Qty (treating NULL as 0)
+        models.MergedPO.requested_qty > func.coalesce(used_subquery.c.used_qty, 0)
+    )
+
+    # Standard Filters
+    if site_codes and len(site_codes) > 0:
+        clean_codes = [c.strip() for c in site_codes if c.strip()]
+        if clean_codes:
+            query = query.filter(models.MergedPO.site_code.in_(clean_codes))
+
+    if start_date:
+        query = query.filter(func.date(models.MergedPO.publish_date) >= start_date)
+    if end_date:
+        query = query.filter(func.date(models.MergedPO.publish_date) <= end_date)
+        
+    return query.all()
 def get_raw_po_data_as_dataframe(
     db: Session,
     status: Optional[str] = None,
@@ -1600,8 +1642,271 @@ def get_remaining_to_accept_dataframe(
     }, inplace=True)
     
     return df
+   
+def get_eligible_pos_for_bc(
+    db: Session, 
+    project_id: int, 
+    site_codes: Optional[List[str]] = None,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None
+):
+    """
+    Fetches POs for the project that have REMAINING Quantity > 0.
+    """
+    # Subquery: Sum of quantities used in existing BCs per PO
+    used_subquery = db.query(
+        models.BCItem.merged_po_id,
+        func.sum(models.BCItem.quantity_sbc).label("used_qty")
+    ).group_by(models.BCItem.merged_po_id).subquery()
+
+    # Main Query: Left Join MergedPO with the Usage Subquery
+    query = db.query(models.MergedPO).outerjoin(
+        used_subquery, models.MergedPO.id == used_subquery.c.merged_po_id
+    ).filter(
+        models.MergedPO.internal_project_id == project_id,
+        # CRITICAL FILTER: Requested Qty must be greater than Used Qty (treating NULL as 0)
+        models.MergedPO.requested_qty > func.coalesce(used_subquery.c.used_qty, 0)
+    )
+
+    # Standard Filters
+    if site_codes and len(site_codes) > 0:
+        clean_codes = [c.strip() for c in site_codes if c.strip()]
+        if clean_codes:
+            query = query.filter(models.MergedPO.site_code.in_(clean_codes))
+
+    if start_date:
+        query = query.filter(func.date(models.MergedPO.publish_date) >= start_date)
+    if end_date:
+        query = query.filter(func.date(models.MergedPO.publish_date) <= end_date)
+        
+    return query.all()
+
+def generate_bc_number(db: Session):
+    """
+    Generates ID based on Date: BC + YYYYMMDD + XX (Daily Sequence)
+    Example: BC2025120701
+    """
+    now = datetime.now()
+    
+    # 1. Build the prefix: BC20251207
+    date_str = now.strftime("%Y%m%d")
+    prefix = f"BC{date_str}"
+    
+    # 2. Find the last BC created TODAY (using the prefix)
+    # We use a LIKE query to find IDs starting with today's prefix
+    last_bc_today = db.query(models.BonDeCommande).filter(
+        models.BonDeCommande.bc_number.like(f"{prefix}%")
+    ).order_by(models.BonDeCommande.bc_number.desc()).first()
+    
+    if last_bc_today:
+        # Extract the last 2 digits (XX)
+        # ID is "BC2025120701", length is 12. Slicing last 2 chars.
+        last_seq_str = last_bc_today.bc_number[-2:] 
+        try:
+            last_seq = int(last_seq_str)
+            new_seq = last_seq + 1
+        except ValueError:
+            # Fallback if parsing fails
+            new_seq = 1
+    else:
+        # First one today
+        new_seq = 1
+        
+    # 3. Format with 2-digit padding (01, 02... 99)
+    # If you expect >99 BCs per day, increase padding to 3 (:03d)
+    return f"{prefix}{new_seq:02d}"
+def get_tax_rate(db: Session, category: str, year: int):
+    """
+    Finds the tax rate for a specific Category and Year.
+    Defaults to 0.20 (20%) if no rule found.
+    """
+    rule = db.query(models.TaxRule).filter(
+        models.TaxRule.category == category,
+        models.TaxRule.year == year
+    ).first()
+    
+    if rule:
+        return rule.tax_rate
+    return 0.20 # Default fallback
 
 
+# --- MAIN ACTION: Create BC ---
+def create_bon_de_commande(db: Session, bc_data: schemas.BCCreate, creator_id: int):
+    # 1. Generate ID (Using the new Date-based format)
+    bc_number = generate_bc_number(db)
+    
+    new_bc = models.BonDeCommande(
+        bc_number=bc_number,
+        project_id=bc_data.internal_project_id,
+        sbc_id=bc_data.sbc_id,
+        status=models.BCStatus.DRAFT,
+        creator_id=creator_id,
+        year=datetime.now().year
+    )
+    
+    db.add(new_bc)
+    db.flush()
+    
+    total_ht = 0.0
+    total_tax = 0.0
+    
+    for item_data in bc_data.items:
+        po = db.query(models.MergedPO).get(item_data.merged_po_id)
+        if not po:        
+            raise ValueError(f"PO Line ID {item_data.merged_po_id} not found.")
+        
+        # 1. Calculate how much has ALREADY been assigned to other BCs
+        consumed_qty = db.query(func.sum(models.BCItem.quantity_sbc)).filter(
+            models.BCItem.merged_po_id == po.id
+        ).scalar() or 0.0
+        
+        # 2. Calculate what is actually available
+        available_qty = po.requested_qty - consumed_qty
+        
+        # 3. Check if the new request fits
+        # We use a small epsilon (0.0001) to handle floating point variations
+        if item_data.quantity_sbc > (available_qty + 0.0001):
+            raise ValueError(
+                f"Error on PO {po.po_id}: "
+                f"Requested {item_data.quantity_sbc}, but only {available_qty} remains "
+                f"(Total: {po.requested_qty}, Used: {consumed_qty})."
+            )
+            
+        # 4. Project Security Check (Existing)
+        if po.internal_project_id != bc_data.internal_project_id:
+             raise ValueError(f"PO Line {po.po_id} does not belong to the selected Internal Project.")
+        # 1. Calc HT Amounts
+        unit_price_sbc = (po.unit_price or 0) * item_data.rate_sbc
+        line_amount_sbc = unit_price_sbc * item_data.quantity_sbc
+        
+        # 2. AUTOMATIC TAX LOOKUP
+        # Logic: Find tax based on PO Category + Current Year
+        # (Assuming the tax applies to the year the BC is created)
+        current_year = datetime.now().year
+        tax_rate_val = get_tax_rate(db, category=po.category, year=current_year)
+        
+        line_tax = line_amount_sbc * tax_rate_val
+        
+        # 3. Create Item
+        bc_item = models.BCItem(
+            bc_id=new_bc.id,
+            merged_po_id=po.id,
+            rate_sbc=item_data.rate_sbc,
+            quantity_sbc=item_data.quantity_sbc,
+            unit_price_sbc=unit_price_sbc,
+            line_amount_sbc=line_amount_sbc,
+            applied_tax_rate=tax_rate_val # Store the rate used
+        )
+        db.add(bc_item)
+        
+        total_ht += line_amount_sbc
+        total_tax += line_tax
+
+    # 4. Finalize
+    new_bc.total_amount_ht = total_ht
+    new_bc.total_tax_amount = total_tax
+    new_bc.total_amount_ttc = total_ht + total_tax
+    
+    db.commit()
+    db.refresh(new_bc)
+    return new_bc
+def generate_sbc_code(db: Session):
+    """Auto-generates SBC-001, SBC-002..."""
+    last = db.query(models.SBC).order_by(models.SBC.id.desc()).first()
+    next_id = (last.id + 1) if last else 1
+    return f"SBC-{str(next_id).zfill(3)}"
+
+def save_upload_file(upload_file, sbc_code, doc_type):
+    """Saves file to disk and returns path"""
+    if not upload_file: return None
+    
+    # Create dir if not exists
+    Path(UPLOAD_DIR).mkdir(parents=True, exist_ok=True)
+    
+    # Filename: SBC-001_Contract.pdf
+    ext = upload_file.filename.split('.')[-1]
+    filename = f"{sbc_code}_{doc_type}.{ext}"
+    file_path = os.path.join(UPLOAD_DIR, filename)
+    
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(upload_file.file, buffer)
+        
+    return file_path
+
+def create_sbc(db: Session, form_data: dict, contract_file, tax_file, creator_id: int):
+    # 1. Handle Code
+    code = form_data.get('sbc_code')
+    if not code:
+        code = generate_sbc_code(db)
+        
+    # 2. Handle Files
+    contract_path = save_upload_file(contract_file, code, "Contract")
+    tax_path = save_upload_file(tax_file, code, "TaxReg")
+    
+    # 3. Create Entity
+    new_sbc = models.SBC(
+        sbc_code=code,
+        creator_id=creator_id,
+        status=models.SBCStatus.UNDER_APPROVAL, # Always start here
+        
+        # Identity
+        short_name=form_data.get('short_name'),
+        name=form_data.get('name'),
+        start_date=form_data.get('start_date'),
+        
+        # Contact
+        ceo_name=form_data.get('ceo_name'),
+        phone_1=form_data.get('phone_1'),
+        email=form_data.get('email'),
+        
+        # Financial
+        rib=form_data.get('rib'),
+        bank_name=form_data.get('bank_name'),
+        
+        # Contract
+        contract_ref=form_data.get('contract_ref'),
+        # We store the DATE of upload if file exists
+        contract_upload_date=datetime.now() if contract_path else None,
+        has_contract_attachment=True if contract_path else False,
+        
+        # Tax
+        tax_reg_upload_date=datetime.now() if tax_path else None,
+        has_tax_regularization=True if tax_path else False,
+        tax_reg_end_date=form_data.get('tax_reg_end_date')
+    )
+    
+    db.add(new_sbc)
+    db.commit()
+    db.refresh(new_sbc)
+    return new_sbc
+def get_pending_sbcs(db: Session):
+    return db.query(models.SBC).filter(
+        models.SBC.status == models.SBCStatus.UNDER_APPROVAL
+    ).all()
+def get_active_sbcs(db: Session):
+    return db.query(models.SBC).filter(models.SBC.status == models.SBCStatus.ACTIVE).all()
+
+def approve_sbc(db: Session, sbc_id: int, approver_id: int):
+    sbc = db.query(models.SBC).get(sbc_id)
+    if not sbc:
+        raise ValueError("SBC not found")
+        
+    sbc.status = models.SBCStatus.ACTIVE
+    sbc.approver_id = approver_id
+    # You could add approval_date here if you add that column to the model
+    
+    db.commit()
+    db.refresh(sbc)
+    return sbc
+
+def reject_sbc(db: Session, sbc_id: int):
+    sbc = db.query(models.SBC).get(sbc_id)
+    if not sbc:
+        raise ValueError("SBC not found")
+        
+    sbc.status = models.SBCStatus.BLACKLISTED # Or return to Draft logic if you prefer
+    db.commit()
+    return sbc
 def assign_site_to_internal_project_by_code(
     db: Session,
     site_code: str,
@@ -1729,4 +2034,3 @@ def bulk_assign_sites_to_internal_project_by_code(
     )
 
     db.commit()
-    return total_updated

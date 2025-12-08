@@ -15,4 +15,14 @@ class ProjectType(str, enum.Enum):
     INTERNAL = "Internal"
     # Add this line:
     TBD = "TBD"
-    
+class SBCStatus(str, enum.Enum):
+    UNDER_APPROVAL = "Under Approval"
+    ACTIVE = "Active"
+    BLACKLISTED = "Blacklisted"
+    DRAFT = "Draft" # Optional, if RAF saves before submitting
+class BCStatus(str, enum.Enum):
+    PD_APPROVAL = "Under PD Approval"
+    CEO_APPROVAL = "Under CEO Approval"
+    ACTIVE = "Active"
+    BLACKLISTED = "Blacklisted"
+    DRAFT = "Draft" # Optional, if RAF saves before submitting
