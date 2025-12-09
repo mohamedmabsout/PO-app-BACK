@@ -406,6 +406,8 @@ class SiteAssignByCodeRequest(BaseModel):
     site_code: str
     internal_project_name: str
 
+class BatchSearchRequest(BaseModel):
+    site_codes: List[str]
 
 class BulkSiteAssignByCodeRequest(BaseModel):
     """

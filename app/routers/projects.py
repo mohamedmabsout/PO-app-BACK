@@ -224,40 +224,10 @@ def update_internal_project(
         raise HTTPException(status_code=404, detail="Project not found")
     return updated_project
 
-@router.post(
-    "/merged-pos/search-by-sites",
-    response_model=List[MergedPOSimple],
-)
-def search_pos_by_sites(
-    payload: SiteCodeList,                      # <<< ICI : objet Pydantic
-    start_date: Optional[date] ,
-    end_date: Optional[date] ,
+@router.post("/merged-pos/search-by-sites", response_model=List[schemas.MergedPO])
+def search_by_sites_batch(
+    payload: schemas.BatchSearchRequest,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
+    current_user: models.User = Depends(get_current_user)
 ):
-    """
-    Batch search utilisé par le Site Dispatcher.
-    Body JSON : { "site_codes": ["CODE1", "CODE2", ...] }
-    Query params optionnels : start_date, end_date.
-    """
-
-    # On récupère la liste de codes depuis le modèle Pydantic
-    raw_codes = payload.site_codes or []
-
-    # Nettoyage basique (trim, dédoublonnage, suppression des vides)
-    clean_codes = sorted(
-        set(c.strip() for c in raw_codes if c and c.strip())
-    )
-
-    if not clean_codes:
-        return []
-
-    # Appel au CRUD qui fait la vraie requête SQLAlchemy
-    results = crud.get_merged_pos_by_site_codes(
-        db=db,
-        site_codes=clean_codes,
-        start_date=start_date,
-        end_date=end_date,
-    )
-
-    return results
+    return crud.search_merged_pos_by_site_codes(db, payload.site_codes)
