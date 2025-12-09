@@ -2104,18 +2104,22 @@ def bulk_assign_sites(db: Session, site_ids: List[int], target_project_id: int):
     return {"updated": len(valid_site_ids), "skipped": skipped_count}
 
 def search_merged_pos_by_site_codes(db: Session, site_codes: List[str]):
-    """
-    Finds MergedPOs for a specific list of Site Codes (Exact Match).
-    Useful for 'Batch Search' where users paste from Excel.
-    """
-    # Clean inputs: Remove duplicates and empty strings
-    clean_codes = list(set([c.strip() for c in site_codes if c.strip()]))
+    # 1. Clean Inputs: Strip spaces, newlines, carriage returns
+    clean_codes = []
+    for c in site_codes:
+        if c and c.strip():
+            # Remove hidden characters that Excel copy-paste might add
+            clean_val = c.strip().replace('\r', '').replace('\n', '')
+            clean_codes.append(clean_val)
+    
+    clean_codes = list(set(clean_codes)) # Remove duplicates
     
     if not clean_codes:
         return []
 
-    # Query MergedPO
-    # We join with Internal/Customer Project to give context in the result
+    # 2. Query
+    # We check if site_code is IN the list
+    # Use .distinct() to avoid duplicate POs if the site appears multiple times in different POs (optional)
     return db.query(models.MergedPO).options(
         joinedload(models.MergedPO.internal_project),
         joinedload(models.MergedPO.customer_project)
