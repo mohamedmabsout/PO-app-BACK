@@ -1221,11 +1221,12 @@ def get_sites_for_internal_project_paginated(
                  .offset((page - 1) * size)\
                  .limit(size).all()
 
+  
     return {
         "items": sites,
         "total_items": total_items,
         "page": page,
-        "size": size,
+        "per_page": size, # <--- CHANGED FROM 'size' TO 'per_page'
         "total_pages": (total_items + size - 1) // size
     }
 
