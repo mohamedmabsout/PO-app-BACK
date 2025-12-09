@@ -10,7 +10,9 @@ from sqlalchemy import func, case, extract, and_
 from sqlalchemy.sql.functions import coalesce # More explicit import
 from sqlalchemy.orm import aliased
 from .enum import ProjectType, UserRole
-
+import pandas as pd
+import io
+import re
 import os
 import shutil
 from pathlib import Path
@@ -2126,3 +2128,73 @@ def search_merged_pos_by_site_codes(db: Session, site_codes: List[str]):
     ).filter(
         models.MergedPO.site_code.in_(clean_codes)
     ).all()
+def bulk_assign_projects_only(db: Session, file_contents: bytes):
+    """
+    Simplified Migration:
+    1. Reads 'PO ID' and 'internal Project' columns from Excel.
+    2. Updates the 'internal_project_id' for existing POs.
+    Ignores dates/financials.
+    """
+    import pandas as pd
+    import io
+
+    # 1. Load Excel
+    df = pd.read_excel(io.BytesIO(file_contents), header=2)
+    
+    # Clean column names (remove \n, extra spaces)
+    df.columns = [str(c).replace('\n', ' ').strip() for c in df.columns]
+    
+    print(f"Detected Columns: {df.columns.tolist()}") # For debugging logs
+
+    # 2. Identify Target Columns dynamically
+    col_po_id = "PO ID"
+    col_project = "internal Project"
+   
+
+    if not col_po_id or not col_project:
+        raise ValueError(f"Could not auto-detect columns. Found: {col_po_id}, {col_project}")
+
+    # 3. Pre-fetch Map: Project Name -> Project ID
+    all_projects = db.query(models.InternalProject).all()
+    # Create a map: "hw_org_wireless...": 1
+    project_map = {p.name.strip().lower(): p.id for p in all_projects}
+
+    # 4. Pre-fetch Map: PO ID -> DB Primary Key ID
+    # We need the PK (id) to perform a fast bulk update
+    # Fetching only ID and PO_ID is very fast even for 20k rows
+    po_records = db.query(models.MergedPO.id, models.MergedPO.po_id).all()
+    po_map = {p.po_id: p.id for p in po_records}
+
+    # 5. Build Update List
+    update_list = []
+    
+    for index, row in df.iterrows():
+        # Get Excel Data
+        raw_po_id = str(row[col_po_id]).strip()
+        raw_proj_name = str(row[col_project]).strip().lower()
+        
+        # Check matches
+        db_pk = po_map.get(raw_po_id)
+        target_proj_id = project_map.get(raw_proj_name)
+        
+        # We only update if:
+        # 1. The PO exists in our DB
+        # 2. The Project Name in Excel matches a Project in our DB
+        if db_pk and target_proj_id:
+            update_list.append({
+                "id": db_pk, # The DB Primary Key
+                "internal_project_id": target_proj_id
+            })
+
+    # 6. Execute Bulk Update
+    if update_list:
+        # Update in batches of 5000
+        batch_size = 5000
+        for i in range(0, len(update_list), batch_size):
+            db.bulk_update_mappings(models.MergedPO, update_list[i:i+batch_size])
+            db.commit()
+
+    return {
+        "total_rows_in_excel": len(df),
+        "matched_and_updated": len(update_list)
+    }

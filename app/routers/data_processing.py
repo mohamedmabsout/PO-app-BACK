@@ -355,3 +355,19 @@ def download_bc_pdf(bc_id: int, db: Session = Depends(get_db)):
     
     pdf_path = generate_bc_pdf(bc) # Returns path to generated file
     return FileResponse(pdf_path, filename=f"{bc.bc_number}.pdf", media_type='application/pdf')
+@router.post("/import/assign-projects-only")
+async def assign_projects_only(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    # if current_user.role != auth.UserRole.ADMIN:
+    #     raise HTTPException(status_code=403, detail="Admin only")
+
+    try:
+        contents = await file.read()
+        stats = crud.bulk_assign_projects_only(db, contents)
+        return {"message": "Project assignment complete", "stats": stats}
+    except Exception as e:
+        print(f"Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
