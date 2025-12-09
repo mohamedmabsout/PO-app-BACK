@@ -1411,7 +1411,7 @@ def get_performance_matrix(
     return results
 def get_yearly_matrix_data(db: Session, year: int):
     # 1. Get all PMs
-    pms = db.query(models.User).filter(models.User.role.in_(['PM', 'ADMIN', 'CEO'])).all()
+    pms = db.query(models.User).filter(models.User.role.in_(['PM', 'ADMIN', 'PD'])).all()
     
     matrix_data = []
 

@@ -39,7 +39,7 @@ def get_project_manager_selector(
     """
     Provides a list of users with the 'Project Manager' role for dropdowns.
     """
-    query = db.query(models.User).filter(models.User.role == UserRole.PM)
+    query = db.query(models.User).filter(models.User.role.in_(['PM', 'ADMIN', 'PD'])).all()
     if search:
         # Search by first name or last name
         query = query.filter(
