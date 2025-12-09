@@ -1331,26 +1331,18 @@ def get_performance_matrix(
     db: Session, 
     year: int, 
     month: Optional[int] = None, 
-    filter_user_id: Optional[int] = None # <--- NEW PARAMETER
+    filter_user_id: Optional[int] = None
 ):
-    """
-    Generates the data for both Monthly and Yearly widgets.
-    """
-    
-    # 1. Start query for eligible users (PMs, Admins, CEOs)
+    # 1. Get eligible users
     query = db.query(models.User).filter(models.User.role.in_(['PM', 'ADMIN', 'PD']))
-    
-    # 2. Apply Security Filter (Row-Level Security)
     if filter_user_id:
         query = query.filter(models.User.id == filter_user_id)
-        
     pms = query.all()
     
     results = []
 
     for pm in pms:
-
-        # A. Fetch Targets (Plan)
+        # A. Fetch Targets (Plan) - STRICTLY FOR THE PERIOD
         target_query = db.query(
             func.sum(models.UserPerformanceTarget.target_po_amount),
             func.sum(models.UserPerformanceTarget.target_invoice_amount)
@@ -1358,7 +1350,6 @@ def get_performance_matrix(
             models.UserPerformanceTarget.user_id == pm.id,
             models.UserPerformanceTarget.year == year
         )
-        
         if month:
             target_query = target_query.filter(models.UserPerformanceTarget.month == month)
             
@@ -1366,13 +1357,10 @@ def get_performance_matrix(
         plan_po = plan_po or 0.0
         plan_invoice = plan_invoice or 0.0
 
-        # B. Fetch Actuals (From MergedPO)
-        # We reuse the logic from get_user_performance_stats but specific to the period
-        
-        # Base filter: Projects managed by this PM
+        # B. Fetch Actuals - STRICTLY FOR THE PERIOD (For the "Target PO" and "Target Invoice" columns)
         base_filters = [models.InternalProject.project_manager_id == pm.id]
         
-        # Date filters
+        # Period Filters
         po_date_filters = base_filters + [extract('year', models.MergedPO.publish_date) == year]
         ac_date_filters = base_filters + [extract('year', models.MergedPO.date_ac_ok) == year]
         pac_date_filters = base_filters + [extract('year', models.MergedPO.date_pac_ok) == year]
@@ -1390,22 +1378,38 @@ def get_performance_matrix(
             models.InternalProject, models.MergedPO.internal_project_id == models.InternalProject.id
         ).first()
 
-        actual_po = summary[0] or 0.0
-        actual_paid = (summary[1] or 0.0) + (summary[2] or 0.0)
+        actual_po_period = summary[0] or 0.0
+        actual_paid_period = (summary[1] or 0.0) + (summary[2] or 0.0)
+
+        # C. Fetch LIFETIME GAP (New Logic)
+        # Calculates (All POs ever assigned to this PM) - (All Payments ever received by this PM)
+        lifetime_summary = db.query(
+            func.sum(models.MergedPO.line_amount_hw),
+            func.sum(models.MergedPO.accepted_ac_amount),
+            func.sum(models.MergedPO.accepted_pac_amount)
+        ).join(models.InternalProject).filter(
+            models.InternalProject.project_manager_id == pm.id
+        ).first()
         
-        # Total Gap (Remaining to be paid on what was produced)
-        total_gap = actual_po - actual_paid
+        lifetime_po = lifetime_summary[0] or 0.0
+        lifetime_paid = (lifetime_summary[1] or 0.0) + (lifetime_summary[2] or 0.0)
+        total_lifetime_gap = lifetime_po - lifetime_paid
 
         results.append({
             "user_id": pm.id,
             "user_name": f"{pm.first_name} {pm.last_name}",
-            "total_gap": total_gap,
+            
+            # Use LIFETIME GAP here
+            "total_gap": total_lifetime_gap, 
+            
+            # Use PERIOD Stats here
             "plan_po": plan_po,
-            "actual_po": actual_po,
-            "percent_po": (actual_po / plan_po * 100) if plan_po > 0 else 0,
+            "actual_po": actual_po_period,
+            "percent_po": (actual_po_period / plan_po * 100) if plan_po > 0 else 0,
+            
             "plan_invoice": plan_invoice,
-            "actual_invoice": actual_paid,
-            "percent_invoice": (actual_paid / plan_invoice * 100) if plan_invoice > 0 else 0,
+            "actual_invoice": actual_paid_period,
+            "percent_invoice": (actual_paid_period / plan_invoice * 100) if plan_invoice > 0 else 0,
         })
         
     return results
