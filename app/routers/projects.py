@@ -217,8 +217,8 @@ def update_internal_project(
 )
 def search_pos_by_sites(
     payload: SiteCodeList,                      # <<< ICI : objet Pydantic
-    start_date: Optional[date] = Query(None),
-    end_date: Optional[date] = Query(None),
+    start_date: Optional[date] ,
+    end_date: Optional[date] ,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
