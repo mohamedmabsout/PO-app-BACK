@@ -267,6 +267,12 @@ class PaginatedMergedPO(BaseModel):
     per_page: int
     total_pages: int
 
+class PageSite(BaseModel):
+    items: List["Site"]
+    total_items: int
+    page: int
+    per_page: int
+    total_pages: int
 class SiteBase(BaseModel):
     site_code: str
     site_name: Optional[str] = None
@@ -408,7 +414,9 @@ class BulkSiteAssignByCodeRequest(BaseModel):
     """
     site_codes: List[str]
     internal_project_name: str
-    
+class BulkSiteAssignment(BaseModel):
+    site_ids: List[int]
+    internal_project_id: int
 class SiteCodeList(BaseModel):
     site_codes: List[str]
 

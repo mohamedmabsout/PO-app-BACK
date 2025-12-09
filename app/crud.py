@@ -16,6 +16,7 @@ import shutil
 from pathlib import Path
 
 UPLOAD_DIR = "uploads/sbc_docs"
+
 PAYMENT_TERM_MAP = {
     "【TT】▍AC1 (80.00%, INV AC -15D, Complete 80%) / AC2 (20.00%, INV AC -15D, Complete 100%) ▍": "AC1 80 | PAC 20",
     "【TT】▍AC1 (80.00%, INV AC -30D, Complete 80%) / AC2 (20.00%, INV AC -30D, Complete 100%) ▍": "AC1 80 | PAC 20",
@@ -1193,6 +1194,41 @@ def get_sites_for_internal_project(db: Session, project_id: int):
     ).distinct().all()
     
     return sites
+def get_sites_for_internal_project_paginated(
+    db: Session, 
+    project_id: int, 
+    page: int = 1, 
+    size: int = 50,
+    search: Optional[str] = None
+):
+    """
+    Returns paginated sites for a specific project (e.g. TBD).
+    Uses distinct on Site ID to avoid duplicates if multiple POs exist.
+    """
+    query = db.query(models.Site).join(models.MergedPO).filter(
+        models.MergedPO.internal_project_id == project_id
+    )
+
+    if search:
+        query = query.filter(models.Site.site_code.ilike(f"%{search}%"))
+
+    # Distinct is tricky with pagination, we group by ID
+    query = query.group_by(models.Site.id)
+
+    total_items = query.count()
+    
+    sites = query.order_by(models.Site.site_code)\
+                 .offset((page - 1) * size)\
+                 .limit(size).all()
+
+    return {
+        "items": sites,
+        "total_items": total_items,
+        "page": page,
+        "size": size,
+        "total_pages": (total_items + size - 1) // size
+    }
+
 def update_internal_project(db: Session, project_id: int, updates: schemas.InternalProjectUpdate):
     db_project = db.query(models.InternalProject).filter(models.InternalProject.id == project_id).first()
     if not db_project:
@@ -1992,44 +2028,76 @@ def assign_site_to_internal_project_by_code(
     db.commit()
     return updated_rows
 
+def bulk_assign_sites(db: Session, site_ids: List[int], target_project_id: int):
+    """
+    Assigns sites to a project.
+    CONSTRAINT: Only sites currently in 'To Be Determined' (or unassigned) can be moved.
+    This preserves historical assignments.
+    """
+    
+    # 1. Find the TBD Project ID
+    tbd_project = db.query(models.InternalProject).filter_by(name="To Be Determined").first()
+    if not tbd_project:
+        # Should not happen, but fail safe
+        return 0
+    tbd_id = tbd_project.id
 
-# def bulk_assign_sites_to_internal_project_by_code(
-#     db: Session,
-#     site_codes: List[str],
-#     start_date: Optional[date] = None,
-#     end_date: Optional[date] = None,
-# ):
-#     """
-#     Batch search des MergedPO par liste de site_codes.
-#     Utilisé par le Site Dispatcher (batch search).
-#     """
+    # 2. Filter the requested IDs: Keep only those that are currently TBD
+    # We check the SiteProjectAllocation table. 
+    # Logic: 
+    # - If no allocation exists -> It is TBD (implicitly). ALLOW.
+    # - If allocation exists AND points to TBD -> ALLOW.
+    # - If allocation exists AND points to Project A -> BLOCK.
+    
+    # Let's fetch current allocations for these sites
+    existing_allocations = db.query(models.SiteProjectAllocation).filter(
+        models.SiteProjectAllocation.site_id.in_(site_ids)
+    ).all()
+    
+    # Map site_id -> current_project_id
+    current_map = {a.site_id: a.internal_project_id for a in existing_allocations}
+    
+    valid_site_ids = []
+    skipped_count = 0
+    
+    for sid in site_ids:
+        current_proj = current_map.get(sid)
+        
+        # Condition: Allow if No Allocation OR Allocation is TBD
+        if current_proj is None or current_proj == tbd_id:
+            valid_site_ids.append(sid)
+        else:
+            skipped_count += 1
 
-#     # Nettoyage des codes (trim, retirer les vides / doublons)
-#     clean_codes = {
-#         c.strip()
-#         for c in site_codes
-#         if c and c.strip()
-#     }
-#     if not clean_codes:
-#         return []
+    if not valid_site_ids:
+        return {"updated": 0, "skipped": skipped_count}
 
-#     query = db.query(models.MergedPO).filter(
-#         models.MergedPO.site_code.in_(clean_codes)
-#     )
-
-#     if start_date:
-#         query = query.filter(func.date(models.MergedPO.publish_date) >= start_date)
-#     if end_date:
-#         query = query.filter(func.date(models.MergedPO.publish_date) <= end_date)
-
-#     # 4. Mise à jour massive des MergedPO
-#     total_updated = (
-#         db.query(models.MergedPO)
-#         .filter(models.MergedPO.site_code.in_(clean_codes))
-#         .update(
-#             {models.MergedPO.internal_project_id: internal_project.id},
-#             synchronize_session=False,
-#         )
-#     )
-
-#     db.commit()
+    # 3. Perform Assignment (Upsert Logic) for VALID sites only
+    
+    # A. Delete old TBD allocations if they exist (clean up)
+    db.query(models.SiteProjectAllocation).filter(
+        models.SiteProjectAllocation.site_id.in_(valid_site_ids)
+    ).delete(synchronize_session=False)
+    
+    # B. Insert new allocations
+    new_allocs = [
+        models.SiteProjectAllocation(
+            site_id=sid, 
+            internal_project_id=target_project_id,
+            customer_project_id=1 # Default/Placeholder
+        ) 
+        for sid in valid_site_ids
+    ]
+    db.bulk_save_objects(new_allocs)
+    
+    # 4. Update MergedPO History
+    db.query(models.MergedPO).filter(
+        models.MergedPO.site_id.in_(valid_site_ids)
+    ).update(
+        {models.MergedPO.internal_project_id: target_project_id},
+        synchronize_session=False
+    )
+    
+    db.commit()
+    
+    return {"updated": len(valid_site_ids), "skipped": skipped_count}

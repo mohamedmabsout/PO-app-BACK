@@ -8,7 +8,8 @@ docker compose ps
 
 docker compose logs -f --tail=100 backend
 
-
+WL-MBTS-LTE FDD-EXP-SE002-PO752-Casa Modernize-Q4-2022
+WL-MBTS-LTE FDD-EXP-JAD1006-PO752-Casa Modernize-Q4-2022
 
 
 # On the server, in your project directory

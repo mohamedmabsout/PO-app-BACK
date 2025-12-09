@@ -84,13 +84,15 @@ def read_internal_project(project_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Project not found")
     return db_project
 
-@router.get("/internal/{project_id}/sites", response_model=List[schemas.Site])
-def read_internal_project_sites(project_id: int, db: Session = Depends(get_db)):
-    """
-    Returns all sites currently handled by this Internal Project.
-    """
-    return crud.get_sites_for_internal_project(db, project_id=project_id)
-
+@router.get("/internal/{project_id}/sites", response_model=schemas.PageSite) # Use Pagination Schema
+def read_internal_project_sites(
+    project_id: int,
+    page: int = 1,
+    size: int = 50,
+    search: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    return crud.get_sites_for_internal_project_paginated(db, project_id, page, size, search)
 
 # @router.get("/{project_id}", response_model=schemas.Project)
 # def read_project(
@@ -192,7 +194,18 @@ def assign_site_to_internal_project(
         "message": "Site globally assigned successfully", 
         "records_updated": updated_rows
     }
-
+@router.post("/assign-sites-bulk")
+def assign_sites_bulk(
+    payload: schemas.BulkSiteAssignment,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_admin)
+):
+    result = crud.bulk_assign_sites(db, payload.site_ids, payload.internal_project_id)
+    
+    if result["updated"] == 0 and result["skipped"] > 0:
+        return {"message": "Warning: No sites updated. All selected sites are already assigned to other projects.", "details": result}
+        
+    return {"message": "Success", "details": result}
 @router.get("/site-rules", response_model=List[schemas.SiteAssignmentRule])
 def get_site_assignment_rules(db: Session = Depends(get_db)):
     """
