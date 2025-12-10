@@ -230,4 +230,9 @@ def search_by_sites_batch(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    return crud.search_merged_pos_by_site_codes(db, payload.site_codes)
+    return crud.search_merged_pos_by_site_codes(
+        db, 
+        payload.site_codes, 
+        payload.start_date, 
+        payload.end_date
+    )

@@ -408,7 +408,8 @@ class SiteAssignByCodeRequest(BaseModel):
 
 class BatchSearchRequest(BaseModel):
     site_codes: List[str]
-
+    start_date: Optional[date] = None # New
+    end_date: Optional[date] = None
 class BulkSiteAssignByCodeRequest(BaseModel):
     """
     Assigner plusieurs sites à un projet interne

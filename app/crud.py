@@ -361,6 +361,7 @@ def process_and_merge_pos(db: Session):
             # UPDATE
             merged_po = existing_merged_map[po_id]
             
+            # --- FINANCIAL UPDATES (Always Apply) ---
             if po.requested_qty == 0:
                 merged_po.requested_qty = 0
                 merged_po.line_amount_hw = 0
@@ -373,16 +374,26 @@ def process_and_merge_pos(db: Session):
             merged_po.site_id = po.site_id
             merged_po.site_code = po.site.site_code if po.site else None
             
-            # Update assignment in case rules changed or site changed
-            merged_po.internal_project_id = final_internal_project_id
+            # --- ASSIGNMENT PRESERVATION LOGIC (THE FIX) ---
+            # 1. Is the PO currently unassigned or TBD?
+            current_is_tbd = (merged_po.internal_project_id is None) or \
+                             (merged_po.internal_project_id == tbd_project_id)
+            
+            # 2. Only update if it is currently TBD
+            if current_is_tbd:
+                merged_po.internal_project_id = final_internal_project_id
+            
+            # NOTE: If it is ALREADY assigned to Project A, we DO NOT overwrite it with TBD.
+            # This preserves manual assignments or historical rule matches.
 
         else:
-            # INSERT
+            # INSERT (New PO)
+            # For new POs, we always apply the resolved project (Rule or TBD)
             new_merged_po = models.MergedPO(
                 po_id=po_id,
                 raw_po_id=po.id,
                 customer_project_id=customer_project.id,
-                internal_project_id=final_internal_project_id, # <--- Assigned here
+                internal_project_id=final_internal_project_id, 
                 site_id=po.site_id,
                 site_code=po.site.site_code if po.site else None,
                 po_no=po.po_no,
@@ -395,6 +406,7 @@ def process_and_merge_pos(db: Session):
                 publish_date=po.publish_date,
             )
             db.add(new_merged_po)
+
 
     # 6. Cleanup
     unprocessed_ids = [po.id for po in unprocessed_pos]
@@ -827,15 +839,25 @@ def get_total_financial_summary(db: Session) -> dict:
         "total_accepted_pac": total_accepted_pac,
         "remaining_gap": remaining_gap
     }
-def get_internal_projects_financial_summary(db: Session):
-    results = db.query(
+def get_internal_projects_financial_summary(db: Session, user: models.User = None):
+    # Start building the query
+    query = db.query(
         models.InternalProject.id.label("project_id"),
         models.InternalProject.name.label("project_name"),
         func.sum(models.MergedPO.line_amount_hw).label("total_po_value"),
         (func.sum(models.MergedPO.accepted_ac_amount) + func.sum(models.MergedPO.accepted_pac_amount)).label("total_accepted")
-    ).select_from(models.MergedPO)\
-    .join(models.InternalProject, models.MergedPO.internal_project_id == models.InternalProject.id)\
-    .group_by(models.InternalProject.id, models.InternalProject.name).all() 
+    ).select_from(models.MergedPO).join(
+        models.InternalProject, models.MergedPO.internal_project_id == models.InternalProject.id
+    )
+
+    # --- NEW FILTER LOGIC ---
+    if user and user.role in [UserRole.PM, UserRole.PD]:
+        # Only show projects managed by this user
+        query = query.filter(models.InternalProject.project_manager_id == user.id)
+    # ------------------------
+
+    results = query.group_by(models.InternalProject.id, models.InternalProject.name).all()
+ 
     summary_list = []
     for row in results:
         po_value = row.total_po_value or 0
@@ -2109,29 +2131,39 @@ def bulk_assign_sites(db: Session, site_ids: List[int], target_project_id: int):
     
     return {"updated": len(valid_site_ids), "skipped": skipped_count}
 
-def search_merged_pos_by_site_codes(db: Session, site_codes: List[str]):
-    # 1. Clean Inputs: Strip spaces, newlines, carriage returns
+def search_merged_pos_by_site_codes(
+    db: Session, 
+    site_codes: List[str],
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None
+):
+    # 1. Clean Inputs
     clean_codes = []
     for c in site_codes:
         if c and c.strip():
-            # Remove hidden characters that Excel copy-paste might add
             clean_val = c.strip().replace('\r', '').replace('\n', '')
             clean_codes.append(clean_val)
     
-    clean_codes = list(set(clean_codes)) # Remove duplicates
+    clean_codes = list(set(clean_codes))
     
     if not clean_codes:
         return []
 
-    # 2. Query
-    # We check if site_code is IN the list
-    # Use .distinct() to avoid duplicate POs if the site appears multiple times in different POs (optional)
-    return db.query(models.MergedPO).options(
+    # 2. Build Query
+    query = db.query(models.MergedPO).options(
         joinedload(models.MergedPO.internal_project),
         joinedload(models.MergedPO.customer_project)
     ).filter(
         models.MergedPO.site_code.in_(clean_codes)
-    ).all()
+    )
+
+    # 3. Apply Date Filters
+    if start_date:
+        query = query.filter(func.date(models.MergedPO.publish_date) >= start_date)
+    if end_date:
+        query = query.filter(func.date(models.MergedPO.publish_date) <= end_date)
+
+    return query.all()
 def bulk_assign_projects_only(db: Session, file_contents: bytes):
     """
     Simplified Migration:

@@ -23,11 +23,13 @@ def get_financial_overview(db: Session = Depends(get_db)):
     Provides a high-level financial overview of all processed POs.
     """
     return crud.get_total_financial_summary(db=db)
-
-
 @router.get("/internal-projects-overview", response_model=List[schemas.ProjectFinancials])
-def get_internal_projects_overview(db: Session = Depends(get_db)):
-    return crud.get_internal_projects_financial_summary(db=db)
+def get_internal_projects_overview(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user) # Add this
+):
+    # Pass current_user to filter data
+    return crud.get_internal_projects_financial_summary(db, user=current_user)
 
 @router.get("/customer-projects-overview", response_model=List[schemas.ProjectFinancials])
 def get_customer_projects_overview(db: Session = Depends(get_db)):

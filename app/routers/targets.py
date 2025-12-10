@@ -32,12 +32,12 @@ def get_matrix(
     # - If PM/PD: Pass current_user.id (See Self)
     # - Others: Pass current_user.id (See Self, likely empty if they aren't PMs)
     
-    filter_id = None
+    # filter_id = None
     
-    if current_user.role != UserRole.ADMIN:
-        filter_id = current_user.id
+    # if current_user.role != UserRole.ADMIN:
+    #     filter_id = current_user.id
         
-    return crud.get_performance_matrix(db, year, month, filter_user_id=filter_id)
+    return crud.get_performance_matrix(db, year, month, filter_user_id=None)
 @router.get("/yearly-matrix", response_model=List[dict]) # Use generic dict or define strict schema
 def get_yearly_matrix(year: int, db: Session = Depends(get_db)):
     return crud.get_yearly_matrix_data(db, year)
