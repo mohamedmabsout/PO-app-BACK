@@ -48,7 +48,7 @@ def generate_bc_pdf(bc):
     # Top Header Table
     header_data = [
         [logo, Paragraph("<b>Purchase Order</b>", style_title)],
-        [Paragraph(f"<b>Subcontract No.:</b> {bc.bc_number}", style_bold), Paragraph(f"<b>Date:</b> {bc.created_at.strftime('%Y-%m-%d')}", style_bold)]
+        [Paragraph(f"<b>Subcontract No.:</b> {bc.bc_number}", style_bold)]
     ]
     
     t_header = Table(header_data, colWidths=[10*cm, 9*cm])
@@ -72,7 +72,7 @@ def generate_bc_pdf(bc):
         [Paragraph(f"<b>Phone:</b> {bc.sbc.phone_1 or ''}", style_normal)],
         [Paragraph(f"<b>Fax:</b> -", style_normal)],
         [Paragraph(f"<b>Currency:</b> MAD", style_normal)],
-        [Paragraph(f"<b>Payment Terms:</b> {bc.items[0].merged_po.payment_term if bc.items else 'N/A'}", style_normal)],
+      
     ]
 
     # Bill To Info (Static or Configurable)

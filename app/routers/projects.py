@@ -1,10 +1,12 @@
 # in app/routers/projects.py
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy.orm import Session, joinedload,Query
 from sqlalchemy import func
 from typing import List, Optional
 from datetime import date
 from .. import auth, models
+import pandas as pd
+from io import BytesIO
 
 from .. import crud, schemas
 from ..dependencies import get_db, get_current_user, require_admin, require_management
@@ -230,9 +232,89 @@ def search_by_sites_batch(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    return crud.search_merged_pos_by_site_codes(
-        db, 
-        payload.site_codes, 
-        payload.start_date, 
-        payload.end_date
+
+
+    # On récupère la liste de codes depuis le modèle Pydantic
+    raw_codes = payload.site_codes or []
+
+    # Nettoyage basique (trim, dédoublonnage, suppression des vides)
+    clean_codes = sorted(
+        set(c.strip() for c in raw_codes if c and c.strip())
     )
+
+    if not clean_codes:
+        return []
+
+    # Appel au CRUD qui fait la vraie requête SQLAlchemy
+    results = crud.get_merged_pos_by_site_codes(
+        db=db,
+        site_codes=clean_codes,
+        start_date=payload.start_date,
+        end_date=payload.end_date,
+    )
+
+    return results
+@router.post("/site-dispatcher/upload")
+async def upload_site_dispatcher_excel(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    # 1. Vérifier le type de fichier
+    if not (file.filename.endswith(".xlsx") or file.filename.endswith(".xls")):
+        raise HTTPException(
+            status_code=400,
+            detail="Veuillez uploader un fichier Excel (.xlsx ou .xls).",
+        )
+
+    try:
+        content = await file.read()
+        df = pd.read_excel(BytesIO(content))
+
+        # 2. On veut AU MOINS une colonne "Site Code"
+        required_cols = ["Site Code"]
+        for col in required_cols:
+            if col not in df.columns:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Colonne manquante dans le fichier Excel: {col}",
+                )
+
+        processed = 0
+        errors = 0
+        error_rows: list[dict] = []
+
+        # 3. Boucle sur chaque ligne => dispatch par site_code
+        for idx, row in df.iterrows():
+            try:
+                site_code = str(row["Site Code"]).strip()
+                if not site_code or site_code.lower() == "nan":
+                    continue
+
+                # 🧠 LOGIQUE DE DISPATCH PAR SITE CODE
+                crud.dispatch_site_by_code(
+                    db=db,
+                    site_code=site_code,
+                    user_id=current_user.id,
+                )
+
+                processed += 1
+
+            except Exception as e:
+                errors += 1
+                error_rows.append(
+                    {"row": int(idx) + 2, "site_code": site_code, "error": str(e)}
+                )
+
+        db.commit()
+
+        return {
+            "processed": processed,
+            "errors": errors,
+            "error_rows": error_rows,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print("Dispatch Excel error:", e)
