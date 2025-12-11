@@ -336,7 +336,7 @@ def list_bcs(status: str, db: Session = Depends(get_db)):
     # Map string to Enum
     status_enum = models.BCStatus(status) 
     return crud.get_bcs_by_status(db, status_enum)
-@router.get("/bc/all", response_model=List[schemas.BonDeCommandeDetail]) # Use your schema
+@router.get("/bc/all", response_model=List[schemas.BCResponse]) # Use your schema
 def read_all_bcs(
     search: Optional[str] = None,
     db: Session = Depends(get_db),
