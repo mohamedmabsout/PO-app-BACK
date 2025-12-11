@@ -1061,9 +1061,9 @@ def get_financial_summary_by_period(
         pac_date_filters.append(extract('month', models.MergedPO.date_pac_ok) == month)
 
     if week:
-        po_date_filters.append(extract('week', models.MergedPO.publish_date) == week)
-        ac_date_filters.append(extract('week', models.MergedPO.date_ac_ok) == week)
-        pac_date_filters.append(extract('week', models.MergedPO.date_pac_ok) == week)
+        po_date_filters.append(func.week(models.MergedPO.publish_date, 3) == week)
+        ac_date_filters.append(func.week(models.MergedPO.date_ac_ok, 3) == week)
+        pac_date_filters.append(func.week(models.MergedPO.date_pac_ok, 3) == week)
 
     # --- Perform the conditional aggregation in a single, efficient query ---
     summary = db.query(
