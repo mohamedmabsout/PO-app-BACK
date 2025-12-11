@@ -336,7 +336,13 @@ def list_bcs(status: str, db: Session = Depends(get_db)):
     # Map string to Enum
     status_enum = models.BCStatus(status) 
     return crud.get_bcs_by_status(db, status_enum)
-
+@router.get("/bc/all", response_model=List[schemas.BonDeCommandeDetail]) # Use your schema
+def read_all_bcs(
+    search: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    return crud.get_all_bcs(db, search=search)
 @router.post("/bc/{bc_id}/approve-l1")
 def approve_l1(bc_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
     # Check if PD

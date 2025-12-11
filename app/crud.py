@@ -2020,6 +2020,20 @@ def get_bcs_by_status(db: Session, status: models.BCStatus, search_term: Optiona
 
         )
     return query.all()
+def get_all_bcs(db: Session, search: Optional[str] = None):
+    query = db.query(models.BonDeCommande)
+    
+    if search:
+        search_term = f"%{search}%"
+        # Join to search related names
+        query = query.join(models.SBC).join(models.InternalProject).filter(
+            (models.BonDeCommande.bc_number.ilike(search_term)) |
+            (models.SBC.short_name.ilike(search_term)) |
+            (models.InternalProject.name.ilike(search_term))
+        )
+    
+    # Order by newest first
+    return query.order_by(models.BonDeCommande.created_at.desc()).all()
 
 def approve_bc_l2(db: Session, bc_id: int, approver_id: int):
     bc = db.query(models.BonDeCommande).get(bc_id)
