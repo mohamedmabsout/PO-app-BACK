@@ -253,27 +253,27 @@ def generate_bc_pdf(bc):
     elements.append(Paragraph(notes_text, style_normal))
     elements.append(Spacer(1, 0.5 * cm))
 
-    # ---------- NEW: SIB LEGAL FOOTER BLOCK ----------
-    legal_block = """
-    SOLUTION INTEGRALE BUILDING (SIB) – Adresse complète, Casablanca – Royaume du Maroc<br/>
-    ICE : 001234567000012 – IF : 12345678 – RC : 123456 – CNSS : 1234567 – Patente : 12345678<br/>
-    Banque : [Nom de la banque] – RIB : [RIB complet] – IBAN : [MA..] – SWIFT : [XXXXMAMC]
-    """
-    # TODO: remplace les valeurs ci-dessus par les vraies infos SIB
-
-    # fine separator line
+    
+       # ---------- NEW: SIB LEGAL FOOTER BLOCK (style "facture") ----------
+    # Ligne séparatrice fine
     footer_line = Table(
         [[""]],
         colWidths=[18 * cm],
         style=[
-            ("LINEABOVE", (0, 0), (-1, 0), 0.5, colors.lightgrey),
-            ("TOPPADDING", (0, 0), (-1, 0), 2),
+            ("LINEABOVE", (0, 0), (-1, 0), 0.3, colors.lightgrey),
+            ("TOPPADDING", (0, 0), (-1, 0), 1),
+            ("BOTTOMPADDING", (0, 0), (-1, 0), 1),
         ],
     )
+    elements.append(Spacer(1, 0.3 * cm))
     elements.append(footer_line)
-    elements.append(Spacer(1, 0.2 * cm))
-    elements.append(Paragraph(legal_block, style_footer))
 
-    # Build PDF
-    doc.build(elements)
-    return filename
+    # Bloc légal SIB – à adapter avec vos vraies infos
+    legal_block = """
+    SOLUTION INTEGRALE BUILDING (SIB) – Société à responsabilité limitée au capital de [XXX XXX] MAD –
+    Siège social : [Adresse complète, CP Ville, Maroc] – ICE : [ICE] – IF : [IF] – RC : [RC] – CNSS : [CNSS] – Patente : [Patente] – 
+    Banque : [Nom de la banque] – RIB : [RIB complet] – IBAN : [IBAN] – SWIFT : [SWIFT]
+    """
+
+    elements.append(Spacer(1, 0.1 * cm))
+    elements.append(Paragraph(legal_block, style_footer))
