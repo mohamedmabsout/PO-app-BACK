@@ -2102,3 +2102,39 @@ def bulk_assign_sites(db: Session, site_ids: List[int], target_project_id: int):
     db.commit()
     
     return {"updated": len(valid_site_ids), "skipped": skipped_count}
+from sqlalchemy.orm import Session
+from . import models
+
+def dispatch_site_by_code(
+    db: Session,
+    site_code: str,
+    user_id: int | None = None,
+):
+    """
+    Dispatch d'un site en fonction de son site_code.
+    >>> À ADAPTER selon tes tables / colonnes <<<
+    """
+
+    # Exemple : tu travailles sur la table MergedPO
+    po = (
+        db.query(models.MergedPO)
+        .filter(models.MergedPO.site_code == site_code)
+        .first()
+    )
+    if not po:
+        raise ValueError(f"Aucun enregistrement trouvé pour site_code={site_code}")
+
+    # Exemples de choses que tu peux faire :
+    # - affecter le PM courant
+    # - changer le statut
+    # - créer une entrée dans une table "Dispatch"
+    # => À adapter à ton besoin métier
+
+    # Exemple 1 : on stocke le PM = user courant
+    po.project_manager_id = user_id   
+
+    # Exemple 2 : on change un statut
+    # po.dispatch_status = "DISPATCHED"
+
+    # Pas de db.commit() ici, c’est fait dans l’endpoint
+    db.add(po)
