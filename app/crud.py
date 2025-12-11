@@ -844,10 +844,13 @@ def get_internal_projects_financial_summary(db: Session, user: models.User = Non
     query = db.query(
         models.InternalProject.id.label("project_id"),
         models.InternalProject.name.label("project_name"),
+        models.User.id.label("user_id"),
         func.sum(models.MergedPO.line_amount_hw).label("total_po_value"),
         (func.sum(models.MergedPO.accepted_ac_amount) + func.sum(models.MergedPO.accepted_pac_amount)).label("total_accepted")
     ).select_from(models.MergedPO).join(
         models.InternalProject, models.MergedPO.internal_project_id == models.InternalProject.id
+    ).join(
+        models.User, models.InternalProject.project_manager_id == models.User.id, isouter=True
     )
 
     # --- NEW FILTER LOGIC ---
@@ -868,10 +871,11 @@ def get_internal_projects_financial_summary(db: Session, user: models.User = Non
         # We need to find the project_id. This is a simplification.
         # A more robust solution would join with the projects table.
         project = db.query(models.InternalProject).filter(models.InternalProject.name == row.project_name).first()
-
+        pm = db.query(models.User).filter(models.User.id == project.project_manager_id).first() if project else None 
         summary_list.append({
             "project_id": project.id if project else 0,
             "project_name": row.project_name,
+            "manager_last_name": pm.last_name if pm else None,
             "total_po_value": po_value,
             "total_accepted": accepted,
             "remaining_gap": gap,
@@ -1903,6 +1907,13 @@ def save_upload_file(upload_file, sbc_code, doc_type):
 
 def create_sbc(db: Session, form_data: dict, contract_file, tax_file, creator_id: int):
     # 1. Handle Code
+    email = form_data.get('email')
+    phone = form_data.get('phone_1')
+    if email and db.query(models.SBC).filter(models.SBC.email == email).first():
+        raise ValueError(f"An SBC with the email '{email}' already exists.")
+    if phone and db.query(models.SBC).filter(models.SBC.phone_1 == phone).first():
+        raise ValueError(f"An SBC with the phone number '{phone}' already exists.")
+
     code = form_data.get('sbc_code')
     if not code:
         code = generate_sbc_code(db)
@@ -1975,18 +1986,40 @@ def reject_sbc(db: Session, sbc_id: int):
     sbc.status = models.SBCStatus.BLACKLISTED # Or return to Draft logic if you prefer
     db.commit()
     return sbc
-def get_bcs_by_status(db: Session, status: models.BCStatus):
-    return db.query(models.BonDeCommande).filter(models.BonDeCommande.status == status).all()
+
+def submit_bc(db: Session, bc_id: int):
+    """Moves BC from DRAFT to SUBMITTED (Ready for L1)"""
+    bc = db.query(models.BonDeCommande).get(bc_id)
+    if not bc or bc.status != models.BCStatus.DRAFT:
+        raise ValueError("BC not found or not in Draft status.")
+    bc.status = models.BCStatus.SUBMITTED
+    db.commit()
+    return bc
 
 def approve_bc_l1(db: Session, bc_id: int, approver_id: int):
     bc = db.query(models.BonDeCommande).get(bc_id)
-    if not bc or bc.status != models.BCStatus.DRAFT:
-        raise ValueError("BC not found or not in Draft status")
+    # Check if it is SUBMITTED (instead of DRAFT)
+    if not bc or bc.status != models.BCStatus.SUBMITTED:
+        raise ValueError("BC must be SUBMITTED before L1 Approval.")
     
-    bc.status = models.BCStatus.PENDING_L2 # Move to Admin
+    bc.status = models.BCStatus.PENDING_L2
     bc.approver_l1_id = approver_id
     db.commit()
     return bc
+
+def get_bcs_by_status(db: Session, status: models.BCStatus, search_term: Optional[str] = None):
+    query = db.query(models.BonDeCommande).filter(models.BonDeCommande.status == status)
+
+    if search_term:
+        query = query.join(models.SBC).join(models.InternalProject).join(models.MergedPO, models.BonDeCommande.items)
+        search = f"%{search_term}%"
+        query = query.filter(
+            (models.BonDeCommande.bc_number.ilike(search)) |
+            (models.SBC.short_name.ilike(search)) |
+            (models.InternalProject.name.ilike(search)) | (models.MergedPO.po_id.ilike(search))
+
+        )
+    return query.all()
 
 def approve_bc_l2(db: Session, bc_id: int, approver_id: int):
     bc = db.query(models.BonDeCommande).get(bc_id)
@@ -1997,6 +2030,22 @@ def approve_bc_l2(db: Session, bc_id: int, approver_id: int):
     bc.approver_l2_id = approver_id
     db.commit()
     return bc
+def reject_bc(db: Session, bc_id: int, reason: str, rejector_id: int):
+    bc = db.query(models.BonDeCommande).get(bc_id)
+    if not bc or bc.status not in [models.BCStatus.DRAFT, models.BCStatus.PENDING_L2]:
+        raise ValueError("BC not found or cannot be rejected in its current state.")
+    
+    bc.status = models.BCStatus.REJECTED
+    bc.rejection_reason = reason
+    # You could also add a 'rejected_by_id' foreign key if you want to track this
+    
+    db.commit()
+    return bc
+def get_bc_by_id(db: Session, bc_id: int):
+    return db.query(models.BonDeCommande).options(
+        joinedload(models.BonDeCommande.items) # Eagerly load the items
+    ).filter(models.BonDeCommande.id == bc_id).first()
+
 def assign_site_to_internal_project_by_code(
     db: Session,
     site_code: str,
@@ -2203,7 +2252,6 @@ def bulk_assign_projects_only(db: Session, file_contents: bytes):
 
     # 5. Build Update List
     update_list = []
-    
     for index, row in df.iterrows():
         # Get Excel Data
         raw_po_id = str(row[col_po_id]).strip()

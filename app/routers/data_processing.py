@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
 from sqlalchemy.orm import Session, query
 from typing import Optional
 from fastapi import Query, status
-from ..dependencies import get_db
+from ..dependencies import get_current_user, get_db
 from .. import crud, models, auth, schemas
 from datetime import datetime, date
 from xlsxwriter.utility import xl_col_to_name
@@ -371,3 +371,32 @@ async def assign_projects_only(
     except Exception as e:
         print(f"Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/bc/{bc_id}/reject")
+def reject_bon_de_commande(
+    bc_id: int, 
+    rejection_data: schemas.BCRejectionRequest,
+    db: Session = Depends(get_db), 
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    return crud.reject_bc(
+        db, bc_id=bc_id, reason=rejection_data.reason, rejector_id=current_user.id
+    )
+
+@router.post("/bc/{bc_id}/submit")
+def submit_bon_de_commande(
+    bc_id: int, 
+    db: Session = Depends(get_db), 
+    current_user: models.User = Depends(get_current_user)
+):
+    return crud.submit_bc(db, bc_id=bc_id)
+@router.get("/bc/{bc_id}", response_model=schemas.BCResponse)
+def get_bc_details(
+    bc_id: int,
+    db: Session = Depends(get_db)
+):
+    bc = crud.get_bc_by_id(db, bc_id)
+    if not bc:
+        raise HTTPException(status_code=404, detail="BC not found")
+    return bc

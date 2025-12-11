@@ -26,3 +26,5 @@ class BCStatus(str, enum.Enum):
     BLACKLISTED = "BLACKLISTED"
     DRAFT = "DRAFT" # Optional, if RAF saves before submitting
     APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    SUBMITTED = "SUBMITTED"   # <-- NEW STATE
