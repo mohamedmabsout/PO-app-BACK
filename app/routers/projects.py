@@ -226,22 +226,13 @@ def update_internal_project(
         raise HTTPException(status_code=404, detail="Project not found")
     return updated_project
 
-@router.post(
-    "/merged-pos/search-by-sites",
-    response_model=List[MergedPOSimple],
-)
-def search_pos_by_sites(
-    payload: SiteCodeList,                      # <<< ICI : objet Pydantic
-    start_date: Optional[date] ,
-    end_date: Optional[date] ,
+@router.post("/merged-pos/search-by-sites", response_model=List[schemas.MergedPO])
+def search_by_sites_batch(
+    payload: schemas.BatchSearchRequest,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
+    current_user: models.User = Depends(get_current_user)
 ):
-    """
-    Batch search utilisé par le Site Dispatcher.
-    Body JSON : { "site_codes": ["CODE1", "CODE2", ...] }
-    Query params optionnels : start_date, end_date.
-    """
+
 
     # On récupère la liste de codes depuis le modèle Pydantic
     raw_codes = payload.site_codes or []
@@ -258,8 +249,8 @@ def search_pos_by_sites(
     results = crud.get_merged_pos_by_site_codes(
         db=db,
         site_codes=clean_codes,
-        start_date=start_date,
-        end_date=end_date,
+        start_date=payload.start_date,
+        end_date=payload.end_date,
     )
 
     return results
@@ -327,8 +318,3 @@ async def upload_site_dispatcher_excel(
         raise
     except Exception as e:
         print("Dispatch Excel error:", e)
-        raise HTTPException(
-            status_code=500,
-            detail="Erreur interne lors du traitement du fichier Excel.",
-
-        )

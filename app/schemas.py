@@ -406,7 +406,10 @@ class SiteAssignByCodeRequest(BaseModel):
     site_code: str
     internal_project_name: str
 
-
+class BatchSearchRequest(BaseModel):
+    site_codes: List[str]
+    start_date: Optional[date] = None # New
+    end_date: Optional[date] = None
 class BulkSiteAssignByCodeRequest(BaseModel):
     """
     Assigner plusieurs sites à un projet interne
@@ -442,3 +445,5 @@ class MergedPOSimple(BaseModel):
 
     class Config:
         orm_mode = True
+class BCRejectionRequest(BaseModel):
+    reason: str

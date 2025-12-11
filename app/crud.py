@@ -10,7 +10,9 @@ from sqlalchemy import func, case, extract, and_
 from sqlalchemy.sql.functions import coalesce # More explicit import
 from sqlalchemy.orm import aliased
 from .enum import ProjectType, UserRole
-
+import pandas as pd
+import io
+import re
 import os
 import shutil
 from pathlib import Path
@@ -359,6 +361,7 @@ def process_and_merge_pos(db: Session):
             # UPDATE
             merged_po = existing_merged_map[po_id]
             
+            # --- FINANCIAL UPDATES (Always Apply) ---
             if po.requested_qty == 0:
                 merged_po.requested_qty = 0
                 merged_po.line_amount_hw = 0
@@ -371,16 +374,26 @@ def process_and_merge_pos(db: Session):
             merged_po.site_id = po.site_id
             merged_po.site_code = po.site.site_code if po.site else None
             
-            # Update assignment in case rules changed or site changed
-            merged_po.internal_project_id = final_internal_project_id
+            # --- ASSIGNMENT PRESERVATION LOGIC (THE FIX) ---
+            # 1. Is the PO currently unassigned or TBD?
+            current_is_tbd = (merged_po.internal_project_id is None) or \
+                             (merged_po.internal_project_id == tbd_project_id)
+            
+            # 2. Only update if it is currently TBD
+            if current_is_tbd:
+                merged_po.internal_project_id = final_internal_project_id
+            
+            # NOTE: If it is ALREADY assigned to Project A, we DO NOT overwrite it with TBD.
+            # This preserves manual assignments or historical rule matches.
 
         else:
-            # INSERT
+            # INSERT (New PO)
+            # For new POs, we always apply the resolved project (Rule or TBD)
             new_merged_po = models.MergedPO(
                 po_id=po_id,
                 raw_po_id=po.id,
                 customer_project_id=customer_project.id,
-                internal_project_id=final_internal_project_id, # <--- Assigned here
+                internal_project_id=final_internal_project_id, 
                 site_id=po.site_id,
                 site_code=po.site.site_code if po.site else None,
                 po_no=po.po_no,
@@ -393,6 +406,7 @@ def process_and_merge_pos(db: Session):
                 publish_date=po.publish_date,
             )
             db.add(new_merged_po)
+
 
     # 6. Cleanup
     unprocessed_ids = [po.id for po in unprocessed_pos]
@@ -825,15 +839,28 @@ def get_total_financial_summary(db: Session) -> dict:
         "total_accepted_pac": total_accepted_pac,
         "remaining_gap": remaining_gap
     }
-def get_internal_projects_financial_summary(db: Session):
-    results = db.query(
+def get_internal_projects_financial_summary(db: Session, user: models.User = None):
+    # Start building the query
+    query = db.query(
         models.InternalProject.id.label("project_id"),
         models.InternalProject.name.label("project_name"),
+        models.User.id.label("user_id"),
         func.sum(models.MergedPO.line_amount_hw).label("total_po_value"),
         (func.sum(models.MergedPO.accepted_ac_amount) + func.sum(models.MergedPO.accepted_pac_amount)).label("total_accepted")
-    ).select_from(models.MergedPO)\
-    .join(models.InternalProject, models.MergedPO.internal_project_id == models.InternalProject.id)\
-    .group_by(models.InternalProject.id, models.InternalProject.name).all() 
+    ).select_from(models.MergedPO).join(
+        models.InternalProject, models.MergedPO.internal_project_id == models.InternalProject.id
+    ).join(
+        models.User, models.InternalProject.project_manager_id == models.User.id, isouter=True
+    )
+
+    # --- NEW FILTER LOGIC ---
+    if user and user.role in [UserRole.PM, UserRole.PD]:
+        # Only show projects managed by this user
+        query = query.filter(models.InternalProject.project_manager_id == user.id)
+    # ------------------------
+
+    results = query.group_by(models.InternalProject.id, models.InternalProject.name).all()
+ 
     summary_list = []
     for row in results:
         po_value = row.total_po_value or 0
@@ -844,10 +871,11 @@ def get_internal_projects_financial_summary(db: Session):
         # We need to find the project_id. This is a simplification.
         # A more robust solution would join with the projects table.
         project = db.query(models.InternalProject).filter(models.InternalProject.name == row.project_name).first()
-
+        pm = db.query(models.User).filter(models.User.id == project.project_manager_id).first() if project else None 
         summary_list.append({
             "project_id": project.id if project else 0,
             "project_name": row.project_name,
+            "manager_last_name": pm.last_name if pm else None,
             "total_po_value": po_value,
             "total_accepted": accepted,
             "remaining_gap": gap,
@@ -1329,26 +1357,18 @@ def get_performance_matrix(
     db: Session, 
     year: int, 
     month: Optional[int] = None, 
-    filter_user_id: Optional[int] = None # <--- NEW PARAMETER
+    filter_user_id: Optional[int] = None
 ):
-    """
-    Generates the data for both Monthly and Yearly widgets.
-    """
-    
-    # 1. Start query for eligible users (PMs, Admins, CEOs)
+    # 1. Get eligible users
     query = db.query(models.User).filter(models.User.role.in_(['PM', 'ADMIN', 'PD']))
-    
-    # 2. Apply Security Filter (Row-Level Security)
     if filter_user_id:
         query = query.filter(models.User.id == filter_user_id)
-        
     pms = query.all()
     
     results = []
 
     for pm in pms:
-
-        # A. Fetch Targets (Plan)
+        # A. Fetch Targets (Plan) - STRICTLY FOR THE PERIOD
         target_query = db.query(
             func.sum(models.UserPerformanceTarget.target_po_amount),
             func.sum(models.UserPerformanceTarget.target_invoice_amount)
@@ -1356,7 +1376,6 @@ def get_performance_matrix(
             models.UserPerformanceTarget.user_id == pm.id,
             models.UserPerformanceTarget.year == year
         )
-        
         if month:
             target_query = target_query.filter(models.UserPerformanceTarget.month == month)
             
@@ -1364,13 +1383,10 @@ def get_performance_matrix(
         plan_po = plan_po or 0.0
         plan_invoice = plan_invoice or 0.0
 
-        # B. Fetch Actuals (From MergedPO)
-        # We reuse the logic from get_user_performance_stats but specific to the period
-        
-        # Base filter: Projects managed by this PM
+        # B. Fetch Actuals - STRICTLY FOR THE PERIOD (For the "Target PO" and "Target Invoice" columns)
         base_filters = [models.InternalProject.project_manager_id == pm.id]
         
-        # Date filters
+        # Period Filters
         po_date_filters = base_filters + [extract('year', models.MergedPO.publish_date) == year]
         ac_date_filters = base_filters + [extract('year', models.MergedPO.date_ac_ok) == year]
         pac_date_filters = base_filters + [extract('year', models.MergedPO.date_pac_ok) == year]
@@ -1388,28 +1404,44 @@ def get_performance_matrix(
             models.InternalProject, models.MergedPO.internal_project_id == models.InternalProject.id
         ).first()
 
-        actual_po = summary[0] or 0.0
-        actual_paid = (summary[1] or 0.0) + (summary[2] or 0.0)
+        actual_po_period = summary[0] or 0.0
+        actual_paid_period = (summary[1] or 0.0) + (summary[2] or 0.0)
+
+        # C. Fetch LIFETIME GAP (New Logic)
+        # Calculates (All POs ever assigned to this PM) - (All Payments ever received by this PM)
+        lifetime_summary = db.query(
+            func.sum(models.MergedPO.line_amount_hw),
+            func.sum(models.MergedPO.accepted_ac_amount),
+            func.sum(models.MergedPO.accepted_pac_amount)
+        ).join(models.InternalProject).filter(
+            models.InternalProject.project_manager_id == pm.id
+        ).first()
         
-        # Total Gap (Remaining to be paid on what was produced)
-        total_gap = actual_po - actual_paid
+        lifetime_po = lifetime_summary[0] or 0.0
+        lifetime_paid = (lifetime_summary[1] or 0.0) + (lifetime_summary[2] or 0.0)
+        total_lifetime_gap = lifetime_po - lifetime_paid
 
         results.append({
             "user_id": pm.id,
             "user_name": f"{pm.first_name} {pm.last_name}",
-            "total_gap": total_gap,
+            
+            # Use LIFETIME GAP here
+            "total_gap": total_lifetime_gap, 
+            
+            # Use PERIOD Stats here
             "plan_po": plan_po,
-            "actual_po": actual_po,
-            "percent_po": (actual_po / plan_po * 100) if plan_po > 0 else 0,
+            "actual_po": actual_po_period,
+            "percent_po": (actual_po_period / plan_po * 100) if plan_po > 0 else 0,
+            
             "plan_invoice": plan_invoice,
-            "actual_invoice": actual_paid,
-            "percent_invoice": (actual_paid / plan_invoice * 100) if plan_invoice > 0 else 0,
+            "actual_invoice": actual_paid_period,
+            "percent_invoice": (actual_paid_period / plan_invoice * 100) if plan_invoice > 0 else 0,
         })
         
     return results
 def get_yearly_matrix_data(db: Session, year: int):
     # 1. Get all PMs
-    pms = db.query(models.User).filter(models.User.role.in_(['PM', 'ADMIN', 'CEO'])).all()
+    pms = db.query(models.User).filter(models.User.role.in_(['PM', 'ADMIN', 'PD'])).all()
     
     matrix_data = []
 
@@ -1875,6 +1907,13 @@ def save_upload_file(upload_file, sbc_code, doc_type):
 
 def create_sbc(db: Session, form_data: dict, contract_file, tax_file, creator_id: int):
     # 1. Handle Code
+    email = form_data.get('email')
+    phone = form_data.get('phone_1')
+    if email and db.query(models.SBC).filter(models.SBC.email == email).first():
+        raise ValueError(f"An SBC with the email '{email}' already exists.")
+    if phone and db.query(models.SBC).filter(models.SBC.phone_1 == phone).first():
+        raise ValueError(f"An SBC with the phone number '{phone}' already exists.")
+
     code = form_data.get('sbc_code')
     if not code:
         code = generate_sbc_code(db)
@@ -1947,18 +1986,54 @@ def reject_sbc(db: Session, sbc_id: int):
     sbc.status = models.SBCStatus.BLACKLISTED # Or return to Draft logic if you prefer
     db.commit()
     return sbc
-def get_bcs_by_status(db: Session, status: models.BCStatus):
-    return db.query(models.BonDeCommande).filter(models.BonDeCommande.status == status).all()
+
+def submit_bc(db: Session, bc_id: int):
+    """Moves BC from DRAFT to SUBMITTED (Ready for L1)"""
+    bc = db.query(models.BonDeCommande).get(bc_id)
+    if not bc or bc.status != models.BCStatus.DRAFT:
+        raise ValueError("BC not found or not in Draft status.")
+    bc.status = models.BCStatus.SUBMITTED
+    db.commit()
+    return bc
 
 def approve_bc_l1(db: Session, bc_id: int, approver_id: int):
     bc = db.query(models.BonDeCommande).get(bc_id)
-    if not bc or bc.status != models.BCStatus.DRAFT:
-        raise ValueError("BC not found or not in Draft status")
+    # Check if it is SUBMITTED (instead of DRAFT)
+    if not bc or bc.status != models.BCStatus.SUBMITTED:
+        raise ValueError("BC must be SUBMITTED before L1 Approval.")
     
-    bc.status = models.BCStatus.PENDING_L2 # Move to Admin
+    bc.status = models.BCStatus.PENDING_L2
     bc.approver_l1_id = approver_id
     db.commit()
     return bc
+
+def get_bcs_by_status(db: Session, status: models.BCStatus, search_term: Optional[str] = None):
+    query = db.query(models.BonDeCommande).filter(models.BonDeCommande.status == status)
+
+    if search_term:
+        query = query.join(models.SBC).join(models.InternalProject).join(models.MergedPO, models.BonDeCommande.items)
+        search = f"%{search_term}%"
+        query = query.filter(
+            (models.BonDeCommande.bc_number.ilike(search)) |
+            (models.SBC.short_name.ilike(search)) |
+            (models.InternalProject.name.ilike(search)) | (models.MergedPO.po_id.ilike(search))
+
+        )
+    return query.all()
+def get_all_bcs(db: Session, search: Optional[str] = None):
+    query = db.query(models.BonDeCommande)
+    
+    if search:
+        search_term = f"%{search}%"
+        # Join to search related names
+        query = query.join(models.SBC).join(models.InternalProject).filter(
+            (models.BonDeCommande.bc_number.ilike(search_term)) |
+            (models.SBC.short_name.ilike(search_term)) |
+            (models.InternalProject.name.ilike(search_term))
+        )
+    
+    # Order by newest first
+    return query.order_by(models.BonDeCommande.created_at.desc()).all()
 
 def approve_bc_l2(db: Session, bc_id: int, approver_id: int):
     bc = db.query(models.BonDeCommande).get(bc_id)
@@ -1969,6 +2044,22 @@ def approve_bc_l2(db: Session, bc_id: int, approver_id: int):
     bc.approver_l2_id = approver_id
     db.commit()
     return bc
+def reject_bc(db: Session, bc_id: int, reason: str, rejector_id: int):
+    bc = db.query(models.BonDeCommande).get(bc_id)
+    if not bc or bc.status not in [models.BCStatus.DRAFT, models.BCStatus.PENDING_L2]:
+        raise ValueError("BC not found or cannot be rejected in its current state.")
+    
+    bc.status = models.BCStatus.REJECTED
+    bc.rejection_reason = reason
+    # You could also add a 'rejected_by_id' foreign key if you want to track this
+    
+    db.commit()
+    return bc
+def get_bc_by_id(db: Session, bc_id: int):
+    return db.query(models.BonDeCommande).options(
+        joinedload(models.BonDeCommande.items) # Eagerly load the items
+    ).filter(models.BonDeCommande.id == bc_id).first()
+
 def assign_site_to_internal_project_by_code(
     db: Session,
     site_code: str,
@@ -2102,39 +2193,106 @@ def bulk_assign_sites(db: Session, site_ids: List[int], target_project_id: int):
     db.commit()
     
     return {"updated": len(valid_site_ids), "skipped": skipped_count}
-from sqlalchemy.orm import Session
-from . import models
 
-def dispatch_site_by_code(
-    db: Session,
-    site_code: str,
-    user_id: int | None = None,
+def search_merged_pos_by_site_codes(
+    db: Session, 
+    site_codes: List[str],
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None
 ):
-    """
-    Dispatch d'un site en fonction de son site_code.
-    >>> À ADAPTER selon tes tables / colonnes <<<
-    """
+    # 1. Clean Inputs
+    clean_codes = []
+    for c in site_codes:
+        if c and c.strip():
+            clean_val = c.strip().replace('\r', '').replace('\n', '')
+            clean_codes.append(clean_val)
+    
+    clean_codes = list(set(clean_codes))
+    
+    if not clean_codes:
+        return []
 
-    # Exemple : tu travailles sur la table MergedPO
-    po = (
-        db.query(models.MergedPO)
-        .filter(models.MergedPO.site_code == site_code)
-        .first()
+    # 2. Build Query
+    query = db.query(models.MergedPO).options(
+        joinedload(models.MergedPO.internal_project),
+        joinedload(models.MergedPO.customer_project)
+    ).filter(
+        models.MergedPO.site_code.in_(clean_codes)
     )
-    if not po:
-        raise ValueError(f"Aucun enregistrement trouvé pour site_code={site_code}")
 
-    # Exemples de choses que tu peux faire :
-    # - affecter le PM courant
-    # - changer le statut
-    # - créer une entrée dans une table "Dispatch"
-    # => À adapter à ton besoin métier
+    # 3. Apply Date Filters
+    if start_date:
+        query = query.filter(func.date(models.MergedPO.publish_date) >= start_date)
+    if end_date:
+        query = query.filter(func.date(models.MergedPO.publish_date) <= end_date)
 
-    # Exemple 1 : on stocke le PM = user courant
-    po.project_manager_id = user_id   
+    return query.all()
+def bulk_assign_projects_only(db: Session, file_contents: bytes):
+    """
+    Simplified Migration:
+    1. Reads 'PO ID' and 'internal Project' columns from Excel.
+    2. Updates the 'internal_project_id' for existing POs.
+    Ignores dates/financials.
+    """
+    import pandas as pd
+    import io
 
-    # Exemple 2 : on change un statut
-    # po.dispatch_status = "DISPATCHED"
+    # 1. Load Excel
+    df = pd.read_excel(io.BytesIO(file_contents), header=2)
+    
+    # Clean column names (remove \n, extra spaces)
+    df.columns = [str(c).replace('\n', ' ').strip() for c in df.columns]
+    
+    print(f"Detected Columns: {df.columns.tolist()}") # For debugging logs
 
-    # Pas de db.commit() ici, c’est fait dans l’endpoint
-    db.add(po)
+    # 2. Identify Target Columns dynamically
+    col_po_id = "PO ID"
+    col_project = "internal Project"
+   
+
+    if not col_po_id or not col_project:
+        raise ValueError(f"Could not auto-detect columns. Found: {col_po_id}, {col_project}")
+
+    # 3. Pre-fetch Map: Project Name -> Project ID
+    all_projects = db.query(models.InternalProject).all()
+    # Create a map: "hw_org_wireless...": 1
+    project_map = {p.name.strip().lower(): p.id for p in all_projects}
+
+    # 4. Pre-fetch Map: PO ID -> DB Primary Key ID
+    # We need the PK (id) to perform a fast bulk update
+    # Fetching only ID and PO_ID is very fast even for 20k rows
+    po_records = db.query(models.MergedPO.id, models.MergedPO.po_id).all()
+    po_map = {p.po_id: p.id for p in po_records}
+
+    # 5. Build Update List
+    update_list = []
+    for index, row in df.iterrows():
+        # Get Excel Data
+        raw_po_id = str(row[col_po_id]).strip()
+        raw_proj_name = str(row[col_project]).strip().lower()
+        
+        # Check matches
+        db_pk = po_map.get(raw_po_id)
+        target_proj_id = project_map.get(raw_proj_name)
+        
+        # We only update if:
+        # 1. The PO exists in our DB
+        # 2. The Project Name in Excel matches a Project in our DB
+        if db_pk and target_proj_id:
+            update_list.append({
+                "id": db_pk, # The DB Primary Key
+                "internal_project_id": target_proj_id
+            })
+
+    # 6. Execute Bulk Update
+    if update_list:
+        # Update in batches of 5000
+        batch_size = 5000
+        for i in range(0, len(update_list), batch_size):
+            db.bulk_update_mappings(models.MergedPO, update_list[i:i+batch_size])
+            db.commit()
+
+    return {
+        "total_rows_in_excel": len(df),
+        "matched_and_updated": len(update_list)
+    }

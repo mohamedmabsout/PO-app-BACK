@@ -304,9 +304,9 @@ class SBC(Base):
     
     # --- CONTACT INFO ---
     ceo_name = Column(String(255)) # "CEO Subcontractor"
-    phone_1 = Column(String(50)) # "Phone 1"
+    phone_1 = Column(String(50), unique = True) # "Phone 1"
     phone_2 = Column(String(50)) # "Phone 2"
-    email = Column(String(255)) # "Mail"
+    email = Column(String(255), unique = True, index=True) # "Mail"
     
     # --- CONTRACTUAL INFO ---
     contract_ref = Column(String(100)) # "Contract" (Reference Number)
@@ -350,6 +350,7 @@ class BonDeCommande(Base):
     total_amount_ttc = Column(Float, default=0.0) # HT + Tax
     
     status = Column(Enum(BCStatus), default=BCStatus.DRAFT)
+
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     
     creator_id = Column(Integer, ForeignKey("users.id"))
