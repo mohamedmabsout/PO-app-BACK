@@ -2064,9 +2064,18 @@ def reject_bc(db: Session, bc_id: int, reason: str, rejector_id: int):
     
     db.commit()
     return bc
+
+# backend/app/crud.py
+from sqlalchemy.orm import joinedload
+
 def get_bc_by_id(db: Session, bc_id: int):
     return db.query(models.BonDeCommande).options(
-        joinedload(models.BonDeCommande.items) # Eagerly load the items
+        # 1. Load items, and for each item, load the associated MergedPO
+        joinedload(models.BonDeCommande.items).joinedload(models.BCItem.merged_po),
+        # 2. Load other relationships
+        joinedload(models.BonDeCommande.sbc),
+        joinedload(models.BonDeCommande.internal_project),
+        joinedload(models.BonDeCommande.creator)
     ).filter(models.BonDeCommande.id == bc_id).first()
 
 def assign_site_to_internal_project_by_code(
