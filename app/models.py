@@ -355,7 +355,7 @@ class BonDeCommande(Base):
     rejection_reason = Column(String(500), nullable=True)
 
     creator_id = Column(Integer, ForeignKey("users.id"))
-    
+    creator = relationship("User", foreign_keys=[creator_id])
     # Relationships
     internal_project = relationship("InternalProject")
     sbc = relationship("SBC")
