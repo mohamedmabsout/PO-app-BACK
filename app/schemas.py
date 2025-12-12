@@ -385,6 +385,8 @@ class BCItemResponse(BCItemCreate):
     unit_price_sbc: float
     line_amount_sbc: float
     applied_tax_rate: float
+    merged_po: Optional[MergedPOSimple] = None 
+
     model_config = ConfigDict(from_attributes=True)
 
 class BCResponse(BaseModel):
@@ -440,6 +442,7 @@ class MergedPOSimple(BaseModel):
 
     internal_project_name: Optional[str] = None
     customer_project_name: Optional[str] = None
+    item_description: str | None = None
 
     line_amount_hw: float
     publish_date: Optional[date] = None
