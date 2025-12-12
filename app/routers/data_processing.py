@@ -406,7 +406,3 @@ def get_bc_details(
     if not bc:
         raise HTTPException(status_code=404, detail="BC not found")
     return bc
-@router.post("/bc/{bc_id}/submit")
-def submit_bc_endpoint(bc_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
-    # Optional: Check if current_user is the creator before allowing submit
-    return crud.submit_bc(db, bc_id)

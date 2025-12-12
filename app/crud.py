@@ -2314,3 +2314,6 @@ def bulk_assign_projects_only(db: Session, file_contents: bytes):
         "total_rows_in_excel": len(df),
         "matched_and_updated": len(update_list)
     }
+
+def get_sbc_by_id(db: Session, sbc_id: int):
+    return db.query(models.SBC).filter(models.SBC.id == sbc_id).first()

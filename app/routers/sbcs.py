@@ -74,3 +74,16 @@ def reject_sbc_endpoint(
     current_user: models.User = Depends(auth.get_current_user)
 ):
     return crud.reject_sbc(db, sbc_id)
+
+@router.get("/{sbc_id}", response_model=schemas.SBCResponse)
+def get_sbc_by_id(
+    sbc_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    sbc = crud.get_sbc_by_id(db, sbc_id)
+
+    if not sbc:
+        raise HTTPException(status_code=404, detail="SBC not found")
+
+    return sbc
