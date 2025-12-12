@@ -399,7 +399,7 @@ class MergedPOSimple(BaseModel):
     item_description: str | None = None
 
     line_amount_hw: float
-    publish_date: Optional[date] = None
+    publish_date: Optional[datetime] = None 
 
     class Config:
         orm_mode = True
