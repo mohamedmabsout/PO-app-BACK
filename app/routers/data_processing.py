@@ -342,7 +342,7 @@ def read_all_bcs(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    return crud.get_all_bcs(db, search=search)
+    return crud.get_all_bcs(db, current_user, search=search)
 @router.post("/bc/{bc_id}/approve-l1")
 def approve_l1(bc_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
     # Check if PD

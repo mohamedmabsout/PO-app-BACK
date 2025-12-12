@@ -352,7 +352,8 @@ class BonDeCommande(Base):
     status = Column(Enum(BCStatus), default=BCStatus.DRAFT)
 
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
-    
+    rejection_reason = Column(String(500), nullable=True)
+
     creator_id = Column(Integer, ForeignKey("users.id"))
     
     # Relationships
