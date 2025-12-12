@@ -2055,7 +2055,7 @@ def approve_bc_l2(db: Session, bc_id: int, approver_id: int):
     return bc
 def reject_bc(db: Session, bc_id: int, reason: str, rejector_id: int):
     bc = db.query(models.BonDeCommande).get(bc_id)
-    if not bc or bc.status not in [models.BCStatus.DRAFT, models.BCStatus.PENDING_L2]:
+    if not bc or bc.status not in [models.BCStatus.SUBMITTED, models.BCStatus.PENDING_L2]:
         raise ValueError("BC not found or cannot be rejected in its current state.")
     
     bc.status = models.BCStatus.REJECTED
