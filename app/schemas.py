@@ -448,3 +448,9 @@ class MergedPOSimple(BaseModel):
         orm_mode = True
 class BCRejectionRequest(BaseModel):
     reason: str
+
+    class Config:
+        orm_mode = True
+
+
+
