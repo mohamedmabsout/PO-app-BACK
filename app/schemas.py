@@ -380,6 +380,29 @@ class SBCResponse(BaseModel):
     phone_number: Optional[str] = None
     address: Optional[str] = None
     created_at: datetime
+
+class MergedPOSimple(BaseModel):
+    id: int
+
+    # Dans la BDD c'est un varchar style "5051G24574000-1-5"
+    po_id: str
+
+    po_no: str
+
+    # Dans la BDD c'est un int (5, 11, 7…)
+    po_line_no: int
+
+    site_code: str
+
+    internal_project_name: Optional[str] = None
+    customer_project_name: Optional[str] = None
+    item_description: str | None = None
+
+    line_amount_hw: float
+    publish_date: Optional[date] = None
+
+    class Config:
+        orm_mode = True
 class BCItemResponse(BCItemCreate):
     id: int
     unit_price_sbc: float
@@ -427,27 +450,6 @@ class SiteCodeList(BaseModel):
     site_codes: List[str]
 
 
-class MergedPOSimple(BaseModel):
-    id: int
 
-    # Dans la BDD c'est un varchar style "5051G24574000-1-5"
-    po_id: str
-
-    po_no: str
-
-    # Dans la BDD c'est un int (5, 11, 7…)
-    po_line_no: int
-
-    site_code: str
-
-    internal_project_name: Optional[str] = None
-    customer_project_name: Optional[str] = None
-    item_description: str | None = None
-
-    line_amount_hw: float
-    publish_date: Optional[date] = None
-
-    class Config:
-        orm_mode = True
 class BCRejectionRequest(BaseModel):
     reason: str
