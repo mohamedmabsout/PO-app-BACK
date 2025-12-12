@@ -846,7 +846,8 @@ def get_internal_projects_financial_summary(db: Session, user: models.User = Non
         models.InternalProject.name.label("project_name"),
         models.User.id.label("user_id"),
         func.sum(models.MergedPO.line_amount_hw).label("total_po_value"),
-        (func.sum(models.MergedPO.accepted_ac_amount) + func.sum(models.MergedPO.accepted_pac_amount)).label("total_accepted")
+        (func.coalesce(func.sum(models.MergedPO.accepted_ac_amount), 0) + 
+            func.coalesce(func.sum(models.MergedPO.accepted_pac_amount), 0)).label("total_accepted")
     ).select_from(models.MergedPO).join(
         models.InternalProject, models.MergedPO.internal_project_id == models.InternalProject.id
     ).join(
@@ -883,23 +884,28 @@ def get_internal_projects_financial_summary(db: Session, user: models.User = Non
         })
     return summary_list
 def get_customer_projects_financial_summary(db: Session):
-    # This query groups by the CustomerProject.
     results = db.query(
         models.CustomerProject.id.label("project_id"),
         models.CustomerProject.name.label("project_name"),
-        func.sum(models.MergedPO.line_amount_hw).label("total_po_value"),
-        (func.sum(models.MergedPO.accepted_ac_amount) + func.sum(models.MergedPO.accepted_pac_amount)).label("total_accepted")
-    ).select_from(models.MergedPO).join(
-        models.CustomerProject
+        # Use coalesce to turn NULL sums into 0.0
+        func.coalesce(func.sum(models.MergedPO.line_amount_hw), 0).label("total_po_value"),
+        (
+            func.coalesce(func.sum(models.MergedPO.accepted_ac_amount), 0) + 
+            func.coalesce(func.sum(models.MergedPO.accepted_pac_amount), 0)
+        ).label("total_accepted")
+    ).outerjoin( 
+        # Use outerjoin (LEFT JOIN) so projects with no POs still show up
+        models.MergedPO, models.CustomerProject.id == models.MergedPO.customer_project_id
     ).group_by(models.CustomerProject.id, models.CustomerProject.name).all()
     
-    # The summary calculation logic is identical, just on a different grouping.
     summary_list = []
     for row in results:
-        po_value = row.total_po_value or 0
-        accepted = row.total_accepted or 0
+        # Data is already clean from the query, but we cast to float to be safe
+        po_value = float(row.total_po_value)
+        accepted = float(row.total_accepted)
+        
         gap = po_value - accepted
-        completion = (accepted / po_value * 100) if po_value > 0 else 0
+        completion = (accepted / po_value * 100) if po_value > 0 else 0.0
         
         summary_list.append({
             "project_id": row.project_id,
@@ -910,6 +916,7 @@ def get_customer_projects_financial_summary(db: Session):
             "completion_percentage": completion
         })
     return summary_list
+
 
 def get_po_value_by_category(db: Session):
     """
@@ -1061,9 +1068,9 @@ def get_financial_summary_by_period(
         pac_date_filters.append(extract('month', models.MergedPO.date_pac_ok) == month)
 
     if week:
-        po_date_filters.append(extract('week', models.MergedPO.publish_date) == week)
-        ac_date_filters.append(extract('week', models.MergedPO.date_ac_ok) == week)
-        pac_date_filters.append(extract('week', models.MergedPO.date_pac_ok) == week)
+        po_date_filters.append(func.week(models.MergedPO.publish_date, 3) == week)
+        ac_date_filters.append(func.week(models.MergedPO.date_ac_ok, 3) == week)
+        pac_date_filters.append(func.week(models.MergedPO.date_pac_ok, 3) == week)
 
     # --- Perform the conditional aggregation in a single, efficient query ---
     summary = db.query(
@@ -2020,9 +2027,11 @@ def get_bcs_by_status(db: Session, status: models.BCStatus, search_term: Optiona
 
         )
     return query.all()
-def get_all_bcs(db: Session, search: Optional[str] = None):
+def get_all_bcs(db: Session, current_user: models.User, search: Optional[str] = None):
     query = db.query(models.BonDeCommande)
-    
+    if current_user.role == models.UserRole.PM: 
+        query = query.filter(models.BonDeCommande.creator_id == current_user.id)
+
     if search:
         search_term = f"%{search}%"
         # Join to search related names
@@ -2046,7 +2055,7 @@ def approve_bc_l2(db: Session, bc_id: int, approver_id: int):
     return bc
 def reject_bc(db: Session, bc_id: int, reason: str, rejector_id: int):
     bc = db.query(models.BonDeCommande).get(bc_id)
-    if not bc or bc.status not in [models.BCStatus.DRAFT, models.BCStatus.PENDING_L2]:
+    if not bc or bc.status not in [models.BCStatus.SUBMITTED, models.BCStatus.PENDING_L2]:
         raise ValueError("BC not found or cannot be rejected in its current state.")
     
     bc.status = models.BCStatus.REJECTED
