@@ -299,6 +299,49 @@ def get_remaining_pos(
         "data": data,
         "stats": stats
     }
+@router.get("/bc/export", status_code=status.HTTP_200_OK)
+def export_bcs(
+    search: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    try:
+        # 1. Get DataFrame
+        df = crud.get_bcs_export_dataframe(db, search)
+        
+        if df.empty:
+             raise HTTPException(status_code=404, detail="No data found to export.")
+
+        # 2. Format Dates
+        for col in df.select_dtypes(include=['datetime64']).columns:
+            df[col] = pd.to_datetime(df[col]).dt.strftime('%d/%m/%Y %H:%M').fillna('')
+
+        # 3. Create Excel
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            df.to_excel(writer, sheet_name='BC Details', index=False)
+            
+            # Optional: Add simple coloring or formatting here if desired
+            workbook = writer.book
+            worksheet = writer.sheets['BC Details']
+            header_format = workbook.add_format({'bold': True, 'bg_color': '#f0f0f0', 'border': 1})
+            
+            # Apply header format
+            for col_num, value in enumerate(df.columns.values):
+                worksheet.write(0, col_num, value, header_format)
+                # Auto-adjust column width (approximate)
+                worksheet.set_column(col_num, col_num, 20)
+
+        output.seek(0)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+        headers = {'Content-Disposition': f'attachment; filename="BC_Export_{timestamp}.xlsx"'}
+        
+        return StreamingResponse(output, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', headers=headers)
+
+    except Exception as e:
+        print(f"Export Error: {e}")
+        raise HTTPException(status_code=500, detail="Export failed")
+
 @router.get("/bc-candidates", response_model=List[schemas.MergedPO]) # Use MergedPO schema
 def get_bc_candidates(
     project_id: int,
@@ -407,45 +450,3 @@ def get_bc_details(
         raise HTTPException(status_code=404, detail="BC not found")
     return bc
 
-@router.get("/bc/export", status_code=status.HTTP_200_OK)
-def export_bcs(
-    search: Optional[str] = None,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user)
-):
-    try:
-        # 1. Get DataFrame
-        df = crud.get_bcs_export_dataframe(db, search)
-        
-        if df.empty:
-             raise HTTPException(status_code=404, detail="No data found to export.")
-
-        # 2. Format Dates
-        for col in df.select_dtypes(include=['datetime64']).columns:
-            df[col] = pd.to_datetime(df[col]).dt.strftime('%d/%m/%Y %H:%M').fillna('')
-
-        # 3. Create Excel
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            df.to_excel(writer, sheet_name='BC Details', index=False)
-            
-            # Optional: Add simple coloring or formatting here if desired
-            workbook = writer.book
-            worksheet = writer.sheets['BC Details']
-            header_format = workbook.add_format({'bold': True, 'bg_color': '#f0f0f0', 'border': 1})
-            
-            # Apply header format
-            for col_num, value in enumerate(df.columns.values):
-                worksheet.write(0, col_num, value, header_format)
-                # Auto-adjust column width (approximate)
-                worksheet.set_column(col_num, col_num, 20)
-
-        output.seek(0)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-        headers = {'Content-Disposition': f'attachment; filename="BC_Export_{timestamp}.xlsx"'}
-        
-        return StreamingResponse(output, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', headers=headers)
-
-    except Exception as e:
-        print(f"Export Error: {e}")
-        raise HTTPException(status_code=500, detail="Export failed")
