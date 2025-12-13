@@ -1201,6 +1201,15 @@ def get_export_dataframe(
         )
 
     df = pd.read_sql(query.statement, db.bind)
+    if "Remaining Amount" in df.columns:
+        # 3. Apply the threshold logic
+        # First, round to a sensible precision, e.g., 5 decimal places to avoid most float issues
+        df["Remaining Amount"] = df["Remaining Amount"].round(5)
+        
+        # Second, set any value whose absolute is less than 1 to 0.
+        # This will turn 0.00009 and -0.00018 into 0.
+        df.loc[df["Remaining Amount"].abs() < 1, "Remaining Amount"] = 0
+        
     return df
 
 
