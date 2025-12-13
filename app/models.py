@@ -360,6 +360,20 @@ class BonDeCommande(Base):
     internal_project = relationship("InternalProject")
     sbc = relationship("SBC")
     items = relationship("BCItem", back_populates="bc")
+    submitted_at = Column(DateTime, nullable=True)
+    
+    # L1 Approval (Project Director)
+    approver_l1_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    approved_l1_at = Column(DateTime, nullable=True)
+    
+    # L2 Approval (Admin)
+    approver_l2_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    approved_l2_at = Column(DateTime, nullable=True)
+
+    # Relationships for the approvers
+    approver_l1 = relationship("User", foreign_keys=[approver_l1_id])
+    approver_l2 = relationship("User", foreign_keys=[approver_l2_id])
+
 
 # --- 4. BC ITEMS ---
 class BCItem(Base):
