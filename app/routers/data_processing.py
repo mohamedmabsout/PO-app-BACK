@@ -202,41 +202,37 @@ def export_merged_pos_report(
             # --- WRITING HEADERS MANUALLY ---
             headers = export_df.columns.tolist()
             try:
-                # 1. AC Columns (Green)
-                ac_amt_idx = headers.index("Accepted AC Amount")
-                ac_date_idx = headers.index("Date AC OK")
-                worksheet.set_column(ac_amt_idx, ac_amt_idx, 20, fmt_data_ac)
-                worksheet.set_column(ac_date_idx, ac_date_idx, 20, fmt_data_ac)
+                # Apply green background to all AC-related columns
+                ac_cols = ["Accepted AC Amount", "Date AC OK"]
+                for col_name in ac_cols:
+                    if col_name in headers:
+                        worksheet.set_column(headers.index(col_name), headers.index(col_name), None, fmt_bg_ac)
 
-                # 2. PAC Columns (Blue)
-                pac_amt_idx = headers.index("Accepted PAC Amount")
-                pac_date_idx = headers.index("Date PAC OK")
-                worksheet.set_column(pac_amt_idx, pac_amt_idx, 20, fmt_data_pac)
-                worksheet.set_column(pac_date_idx, pac_date_idx, 20, fmt_data_pac)
-
-                # 3. Remaining Amount Column (Red)
-                rem_idx = headers.index("Remaining Amount")
-                worksheet.set_column(rem_idx, rem_idx, 20, fmt_data_red)
+                # Apply blue background to all PAC-related columns
+                pac_cols = ["Total PAC (20%)", "Accepted PAC Amount", "Date PAC OK"]
+                for col_name in pac_cols:
+                    if col_name in headers:
+                        worksheet.set_column(headers.index(col_name), headers.index(col_name), None, fmt_bg_pac)
                 
-            except ValueError:
-                print("Warning: Could not find specific AC/PAC/Remaining columns for full-column formatting.")
+                # Apply red background to the Remaining Amount column
+                if "Remaining Amount" in headers:
+                    worksheet.set_column(headers.index("Remaining Amount"), headers.index("Remaining Amount"), None, fmt_bg_red)
 
+            except Exception as e:
+                print(f"Warning: A formatting error occurred: {e}")
+
+            # --- WRITE HEADERS ON TOP OF THE COLUMN FORMATTING ---
             for col_idx, column_name in enumerate(headers):
-                # 1. Determine Header Style
-                if "Remaining" in column_name:
-                    style = fmt_header_red
-                elif "AC" in column_name and "PAC" not in column_name:
+                if "AC" in column_name and "PAC" not in column_name:
                     style = fmt_header_ac
                 elif "PAC" in column_name:
                     style = fmt_header_pac
+                elif "Remaining" in column_name:
+                    style = fmt_header_red
                 else:
                     style = fmt_header_std
                 
-                # 2. Write Header
                 worksheet.write(0, col_idx, column_name, style)
-                worksheet.set_column(col_idx, col_idx, 20) 
-
-            # --- CONDITIONAL FORMATTING (DATA) ---
 
         output.seek(0)
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
@@ -256,6 +252,7 @@ def export_merged_pos_report(
         raise HTTPException(
             status_code=500, detail="Could not generate the Excel report."
         )
+
 # backend/app/routers/data_processing.py
 
 @router.get("/remaining-to-accept")
