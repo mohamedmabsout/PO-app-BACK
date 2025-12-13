@@ -411,7 +411,7 @@ def get_bc_details(
 def export_bcs(
     search: Optional[str] = None,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_active_user)
+    current_user: models.User = Depends(auth.get_current_user)
 ):
     try:
         # 1. Get DataFrame
