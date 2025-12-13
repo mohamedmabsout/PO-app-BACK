@@ -201,7 +201,26 @@ def export_merged_pos_report(
 
             # --- WRITING HEADERS MANUALLY ---
             headers = export_df.columns.tolist()
-            
+            try:
+                # 1. AC Columns (Green)
+                ac_amt_idx = headers.index("Accepted AC Amount")
+                ac_date_idx = headers.index("Date AC OK")
+                worksheet.set_column(ac_amt_idx, ac_amt_idx, 20, fmt_data_ac)
+                worksheet.set_column(ac_date_idx, ac_date_idx, 20, fmt_data_ac)
+
+                # 2. PAC Columns (Blue)
+                pac_amt_idx = headers.index("Accepted PAC Amount")
+                pac_date_idx = headers.index("Date PAC OK")
+                worksheet.set_column(pac_amt_idx, pac_amt_idx, 20, fmt_data_pac)
+                worksheet.set_column(pac_date_idx, pac_date_idx, 20, fmt_data_pac)
+
+                # 3. Remaining Amount Column (Red)
+                rem_idx = headers.index("Remaining Amount")
+                worksheet.set_column(rem_idx, rem_idx, 20, fmt_data_red)
+                
+            except ValueError:
+                print("Warning: Could not find specific AC/PAC/Remaining columns for full-column formatting.")
+
             for col_idx, column_name in enumerate(headers):
                 # 1. Determine Header Style
                 if "Remaining" in column_name:
@@ -218,43 +237,6 @@ def export_merged_pos_report(
                 worksheet.set_column(col_idx, col_idx, 20) 
 
             # --- CONDITIONAL FORMATTING (DATA) ---
-            try:
-                # 1. AC Formatting
-                ac_amt_idx = headers.index("Accepted AC Amount")
-                ac_date_idx = headers.index("Date AC OK")
-                
-                for idx in [ac_amt_idx, ac_date_idx]:
-                    col_letter = xl_col_to_name(idx)
-                    worksheet.conditional_format(f"{col_letter}2:{col_letter}{max_row + 1}", {
-                        'type': 'cell', 'criteria': '!=', 'value': '""', 'format': fmt_data_ac
-                    })
-
-                # 2. PAC Formatting
-                pac_amt_idx = headers.index("Accepted PAC Amount")
-                pac_date_idx = headers.index("Date PAC OK")
-                
-                for idx in [pac_amt_idx, pac_date_idx]:
-                    col_letter = xl_col_to_name(idx)
-                    worksheet.conditional_format(f"{col_letter}2:{col_letter}{max_row + 1}", {
-                        'type': 'cell', 'criteria': '!=', 'value': '""', 'format': fmt_data_pac
-                    })
-
-                # 3. NEW: Remaining Amount Formatting (Light Red)
-                # We apply this to the "Remaining Amount" column
-                rem_idx = headers.index("Remaining Amount")
-                col_letter = xl_col_to_name(rem_idx)
-                
-                # Option A: Always color it light red to highlight it's a debt/gap
-                # Option B: Only color if > 0. Let's do > 0 (meaning there is still work to do)
-                worksheet.conditional_format(f"{col_letter}2:{col_letter}{max_row + 1}", {
-                     'type': 'cell', 
-                     'criteria': '>', 
-                     'value': 0, 
-                     'format': fmt_data_red
-                })
-
-            except ValueError:
-                print("Warning: Could not find specific AC/PAC columns for formatting.")
 
         output.seek(0)
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
