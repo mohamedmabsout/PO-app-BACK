@@ -407,61 +407,45 @@ def get_bc_details(
         raise HTTPException(status_code=404, detail="BC not found")
     return bc
 
-def get_bcs_export_dataframe(db: Session, search: Optional[str] = None):
-    # 1. Reuse the existing query logic to filter BCs based on search
-    query = db.query(models.BonDeCommande).options(
-        joinedload(models.BonDeCommande.sbc),
-        joinedload(models.BonDeCommande.internal_project),
-        joinedload(models.BonDeCommande.creator),
-        joinedload(models.BonDeCommande.approver_l1),
-        joinedload(models.BonDeCommande.approver_l2),
-        joinedload(models.BonDeCommande.items).joinedload(models.BCItem.merged_po)
-    )
+@router.get("/bc/export", status_code=status.HTTP_200_OK)
+def export_bcs(
+    search: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_active_user)
+):
+    try:
+        # 1. Get DataFrame
+        df = crud.get_bcs_export_dataframe(db, search)
+        
+        if df.empty:
+             raise HTTPException(status_code=404, detail="No data found to export.")
 
-    if search:
-        search_term = f"%{search}%"
-        query = query.join(models.SBC).join(models.InternalProject).filter(
-            (models.BonDeCommande.bc_number.ilike(search_term)) |
-            (models.SBC.short_name.ilike(search_term)) |
-            (models.InternalProject.name.ilike(search_term))
-        )
-    
-    bcs = query.order_by(models.BonDeCommande.created_at.desc()).all()
+        # 2. Format Dates
+        for col in df.select_dtypes(include=['datetime64']).columns:
+            df[col] = pd.to_datetime(df[col]).dt.strftime('%d/%m/%Y %H:%M').fillna('')
 
-    # 2. Flatten the data for Excel
-    data = []
-    for bc in bcs:
-        # Common Header Info
-        header_info = {
-            "BC Number": bc.bc_number,
-            "Status": bc.status,
-            "Project": bc.internal_project.name if bc.internal_project else "",
-            "SBC": bc.sbc.name if bc.sbc else "",
-            "Total HT": bc.total_amount_ht,
-            "Total TTC": bc.total_amount_ttc,
-            "Created By": f"{bc.creator.first_name} {bc.creator.last_name}" if bc.creator else "",
-            "Created At": bc.created_at,
-            "Submitted At": bc.submitted_at,
-            "Validated L1 By": f"{bc.approver_l1.first_name} {bc.approver_l1.last_name}" if bc.approver_l1 else "",
-            "Validated L1 At": bc.approved_l1_at,
-            "Approved L2 By": f"{bc.approver_l2.first_name} {bc.approver_l2.last_name}" if bc.approver_l2 else "",
-            "Approved L2 At": bc.approved_l2_at,
-            "Rejection Reason": bc.rejection_reason
-        }
+        # 3. Create Excel
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            df.to_excel(writer, sheet_name='BC Details', index=False)
+            
+            # Optional: Add simple coloring or formatting here if desired
+            workbook = writer.book
+            worksheet = writer.sheets['BC Details']
+            header_format = workbook.add_format({'bold': True, 'bg_color': '#f0f0f0', 'border': 1})
+            
+            # Apply header format
+            for col_num, value in enumerate(df.columns.values):
+                worksheet.write(0, col_num, value, header_format)
+                # Auto-adjust column width (approximate)
+                worksheet.set_column(col_num, col_num, 20)
 
-        # Add a row for EACH item in the BC
-        for item in bc.items:
-            row = header_info.copy() # Copy header info
-            # Add Item specific info
-            row.update({
-                "PO Ref": item.merged_po.po_no if item.merged_po else "",
-                "Site Code": item.merged_po.site_code if item.merged_po else "",
-                "Item Description": item.merged_po.item_description if item.merged_po else "",
-                "SBC Rate": item.rate_sbc,
-                "SBC Quantity": item.quantity_sbc,
-                "SBC Unit Price": item.unit_price_sbc,
-                "SBC Line Total": item.line_amount_sbc
-            })
-            data.append(row)
+        output.seek(0)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+        headers = {'Content-Disposition': f'attachment; filename="BC_Export_{timestamp}.xlsx"'}
+        
+        return StreamingResponse(output, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', headers=headers)
 
-    return pd.DataFrame(data)
+    except Exception as e:
+        print(f"Export Error: {e}")
+        raise HTTPException(status_code=500, detail="Export failed")
