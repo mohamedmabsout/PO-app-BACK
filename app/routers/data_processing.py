@@ -201,38 +201,60 @@ def export_merged_pos_report(
 
             # --- WRITING HEADERS MANUALLY ---
             headers = export_df.columns.tolist()
-            try:
-                # Apply green background to all AC-related columns
-                ac_cols = ["Accepted AC Amount", "Date AC OK"]
-                for col_name in ac_cols:
-                    if col_name in headers:
-                        worksheet.set_column(headers.index(col_name), headers.index(col_name), None, fmt_bg_ac)
-
-                # Apply blue background to all PAC-related columns
-                pac_cols = ["Total PAC (20%)", "Accepted PAC Amount", "Date PAC OK"]
-                for col_name in pac_cols:
-                    if col_name in headers:
-                        worksheet.set_column(headers.index(col_name), headers.index(col_name), None, fmt_bg_pac)
-                
-                # Apply red background to the Remaining Amount column
-                if "Remaining Amount" in headers:
-                    worksheet.set_column(headers.index("Remaining Amount"), headers.index("Remaining Amount"), None, fmt_bg_red)
-
-            except Exception as e:
-                print(f"Warning: A formatting error occurred: {e}")
-
-            # --- WRITE HEADERS ON TOP OF THE COLUMN FORMATTING ---
+            
             for col_idx, column_name in enumerate(headers):
-                if "AC" in column_name and "PAC" not in column_name:
+                # 1. Determine Header Style
+                if "Remaining" in column_name:
+                    style = fmt_header_red
+                elif "AC" in column_name and "PAC" not in column_name:
                     style = fmt_header_ac
                 elif "PAC" in column_name:
                     style = fmt_header_pac
-                elif "Remaining" in column_name:
-                    style = fmt_header_red
                 else:
                     style = fmt_header_std
                 
+                # 2. Write Header
                 worksheet.write(0, col_idx, column_name, style)
+                worksheet.set_column(col_idx, col_idx, 20) 
+
+            # --- CONDITIONAL FORMATTING (DATA) ---
+            try:
+                # 1. AC Formatting
+                ac_amt_idx = headers.index("Accepted AC Amount")
+                ac_date_idx = headers.index("Date AC OK")
+                
+                for idx in [ac_amt_idx, ac_date_idx]:
+                    col_letter = xl_col_to_name(idx)
+                    worksheet.conditional_format(f"{col_letter}2:{col_letter}{max_row + 1}", {
+                        'type': 'cell', 'criteria': '!=', 'value': '""', 'format': fmt_data_ac
+                    })
+
+                # 2. PAC Formatting
+                pac_amt_idx = headers.index("Accepted PAC Amount")
+                pac_date_idx = headers.index("Date PAC OK")
+                
+                for idx in [pac_amt_idx, pac_date_idx]:
+                    col_letter = xl_col_to_name(idx)
+                    worksheet.conditional_format(f"{col_letter}2:{col_letter}{max_row + 1}", {
+                        'type': 'cell', 'criteria': '!=', 'value': '""', 'format': fmt_data_pac
+                    })
+
+                # 3. NEW: Remaining Amount Formatting (Light Red)
+                # We apply this to the "Remaining Amount" column
+                rem_idx = headers.index("Remaining Amount")
+                col_letter = xl_col_to_name(rem_idx)
+                
+                # Option A: Always color it light red to highlight it's a debt/gap
+                # Option B: Only color if > 0. Let's do > 0 (meaning there is still work to do)
+                worksheet.conditional_format(f"{col_letter}2:{col_letter}{max_row + 1}", {
+                     'type': 'cell', 
+                     'criteria': '>', 
+                     'value': 0, 
+                     'format': fmt_data_red
+                })
+
+            except ValueError:
+                print("Warning: Could not find specific AC/PAC columns for formatting.")
 
         output.seek(0)
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
@@ -252,7 +274,6 @@ def export_merged_pos_report(
         raise HTTPException(
             status_code=500, detail="Could not generate the Excel report."
         )
-
 # backend/app/routers/data_processing.py
 
 @router.get("/remaining-to-accept")
