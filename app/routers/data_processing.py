@@ -406,3 +406,62 @@ def get_bc_details(
     if not bc:
         raise HTTPException(status_code=404, detail="BC not found")
     return bc
+
+def get_bcs_export_dataframe(db: Session, search: Optional[str] = None):
+    # 1. Reuse the existing query logic to filter BCs based on search
+    query = db.query(models.BonDeCommande).options(
+        joinedload(models.BonDeCommande.sbc),
+        joinedload(models.BonDeCommande.internal_project),
+        joinedload(models.BonDeCommande.creator),
+        joinedload(models.BonDeCommande.approver_l1),
+        joinedload(models.BonDeCommande.approver_l2),
+        joinedload(models.BonDeCommande.items).joinedload(models.BCItem.merged_po)
+    )
+
+    if search:
+        search_term = f"%{search}%"
+        query = query.join(models.SBC).join(models.InternalProject).filter(
+            (models.BonDeCommande.bc_number.ilike(search_term)) |
+            (models.SBC.short_name.ilike(search_term)) |
+            (models.InternalProject.name.ilike(search_term))
+        )
+    
+    bcs = query.order_by(models.BonDeCommande.created_at.desc()).all()
+
+    # 2. Flatten the data for Excel
+    data = []
+    for bc in bcs:
+        # Common Header Info
+        header_info = {
+            "BC Number": bc.bc_number,
+            "Status": bc.status,
+            "Project": bc.internal_project.name if bc.internal_project else "",
+            "SBC": bc.sbc.name if bc.sbc else "",
+            "Total HT": bc.total_amount_ht,
+            "Total TTC": bc.total_amount_ttc,
+            "Created By": f"{bc.creator.first_name} {bc.creator.last_name}" if bc.creator else "",
+            "Created At": bc.created_at,
+            "Submitted At": bc.submitted_at,
+            "Validated L1 By": f"{bc.approver_l1.first_name} {bc.approver_l1.last_name}" if bc.approver_l1 else "",
+            "Validated L1 At": bc.approved_l1_at,
+            "Approved L2 By": f"{bc.approver_l2.first_name} {bc.approver_l2.last_name}" if bc.approver_l2 else "",
+            "Approved L2 At": bc.approved_l2_at,
+            "Rejection Reason": bc.rejection_reason
+        }
+
+        # Add a row for EACH item in the BC
+        for item in bc.items:
+            row = header_info.copy() # Copy header info
+            # Add Item specific info
+            row.update({
+                "PO Ref": item.merged_po.po_no if item.merged_po else "",
+                "Site Code": item.merged_po.site_code if item.merged_po else "",
+                "Item Description": item.merged_po.item_description if item.merged_po else "",
+                "SBC Rate": item.rate_sbc,
+                "SBC Quantity": item.quantity_sbc,
+                "SBC Unit Price": item.unit_price_sbc,
+                "SBC Line Total": item.line_amount_sbc
+            })
+            data.append(row)
+
+    return pd.DataFrame(data)
