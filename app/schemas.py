@@ -453,3 +453,9 @@ class SiteCodeList(BaseModel):
 
 class BCRejectionRequest(BaseModel):
     reason: str
+
+    class Config:
+        orm_mode = True
+
+
+

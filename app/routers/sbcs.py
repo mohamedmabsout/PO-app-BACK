@@ -87,3 +87,34 @@ def get_sbc_by_id(
         raise HTTPException(status_code=404, detail="SBC not found")
 
     return sbc
+
+@router.put("/{sbc_id}", response_model=schemas.SBCResponse)
+def update_sbc(
+    sbc_id: int,
+    short_name: Optional[str] = Form(None),
+    name: Optional[str] = Form(None),
+    ceo_name: Optional[str] = Form(None),
+    email: Optional[str] = Form(None),
+    rib: Optional[str] = Form(None),
+    bank_name: Optional[str] = Form(None),
+    tax_reg_end_date: Optional[str] = Form(None),
+    contract_file: Optional[UploadFile] = File(None),
+    tax_file: Optional[UploadFile] = File(None),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user),
+):
+    return crud.update_sbc(
+        db, sbc_id,
+        {
+            "short_name": short_name,
+            "name": name,
+            "ceo_name": ceo_name,
+            "email": email,
+            "rib": rib,
+            "bank_name": bank_name,
+            "tax_reg_end_date": tax_reg_end_date,
+        },
+        contract_file,
+        tax_file,
+        current_user.id
+    )
