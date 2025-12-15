@@ -1358,9 +1358,9 @@ def set_user_target(db: Session, target: schemas.UserTargetCreate):
     if db_target:
         # Update existing
         if target.target_po_amount is not None:
-            db_target.target_po_amount = target.target_po_amount
+            db_target.po_monthly_update = target.target_po_amount
         if target.target_invoice_amount is not None:
-            db_target.target_invoice_amount = target.target_invoice_amount
+            db_target.acceptance_monthly_update = target.target_invoice_amount
     else:
         # Create new
         db_target = models.UserPerformanceTarget(**target.model_dump())
