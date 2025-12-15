@@ -457,5 +457,10 @@ class BCRejectionRequest(BaseModel):
     class Config:
         orm_mode = True
 
-
+class TargetUpdate(BaseModel):
+    user_id: int
+    year: int
+    month: int
+    field: str # "po_master", "po_update", "acc_master", "acc_update"
+    value: float
 

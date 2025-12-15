@@ -40,4 +40,31 @@ def get_matrix(
     return crud.get_performance_matrix(db, year, month, filter_user_id=None)
 @router.get("/yearly-matrix", response_model=List[dict]) # Use generic dict or define strict schema
 def get_yearly_matrix(year: int, db: Session = Depends(get_db)):
-    return crud.get_yearly_matrix_data(db, year)
+    return crud.get_planning_matrix(db, year)
+@router.get("/planning/matrix/{year}")
+def get_planning_matrix_endpoint(year: int, db: Session = Depends(get_db)):
+    return crud.get_planning_matrix(db, year)
+
+@router.post("/planning/update")
+def update_target_cell(payload: schemas.TargetUpdate, db: Session = Depends(get_db)):
+    # Simple upsert logic
+    target = db.query(models.MonthlyTarget).filter(
+        models.MonthlyTarget.user_id == payload.user_id,
+        models.MonthlyTarget.year == payload.year,
+        models.MonthlyTarget.month == payload.month
+    ).first()
+    
+    if not target:
+        target = models.MonthlyTarget(
+            user_id=payload.user_id, year=payload.year, month=payload.month
+        )
+        db.add(target)
+    
+    # Map frontend field names to DB columns
+    if payload.field == "po_master": target.po_master_plan = payload.value
+    elif payload.field == "po_update": target.po_monthly_update = payload.value
+    elif payload.field == "acc_master": target.acceptance_master_plan = payload.value
+    elif payload.field == "acc_update": target.acceptance_monthly_update = payload.value
+    
+    db.commit()
+    return {"status": "success"}

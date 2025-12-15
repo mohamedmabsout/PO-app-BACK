@@ -1455,79 +1455,174 @@ def get_performance_matrix(
         })
         
     return results
-def get_yearly_matrix_data(db: Session, year: int):
+# def get_yearly_matrix_data(db: Session, year: int):
+#     # 1. Get all PMs
+#     pms = db.query(models.User).filter(models.User.role.in_(['PM', 'ADMIN', 'PD'])).all()
+    
+#     matrix_data = []
+
+#     for pm in pms:
+#         # Initialize arrays for 12 months (0.0)
+#         target_po_monthly = [0.0] * 12
+#         actual_po_monthly = [0.0] * 12
+#         target_inv_monthly = [0.0] * 12
+#         actual_inv_monthly = [0.0] * 12
+
+#         # 2. Fetch ALL Targets for this year for this PM
+#         targets = db.query(models.UserPerformanceTarget).filter(
+#             models.UserPerformanceTarget.user_id == pm.id,
+#             models.UserPerformanceTarget.year == year
+#         ).all()
+
+#         for t in targets:
+#             # Month is 1-based, array is 0-based
+#             if 1 <= t.month <= 12:
+#                 target_po_monthly[t.month - 1] = t.po_monthly_update
+#                 target_inv_monthly[t.month - 1] = t.acceptance_monthly_update
+
+#         # 3. Fetch ALL Actuals (Grouped by Month)
+#         # We do 2 queries: one for PO (publish_date), one for Invoice (AC/PAC dates)
+        
+#         # A. Actual POs
+#         po_results = db.query(
+#             extract('month', models.MergedPO.publish_date).label('month'),
+#             func.sum(models.MergedPO.line_amount_hw)
+#         ).join(models.InternalProject).filter(
+#             models.InternalProject.project_manager_id == pm.id,
+#             extract('year', models.MergedPO.publish_date) == year
+#         ).group_by('month').all()
+
+#         for m, val in po_results:
+#             if m: actual_po_monthly[int(m) - 1] = val or 0
+
+#         # B. Actual Invoices (Paid) - This is trickier because AC and PAC have different dates.
+#         # We iterate 1-12 and query efficiently or fetch all and aggregate in python.
+#         # Let's fetch all accepted items for this PM and year and bucket them in Python.
+        
+#         # (Simplified logic for performance: Fetch items where EITHER date is in year)
+#         paid_items = db.query(models.MergedPO).join(models.InternalProject).filter(
+#             models.InternalProject.project_manager_id == pm.id,
+#             (extract('year', models.MergedPO.date_ac_ok) == year) | (extract('year', models.MergedPO.date_pac_ok) == year)
+#         ).all()
+
+#         for item in paid_items:
+#             # Add AC amount to the AC month
+#             if item.date_ac_ok and item.date_ac_ok.year == year:
+#                 actual_inv_monthly[item.date_ac_ok.month - 1] += (item.accepted_ac_amount or 0)
+            
+#             # Add PAC amount to the PAC month
+#             if item.date_pac_ok and item.date_pac_ok.year == year:
+#                 actual_inv_monthly[item.date_pac_ok.month - 1] += (item.accepted_pac_amount or 0)
+
+#         # 4. Construct the Rows
+#         rows = [
+#             { "name": "Target PO Received", "values": target_po_monthly, "total": sum(target_po_monthly) },
+#             { "name": "Actual PO Received", "values": actual_po_monthly, "total": sum(actual_po_monthly) },
+#             { "name": "Target Invoice", "values": target_inv_monthly, "total": sum(target_inv_monthly) },
+#             { "name": "Actual Invoice", "values": actual_inv_monthly, "total": sum(actual_inv_monthly) }
+#         ]
+
+#         matrix_data.append({
+#             "pm_name": f"{pm.first_name} {pm.last_name}",
+#             "milestones": rows
+#         })
+
+#     return matrix_data
+def get_planning_matrix(db: Session, year: int):
     # 1. Get all PMs
+    # Using your role logic
     pms = db.query(models.User).filter(models.User.role.in_(['PM', 'ADMIN', 'PD'])).all()
     
     matrix_data = []
 
     for pm in pms:
-        # Initialize arrays for 12 months (0.0)
-        target_po_monthly = [0.0] * 12
-        actual_po_monthly = [0.0] * 12
-        target_inv_monthly = [0.0] * 12
-        actual_inv_monthly = [0.0] * 12
+        # --- Initialize 12-month arrays for ALL 6 data rows ---
+        po_master = [0.0] * 12
+        po_update = [0.0] * 12
+        po_actual = [0.0] * 12
+        
+        acc_master = [0.0] * 12
+        acc_update = [0.0] * 12
+        acc_actual = [0.0] * 12
 
-        # 2. Fetch ALL Targets for this year for this PM
+        # 2. Fetch Targets (Database)
+        # Assuming you renamed the model to UserPerformanceTarget or kept MonthlyTarget
+        # AND you ran the migration to add the 'master' columns.
         targets = db.query(models.UserPerformanceTarget).filter(
             models.UserPerformanceTarget.user_id == pm.id,
             models.UserPerformanceTarget.year == year
         ).all()
 
         for t in targets:
-            # Month is 1-based, array is 0-based
             if 1 <= t.month <= 12:
-                target_po_monthly[t.month - 1] = t.target_po_amount
-                target_inv_monthly[t.month - 1] = t.target_invoice_amount
+                idx = t.month - 1
+                # Map the database columns to our arrays
+                po_master[idx] = t.po_master_plan or 0
+                po_update[idx] = t.po_monthly_update or 0
+                acc_master[idx] = t.acceptance_master_plan or 0
+                acc_update[idx] = t.acceptance_monthly_update or 0
 
-        # 3. Fetch ALL Actuals (Grouped by Month)
-        # We do 2 queries: one for PO (publish_date), one for Invoice (AC/PAC dates)
+        # 3. Calculate Actuals (Logic from your old function, slightly optimized)
         
-        # A. Actual POs
+        # A. Actual POs (Based on Publish Date)
         po_results = db.query(
             extract('month', models.MergedPO.publish_date).label('month'),
             func.sum(models.MergedPO.line_amount_hw)
-        ).join(models.InternalProject).filter(
+        ).join(models.CustomerProject).join(models.InternalProject).filter(
             models.InternalProject.project_manager_id == pm.id,
             extract('year', models.MergedPO.publish_date) == year
         ).group_by('month').all()
 
         for m, val in po_results:
-            if m: actual_po_monthly[int(m) - 1] = val or 0
+            if m: po_actual[int(m) - 1] = val or 0
 
-        # B. Actual Invoices (Paid) - This is trickier because AC and PAC have different dates.
-        # We iterate 1-12 and query efficiently or fetch all and aggregate in python.
-        # Let's fetch all accepted items for this PM and year and bucket them in Python.
-        
-        # (Simplified logic for performance: Fetch items where EITHER date is in year)
-        paid_items = db.query(models.MergedPO).join(models.InternalProject).filter(
+        # B. Actual Acceptance (Based on AC/PAC Dates)
+        # Using the same logic as before: fetch items where either date is in year
+        paid_items = db.query(models.MergedPO).join(models.CustomerProject).join(models.InternalProject).filter(
             models.InternalProject.project_manager_id == pm.id,
-            (extract('year', models.MergedPO.date_ac_ok) == year) | (extract('year', models.MergedPO.date_pac_ok) == year)
+            (extract('year', models.MergedPO.date_ac_ok) == year) | 
+            (extract('year', models.MergedPO.date_pac_ok) == year)
         ).all()
 
         for item in paid_items:
-            # Add AC amount to the AC month
+            # AC Logic
             if item.date_ac_ok and item.date_ac_ok.year == year:
-                actual_inv_monthly[item.date_ac_ok.month - 1] += (item.accepted_ac_amount or 0)
+                acc_actual[item.date_ac_ok.month - 1] += (item.accepted_ac_amount or 0)
             
-            # Add PAC amount to the PAC month
+            # PAC Logic
             if item.date_pac_ok and item.date_pac_ok.year == year:
-                actual_inv_monthly[item.date_pac_ok.month - 1] += (item.accepted_pac_amount or 0)
+                acc_actual[item.date_pac_ok.month - 1] += (item.accepted_pac_amount or 0)
 
-        # 4. Construct the Rows
-        rows = [
-            { "name": "Target PO Received", "values": target_po_monthly, "total": sum(target_po_monthly) },
-            { "name": "Actual PO Received", "values": actual_po_monthly, "total": sum(actual_po_monthly) },
-            { "name": "Target Invoice", "values": target_inv_monthly, "total": sum(target_inv_monthly) },
-            { "name": "Actual Invoice", "values": actual_inv_monthly, "total": sum(actual_inv_monthly) }
-        ]
+        # 4. Construct the Data Structure for the Frontend
+        # We return an object that matches the structure expected by the React component I gave you earlier.
+        
+        # Note: My React component expected a dictionary 'months': { 1: { po: {...}, acc: {...} } }
+        # Let's reshape these arrays into that dictionary format to be clean.
+        
+        months_data = {}
+        for i in range(12):
+            m = i + 1
+            months_data[m] = {
+                "po": {
+                    "master": po_master[i],
+                    "update": po_update[i],
+                    "actual": po_actual[i]
+                },
+                "acceptance": {
+                    "master": acc_master[i],
+                    "update": acc_update[i],
+                    "actual": acc_actual[i]
+                }
+            }
 
         matrix_data.append({
+            "pm_id": pm.id,
             "pm_name": f"{pm.first_name} {pm.last_name}",
-            "milestones": rows
+            "months": months_data
         })
 
     return matrix_data
+
 def get_internal_projects_for_user(db: Session, user: models.User):
     """
     Returns projects based on role:
