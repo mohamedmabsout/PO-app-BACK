@@ -1386,8 +1386,8 @@ def get_performance_matrix(
     for pm in pms:
         # A. Fetch Targets (Plan) - STRICTLY FOR THE PERIOD
         target_query = db.query(
-            func.sum(models.UserPerformanceTarget.target_po_amount),
-            func.sum(models.UserPerformanceTarget.target_invoice_amount)
+            func.sum(models.UserPerformanceTarget.po_monthly_update),
+            func.sum(models.UserPerformanceTarget.acceptance_monthly_update)
         ).filter(
             models.UserPerformanceTarget.user_id == pm.id,
             models.UserPerformanceTarget.year == year
