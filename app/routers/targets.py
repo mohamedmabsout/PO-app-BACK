@@ -41,11 +41,11 @@ def get_matrix(
 @router.get("/yearly-matrix", response_model=List[dict]) # Use generic dict or define strict schema
 def get_yearly_matrix(year: int, db: Session = Depends(get_db)):
     return crud.get_planning_matrix(db, year)
-@router.get("/planning/matrix/{year}")
+@router.get("/planning/matrix/{year}", response_model=List[dict])
 def get_planning_matrix_endpoint(year: int, db: Session = Depends(get_db)):
     return crud.get_planning_matrix(db, year)
 
-@router.post("/planning/update")
+@router.post("/planning/update", response_model=List[dict])
 def update_target_cell(payload: schemas.TargetUpdate, db: Session = Depends(get_db)):
     # Simple upsert logic
     target = db.query(models.MonthlyTarget).filter(
