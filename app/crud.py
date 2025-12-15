@@ -2268,7 +2268,7 @@ def bulk_assign_projects_only(db: Session, file_contents: bytes):
     import io
 
     # 1. Load Excel
-    df = pd.read_excel(io.BytesIO(file_contents), header=1,sheet_name="PO")
+    df = pd.read_excel(io.BytesIO(file_contents), header=0,sheet_name="PO")
     
     # Clean column names (remove \n, extra spaces)
     df.columns = [str(c).replace('\n', ' ').strip() for c in df.columns]
