@@ -246,7 +246,7 @@ def search_by_sites_batch(
         return []
 
     # Appel au CRUD qui fait la vraie requête SQLAlchemy
-    results = crud.get_merged_pos_by_site_codes(
+    results = crud.search_merged_pos_by_site_codes(
         db=db,
         site_codes=clean_codes,
         start_date=payload.start_date,
