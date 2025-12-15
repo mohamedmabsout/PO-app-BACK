@@ -54,3 +54,6 @@ exit
 
 # 10. Restart the application service
 docker compose restart backend
+
+
+pip freeze > requirements.txt

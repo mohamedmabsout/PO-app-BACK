@@ -48,6 +48,7 @@ python-dotenv==1.2.1
 python-jose==3.5.0
 python-multipart==0.0.20
 pytz==2025.2
+pyxlsb==1.0.10
 PyYAML==6.0.3
 reportlab==4.4.5
 rich==14.2.0
