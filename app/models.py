@@ -276,7 +276,7 @@ class UserPerformanceTarget(Base):
 
     # Add a unique constraint to prevent duplicate rows for same user/year/month
     __table_args__ = (
-        UniqueConstraint('user_id', 'year', 'month', name='uix_user_year_month'),
+        sa.UniqueConstraint('user_id', 'year', 'month', name='uix_user_year_month'),
     )
 
 
