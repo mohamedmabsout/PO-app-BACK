@@ -86,7 +86,7 @@ def read_internal_project(project_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Project not found")
     return db_project
 
-@router.get("/internal/{project_id}/sites", response_model=schemas.PageSite) # Use Pagination Schema
+@router.get("/internal/{project_id}/sites", response_model=schemas.PageMergedPO) # Use Pagination Schema
 def read_internal_project_sites(
     project_id: int,
     page: int = 1,

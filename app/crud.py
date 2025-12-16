@@ -1249,25 +1249,29 @@ def get_sites_for_internal_project_paginated(
     Returns paginated sites for a specific project (e.g. TBD).
     Uses distinct on Site ID to avoid duplicates if multiple POs exist.
     """
-    query = db.query(models.Site).join(models.MergedPO).filter(
+    query = db.query(models.MergedPO).options(
+        joinedload(models.MergedPO.internal_project),
+        joinedload(models.MergedPO.customer_project)
+    ).filter(
         models.MergedPO.internal_project_id == project_id
     )
 
     if search:
-        query = query.filter(models.Site.site_code.ilike(f"%{search}%"))
+        query = query.filter(models.MergedPO.site_code.ilike(f"%{search}%"))
+        
 
     # Distinct is tricky with pagination, we group by ID
-    query = query.group_by(models.Site.id)
+    query = query.group_by(models.MergedPO.site_code)
 
     total_items = query.count()
     
-    sites = query.order_by(models.Site.site_code)\
+    merged_po_items = query.order_by(models.MergedPO.site_code)\
                  .offset((page - 1) * size)\
                  .limit(size).all()
 
   
     return {
-        "items": sites,
+        "items": merged_po_items,
         "total_items": total_items,
         "page": page,
         "per_page": size, # <--- CHANGED FROM 'size' TO 'per_page'
@@ -2337,14 +2341,23 @@ def search_merged_pos_by_site_codes(
     if not clean_codes:
         return []
 
-    # 2. Build Query
+    tbd_project = db.query(models.InternalProject).filter(
+        (models.InternalProject.name == "To Be Determined") |
+        (models.InternalProject.project_type == "TBD")
+    ).first()
+
+    # If we can't find the TBD project, something is wrong, return nothing.
+    if not tbd_project:
+        return []
+
+    # 2. Build the query, adding a filter for the TBD project ID.
     query = db.query(models.MergedPO).options(
         joinedload(models.MergedPO.internal_project),
         joinedload(models.MergedPO.customer_project)
     ).filter(
-        models.MergedPO.site_code.in_(clean_codes)
+        models.MergedPO.site_code.in_(clean_codes),
+        models.MergedPO.internal_project_id == tbd_project.id # <--- ADD THIS FILTER
     )
-
     # 3. Apply Date Filters
     if start_date:
         query = query.filter(func.date(models.MergedPO.publish_date) >= start_date)

@@ -228,6 +228,13 @@ class MergedPOBase(BaseModel):
 class MergedPO(MergedPOBase):
     id: int
     model_config = ConfigDict(from_attributes=True)
+
+class PageMergedPO(BaseModel):
+    items: List[MergedPO] # This uses your existing MergedPO schema
+    total_items: int
+    page: int
+    per_page: int
+    total_pages: int
 class RemainingPO(MergedPO):
     remaining_amount: float
     remaining_stage: str # "AC" or "PAC"
