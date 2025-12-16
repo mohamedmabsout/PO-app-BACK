@@ -48,14 +48,14 @@ def get_planning_matrix_endpoint(year: int, db: Session = Depends(get_db)):
 @router.post("/planning/update", response_model=List[dict])
 def update_target_cell(payload: schemas.TargetUpdate, db: Session = Depends(get_db)):
     # Simple upsert logic
-    target = db.query(models.MonthlyTarget).filter(
-        models.MonthlyTarget.user_id == payload.user_id,
-        models.MonthlyTarget.year == payload.year,
-        models.MonthlyTarget.month == payload.month
+    target = db.query(models.UserPerformanceTarget).filter(
+        models.UserPerformanceTarget.user_id == payload.user_id,
+        models.UserPerformanceTarget.year == payload.year,
+        models.UserPerformanceTarget.month == payload.month
     ).first()
     
     if not target:
-        target = models.MonthlyTarget(
+        target = models.UserPerformanceTarget(
             user_id=payload.user_id, year=payload.year, month=payload.month
         )
         db.add(target)
