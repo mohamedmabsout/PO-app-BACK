@@ -1153,50 +1153,50 @@ def get_export_dataframe(
     CustProj = aliased(models.CustomerProject)
     IntProj = aliased(models.InternalProject)
     
-    # --- UPDATED SELECT STATEMENT ---
+    # --- CORRECTED & COMPLETE SELECT STATEMENT ---
     query = db.query(
+        # 1. Start with the required new fields, PO ID first
+        models.MergedPO.po_id.label("PO ID"),
+        func.concat(models.User.first_name, " ", models.User.last_name).label("PM"),
+        models.MergedPO.unit_price.label("Unit Price"),
+        models.MergedPO.requested_qty.label("Requested Qty"),
+        models.MergedPO.internal_control.label("Internal Check"),
+        models.MergedPO.payment_term.label("Payment Term"),
+        
+        # 2. Now add all the original fields back
         IntProj.name.label("Internal Project"),
         CustProj.name.label("Customer Project"),
         models.MergedPO.site_code.label("Site Code"),
-        models.MergedPO.po_id.label("PO ID"),
         models.MergedPO.po_no.label("PO No."),
         models.MergedPO.po_line_no.label("PO Line No."),
         models.MergedPO.item_description.label("Item Description"),
         models.MergedPO.category.label("Category"),
         models.MergedPO.publish_date.label("Publish Date"),
-        
-        # 1. Base Amount
         models.MergedPO.line_amount_hw.label("Line Amount"),
         
-        # 2. AC Columns (Total 80% vs Accepted)
-        models.MergedPO.total_ac_amount.label("Total AC (80%)"), # Added
+        # 3. AC/PAC and Remaining columns
+        models.MergedPO.total_ac_amount.label("Total AC (80%)"),
         models.MergedPO.accepted_ac_amount.label("Accepted AC Amount"),
         models.MergedPO.date_ac_ok.label("Date AC OK"),
-        
-        # 3. PAC Columns (Total 20% vs Accepted)
-        models.MergedPO.total_pac_amount.label("Total PAC (20%)"), # Added
+        models.MergedPO.total_pac_amount.label("Total PAC (20%)"),
         models.MergedPO.accepted_pac_amount.label("Accepted PAC Amount"),
         models.MergedPO.date_pac_ok.label("Date PAC OK"),
-
-        # 4. Calculated Remaining (Light Red)
-        # Logic: Line Amount - (Accepted AC + Accepted PAC)
         (models.MergedPO.line_amount_hw - (
             func.coalesce(models.MergedPO.accepted_ac_amount, 0) + 
             func.coalesce(models.MergedPO.accepted_pac_amount, 0)
         )).label("Remaining Amount")
     ).select_from(models.MergedPO)
 
-
-    # 2. Fix Joins
-    # Join Customer Project
-    query = query.join(CustProj, models.MergedPO.customer_project_id == CustProj.id)
-    
-    # FIX: Join Internal Project DIRECTLY from MergedPO
+    # --- JOINS ---
+    # Join everything needed for the selected columns and filters
     query = query.join(IntProj, models.MergedPO.internal_project_id == IntProj.id, isouter=True)
+    query = query.join(models.User, IntProj.project_manager_id == models.User.id, isouter=True)
+    query = query.join(CustProj, models.MergedPO.customer_project_id == CustProj.id, isouter=True)
 
-    # 3. Apply Filters
+    # --- FILTERS (No change) ---
     if internal_project_id:
         query = query.filter(IntProj.id == internal_project_id)
+    # ... (rest of filters) ...
     if customer_project_id:
         query = query.filter(CustProj.id == customer_project_id)
     if site_code:
@@ -1215,13 +1215,10 @@ def get_export_dataframe(
         )
 
     df = pd.read_sql(query.statement, db.bind)
+    
+    # --- DATA CLEANING (No change) ---
     if "Remaining Amount" in df.columns:
-        # 3. Apply the threshold logic
-        # First, round to a sensible precision, e.g., 5 decimal places to avoid most float issues
         df["Remaining Amount"] = df["Remaining Amount"].round(5)
-        
-        # Second, set any value whose absolute is less than 1 to 0.
-        # This will turn 0.00009 and -0.00018 into 0.
         df.loc[df["Remaining Amount"].abs() < 1, "Remaining Amount"] = 0
         
     return df
