@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from .. import crud, schemas, auth, models
@@ -45,7 +45,7 @@ def get_yearly_matrix(year: int, db: Session = Depends(get_db)):
 def get_planning_matrix_endpoint(year: int, db: Session = Depends(get_db)):
     return crud.get_planning_matrix(db, year)
 
-@router.post("/planning/update", response_model=List[dict])
+@router.post("/planning/update")
 def update_target_cell(payload: schemas.TargetUpdate, db: Session = Depends(get_db)):
     # Simple upsert logic
     target = db.query(models.UserPerformanceTarget).filter(
@@ -65,6 +65,17 @@ def update_target_cell(payload: schemas.TargetUpdate, db: Session = Depends(get_
     elif payload.field == "po_update": target.po_monthly_update = payload.value
     elif payload.field == "acc_master": target.acceptance_master_plan = payload.value
     elif payload.field == "acc_update": target.acceptance_monthly_update = payload.value
+    else:
+        # Safety check for invalid field names
+        raise HTTPException(status_code=400, detail=f"Invalid field: {payload.field}")
     
-    db.commit()
-    return {"status": "success"}
+    # 4. Commit changes
+    try:
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    
+    # 5. Return a simple success message (Dict, not ORM object)
+    return {"status": "success", "updated_field": payload.field, "new_value": payload.value}
+
