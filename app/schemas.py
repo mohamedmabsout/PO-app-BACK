@@ -294,10 +294,17 @@ class FinancialSummary(BaseModel):
     total_accepted_pac: float
     remaining_gap: float
    
+class ProjectManagerInfo(BaseModel):
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
 
 class ProjectFinancials(BaseModel):
     project_id: int
     project_name: str
+    project_manager: Optional[ProjectManagerInfo] = None # Nested PM object
+
     total_po_value: float
     total_accepted: float
     remaining_gap: float

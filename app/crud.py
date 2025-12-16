@@ -840,49 +840,63 @@ def get_total_financial_summary(db: Session) -> dict:
         "remaining_gap": remaining_gap
     }
 def get_internal_projects_financial_summary(db: Session, user: models.User = None):
-    # Start building the query
-    query = db.query(
-        models.InternalProject.id.label("project_id"),
-        models.InternalProject.name.label("project_name"),
-        models.User.id.label("user_id"),
+    """
+    Calculates the financial summary for internal projects in a single, efficient query,
+    including project manager details.
+    """
+    # 1. Create a subquery to pre-aggregate all financial data from MergedPO.
+    # This is efficient and avoids GROUP BY complexity in the main query.
+    po_summary_subquery = db.query(
+        models.MergedPO.internal_project_id,
         func.sum(models.MergedPO.line_amount_hw).label("total_po_value"),
         (func.coalesce(func.sum(models.MergedPO.accepted_ac_amount), 0) + 
-            func.coalesce(func.sum(models.MergedPO.accepted_pac_amount), 0)).label("total_accepted")
-    ).select_from(models.MergedPO).join(
-        models.InternalProject, models.MergedPO.internal_project_id == models.InternalProject.id
-    ).join(
-        models.User, models.InternalProject.project_manager_id == models.User.id, isouter=True
+         func.coalesce(func.sum(models.MergedPO.accepted_pac_amount), 0)).label("total_accepted")
+    ).group_by(models.MergedPO.internal_project_id).subquery()
+
+    # 2. Build the main query starting from the InternalProject table.
+    #    This ensures we get all projects, even those without POs yet.
+    query = db.query(
+        models.InternalProject,
+        po_summary_subquery.c.total_po_value,
+        po_summary_subquery.c.total_accepted
+    ).outerjoin(
+        # Use an outerjoin in case a project has no POs yet
+        po_summary_subquery, 
+        models.InternalProject.id == po_summary_subquery.c.internal_project_id
+    ).options(
+        # Eagerly load the related project_manager (User) object in the same query
+        joinedload(models.InternalProject.project_manager)
     )
 
-    # --- NEW FILTER LOGIC ---
+    # 3. Apply role-based filtering if a user is provided
     if user and user.role in [UserRole.PM, UserRole.PD]:
-        # Only show projects managed by this user
+        # Filter to only show projects managed by the current user
         query = query.filter(models.InternalProject.project_manager_id == user.id)
-    # ------------------------
 
-    results = query.group_by(models.InternalProject.id, models.InternalProject.name).all()
+    # 4. Execute the single query
+    results = query.all()
  
+    # 5. Process the results in memory (NO MORE DATABASE QUERIES)
     summary_list = []
-    for row in results:
-        po_value = row.total_po_value or 0
-        accepted = row.total_accepted or 0
+    for project, total_po, total_acc in results:
+        po_value = total_po or 0
+        accepted = total_acc or 0
         gap = po_value - accepted
         completion = (accepted / po_value * 100) if po_value > 0 else 0
         
-        # We need to find the project_id. This is a simplification.
-        # A more robust solution would join with the projects table.
-        project = db.query(models.InternalProject).filter(models.InternalProject.name == row.project_name).first()
-        pm = db.query(models.User).filter(models.User.id == project.project_manager_id).first() if project else None 
         summary_list.append({
-            "project_id": project.id if project else 0,
-            "project_name": row.project_name,
-            "manager_last_name": pm.last_name if pm else None,
+            "project_id": project.id,
+            "project_name": project.name,
+            # This works because we used joinedload() to fetch the related User object
+            "project_manager": project.project_manager, 
             "total_po_value": po_value,
             "total_accepted": accepted,
             "remaining_gap": gap,
             "completion_percentage": completion
         })
+        
     return summary_list
+
 def get_customer_projects_financial_summary(db: Session):
     results = db.query(
         models.CustomerProject.id.label("project_id"),
