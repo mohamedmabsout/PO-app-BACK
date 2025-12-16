@@ -1246,7 +1246,8 @@ def get_sites_for_internal_project_paginated(
     search: Optional[str] = None
 ):
     """
-    Returns paginated MergedPO records for a specific project (e.g., TBD).
+    Returns paginated MergedPO records for a specific project (e.g., TBD),
+    ensuring one record per site_code, compatible with ONLY_FULL_GROUP_BY.
     """
     # 1. Build the base query with filters
     base_query = db.query(models.MergedPO).filter(
@@ -1256,33 +1257,33 @@ def get_sites_for_internal_project_paginated(
     if search:
         base_query = base_query.filter(models.MergedPO.site_code.ilike(f"%{search}%"))
 
-    # --- THIS IS THE FIX ---
-    # 2. Calculate total items by counting DISTINCT site_codes that match the filters.
-    #    This is compatible with ONLY_FULL_GROUP_BY.
+    # 2. Calculate total items by counting DISTINCT site_codes
     count_query = base_query.with_entities(func.count(distinct(models.MergedPO.site_code)))
     total_items = count_query.scalar()
 
-    # 3. Build the main query to fetch the actual data.
-    #    We use a subquery to first get the distinct site codes for the current page,
-    #    then join back to get the full MergedPO object for one representative row per site.
-    
-    # Subquery to get distinct site_codes for the current page
-    distinct_site_codes_subquery = base_query.with_entities(models.MergedPO.site_code)\
-                                             .group_by(models.MergedPO.site_code)\
-                                             .order_by(models.MergedPO.site_code)\
-                                             .offset((page - 1) * size)\
-                                             .limit(size).subquery()
+    # --- THIS IS THE FIX ---
 
-    # Main query to fetch the full MergedPO objects for those site codes
+    # 3. Create a subquery that finds the minimum ID for each site_code group.
+    #    This gives us a unique identifier for one representative row per site.
+    subq = base_query.with_entities(
+        func.min(models.MergedPO.id).label("min_id")
+    ).group_by(models.MergedPO.site_code).subquery()
+
+    # 4. Now, build the main query to select MergedPO objects whose ID is in our subquery's list of min_ids.
+    #    This effectively selects just one row for each site_code.
     main_query = db.query(models.MergedPO).options(
         joinedload(models.MergedPO.internal_project),
         joinedload(models.MergedPO.customer_project)
     ).join(
-        distinct_site_codes_subquery,
-        models.MergedPO.site_code == distinct_site_codes_subquery.c.site_code
-    ).group_by(models.MergedPO.site_code) # Still group to ensure one row per site
+        subq, models.MergedPO.id == subq.c.min_id
+    )
 
-    merged_po_items = main_query.all()
+    # 5. Apply ordering, pagination, and execute.
+    #    The GROUP BY is no longer needed in the final query.
+    merged_po_items = main_query.order_by(models.MergedPO.site_code)\
+                                .offset((page - 1) * size)\
+                                .limit(size).all()
+    
     # -----------------------
 
     return {
