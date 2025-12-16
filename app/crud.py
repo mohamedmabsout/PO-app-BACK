@@ -6,7 +6,7 @@ from . import models, schemas
 import pandas as pd
 from sqlalchemy.orm import joinedload,Query
 import sqlalchemy as sa
-from sqlalchemy import func, case, extract, and_
+from sqlalchemy import func, case, extract, and_,distinct
 from sqlalchemy.sql.functions import coalesce # More explicit import
 from sqlalchemy.orm import aliased
 from .enum import ProjectType, UserRole
@@ -1246,38 +1246,52 @@ def get_sites_for_internal_project_paginated(
     search: Optional[str] = None
 ):
     """
-    Returns paginated sites for a specific project (e.g. TBD).
-    Uses distinct on Site ID to avoid duplicates if multiple POs exist.
+    Returns paginated MergedPO records for a specific project (e.g., TBD).
     """
-    query = db.query(models.MergedPO).options(
-        joinedload(models.MergedPO.internal_project),
-        joinedload(models.MergedPO.customer_project)
-    ).filter(
+    # 1. Build the base query with filters
+    base_query = db.query(models.MergedPO).filter(
         models.MergedPO.internal_project_id == project_id
     )
 
     if search:
-        query = query.filter(models.MergedPO.site_code.ilike(f"%{search}%"))
-        
+        base_query = base_query.filter(models.MergedPO.site_code.ilike(f"%{search}%"))
 
-    # Distinct is tricky with pagination, we group by ID
-    query = query.group_by(models.MergedPO.site_code)
+    # --- THIS IS THE FIX ---
+    # 2. Calculate total items by counting DISTINCT site_codes that match the filters.
+    #    This is compatible with ONLY_FULL_GROUP_BY.
+    count_query = base_query.with_entities(func.count(distinct(models.MergedPO.site_code)))
+    total_items = count_query.scalar()
 
-    total_items = query.count()
+    # 3. Build the main query to fetch the actual data.
+    #    We use a subquery to first get the distinct site codes for the current page,
+    #    then join back to get the full MergedPO object for one representative row per site.
     
-    merged_po_items = query.order_by(models.MergedPO.site_code)\
-                 .offset((page - 1) * size)\
-                 .limit(size).all()
+    # Subquery to get distinct site_codes for the current page
+    distinct_site_codes_subquery = base_query.with_entities(models.MergedPO.site_code)\
+                                             .group_by(models.MergedPO.site_code)\
+                                             .order_by(models.MergedPO.site_code)\
+                                             .offset((page - 1) * size)\
+                                             .limit(size).subquery()
 
-  
+    # Main query to fetch the full MergedPO objects for those site codes
+    main_query = db.query(models.MergedPO).options(
+        joinedload(models.MergedPO.internal_project),
+        joinedload(models.MergedPO.customer_project)
+    ).join(
+        distinct_site_codes_subquery,
+        models.MergedPO.site_code == distinct_site_codes_subquery.c.site_code
+    ).group_by(models.MergedPO.site_code) # Still group to ensure one row per site
+
+    merged_po_items = main_query.all()
+    # -----------------------
+
     return {
         "items": merged_po_items,
         "total_items": total_items,
         "page": page,
-        "per_page": size, # <--- CHANGED FROM 'size' TO 'per_page'
-        "total_pages": (total_items + size - 1) // size
+        "per_page": size,
+        "total_pages": (total_items + size - 1) // size if total_items > 0 else 1
     }
-
 def update_internal_project(db: Session, project_id: int, updates: schemas.InternalProjectUpdate):
     db_project = db.query(models.InternalProject).filter(models.InternalProject.id == project_id).first()
     if not db_project:
