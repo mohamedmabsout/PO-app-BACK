@@ -2490,6 +2490,7 @@ def get_bcs_export_dataframe(db: Session, search: Optional[str] = None):
         # Common Header Info
         header_info = {
             "BC Number": bc.bc_number,
+            "BC ID":{}bc
             "Status": bc.status,
             "Project": bc.internal_project.name if bc.internal_project else "",
             "SBC": bc.sbc.name if bc.sbc else "",
@@ -2510,7 +2511,8 @@ def get_bcs_export_dataframe(db: Session, search: Optional[str] = None):
             row = header_info.copy() # Copy header info
             # Add Item specific info
             row.update({
-                "PO Ref": item.merged_po.po_no if item.merged_po else "",
+                "PO ID": item.merged_po.po_id if item.merged_po else "",
+
                 "Site Code": item.merged_po.site_code if item.merged_po else "",
                 "Item Description": item.merged_po.item_description if item.merged_po else "",
                 "SBC Rate": item.rate_sbc,

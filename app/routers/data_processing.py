@@ -312,7 +312,6 @@ def export_bcs(
         output.seek(0)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M")
         headers = {'Content-Disposition': f'attachment; filename="BC_Export_{timestamp}.xlsx"'}
-        
         return StreamingResponse(output, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', headers=headers)
 
     except Exception as e:

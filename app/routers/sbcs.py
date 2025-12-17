@@ -54,6 +54,12 @@ def get_active_sbcs_list(
     current_user: models.User = Depends(auth.get_current_user)
 ):
     return crud.get_active_sbcs(db)
+@router.get("/all", response_model=List[schemas.SBCResponse])
+def get_all_sbcs_list(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    return crud.get_all_sbcs(db)
 
 @router.post("/{sbc_id}/approve")
 def approve_sbc_endpoint(
