@@ -2533,3 +2533,51 @@ def get_bcs_export_dataframe(db: Session, search: Optional[str] = None):
             data.append(row)
 
     return pd.DataFrame(data)
+def get_aging_analysis(db: Session):
+    """
+    Groups the total remaining amount (GAP) into age buckets based on publish_date.
+    """
+    
+    # Calculate GAP for each row: Line Amount - (Accepted AC + Accepted PAC)
+    # We use coalesce to handle NULLs safely
+    gap_expression = (
+        func.coalesce(models.MergedPO.line_amount_hw, 0) - 
+        (func.coalesce(models.MergedPO.accepted_ac_amount, 0) + func.coalesce(models.MergedPO.accepted_pac_amount, 0))
+    )
+    
+    # Calculate Age in Days
+    # DATEDIFF(NOW(), publish_date)
+    age_expression = func.datediff(func.now(), models.MergedPO.publish_date)
+
+    # Define Buckets using CASE statement
+    bucket_expression = case(
+        (age_expression <= 30, '0-30 Days'),
+        ((age_expression > 30) & (age_expression <= 90), '30-90 Days'),
+        ((age_expression > 90) & (age_expression <= 180), '90-180 Days'),
+        ((age_expression > 180) & (age_expression <= 365), '180-365 Days'),
+        else_='> 365 Days'
+    ).label("age_bucket")
+
+    # The Query: Sum the GAP, grouped by the Bucket
+    results = db.query(
+        bucket_expression,
+        func.sum(gap_expression).label("total_gap")
+    ).filter(
+        # Only include rows where there IS a gap (gap > 0.01 to avoid float dust)
+        gap_expression > 0.01
+    ).group_by(bucket_expression).all()
+
+    # Convert to a clean list of dicts, ensuring all buckets exist even if empty
+    buckets = {
+        '0-30 Days': 0.0,
+        '30-90 Days': 0.0,
+        '90-180 Days': 0.0,
+        '180-365 Days': 0.0,
+        '> 365 Days': 0.0
+    }
+    
+    for row in results:
+        if row.age_bucket in buckets:
+            buckets[row.age_bucket] = row.total_gap or 0.0
+
+    return [{"bucket": k, "amount": v} for k, v in buckets.items()]

@@ -27,7 +27,7 @@ def get_financial_overview(db: Session = Depends(get_db)):
 def get_internal_projects_overview(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user) # Add this
-):
+):  
     # Pass current_user to filter data
     return crud.get_internal_projects_financial_summary(db, user=current_user)
 
@@ -75,3 +75,7 @@ def get_user_performance(
         raise HTTPException(status_code=403, detail="You cannot view performance data of other managers.")
 
     return crud.get_user_performance_stats(db, user_id, start_date, end_date)
+
+@router.get("/aging-analysis")
+def get_aging_analysis_endpoint(db: Session = Depends(get_db)):
+    return crud.get_aging_analysis(db)
