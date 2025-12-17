@@ -1266,7 +1266,7 @@ def get_sites_for_internal_project_paginated(
     )
 
     if search:
-        base_query = base_query.filter(models.MergedPO.site_code.ilike(f"%{search}%"))
+        base_query = base_query.filter(models.MergedPO.site_code.ilike(f"%{search}%") | (models.MergedPO.customer_project.has(models.CustomerProject.name.ilike(f"%{search}%")))   )
 
     # 2. Calculate total items by counting DISTINCT site_codes
     count_query = base_query.with_entities(func.count(distinct(models.MergedPO.site_code)))

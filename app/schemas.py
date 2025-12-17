@@ -203,6 +203,7 @@ class SiteAllocationCreate(BaseModel):
 class MergedPOBase(BaseModel):
     po_id: str
     customer_project: CustomerProject # This will be a nested object
+    site_id: int
     site_code: Optional[str] = None
     internal_project: Optional[InternalProject] = None 
 
