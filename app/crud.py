@@ -2105,7 +2105,18 @@ def get_pending_sbcs(db: Session):
     ).all()
 def get_active_sbcs(db: Session):
     return db.query(models.SBC).filter(models.SBC.status == models.SBCStatus.ACTIVE).all()
-
+def get_all_sbcs(db: Session, search: Optional[str] = None):
+    return_query = db.query(models.SBC)
+    if search:
+        term = f"%{search}%"
+        return_query = return_query.filter(
+            (models.SBC.sbc_code.ilike(term)) |
+            (models.SBC.short_name.ilike(term)) |
+            (models.SBC.name.ilike(term)) |
+            (models.SBC.email.ilike(term)) |
+            (models.SBC.phone_1.ilike(term))
+        )
+    return return_query.order_by(models.SBC.created_at.desc()).all()
 def approve_sbc(db: Session, sbc_id: int, approver_id: int):
     sbc = db.query(models.SBC).get(sbc_id)
     if not sbc:
@@ -2490,7 +2501,6 @@ def get_bcs_export_dataframe(db: Session, search: Optional[str] = None):
         # Common Header Info
         header_info = {
             "BC Number": bc.bc_number,
-            "BC ID":{}bc
             "Status": bc.status,
             "Project": bc.internal_project.name if bc.internal_project else "",
             "SBC": bc.sbc.name if bc.sbc else "",
@@ -2512,7 +2522,7 @@ def get_bcs_export_dataframe(db: Session, search: Optional[str] = None):
             # Add Item specific info
             row.update({
                 "PO ID": item.merged_po.po_id if item.merged_po else "",
-
+                "BC ID": f"{bc.bc_number}-{item.line_number}",
                 "Site Code": item.merged_po.site_code if item.merged_po else "",
                 "Item Description": item.merged_po.item_description if item.merged_po else "",
                 "SBC Rate": item.rate_sbc,
