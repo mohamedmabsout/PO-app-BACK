@@ -499,3 +499,9 @@ class NotificationResponse(BaseModel):
 class PasswordResetRequest(BaseModel):
     token: str
     new_password: str
+
+class ForgotPasswordRequest(BaseModel):
+    email: str
+class ChangePasswordSchema(BaseModel):
+    current_password: str
+    new_password: str
