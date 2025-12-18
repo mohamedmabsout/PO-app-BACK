@@ -7,7 +7,7 @@ from fastapi import FastAPI, Depends, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
-from .routers import projects, users, auth, selectors,sites,data_processing,acceptances, summary,targets,export,sbcs
+from .routers import projects, users, auth, selectors,sites,data_processing,acceptances, summary,targets,export,sbcs,notifications
 from .database import engine ,SessionLocal
 from  .dependencies import get_db
 from . import crud, models, schemas
@@ -30,6 +30,7 @@ app.include_router(summary.router)
 app.include_router(targets.router)
 app.include_router(export.router)
 app.include_router(sbcs.router)
+app.include_router(notifications.router)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 @app.get("/")

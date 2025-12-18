@@ -1,7 +1,7 @@
 import datetime
 from sqlalchemy import Boolean, Column, Date, Enum, ForeignKey, Integer, String, Float, DateTime
 
-from .enum import ProjectType, UserRole, SBCStatus, BCStatus
+from .enum import ProjectType, UserRole, SBCStatus, BCStatus, NotificationType
 from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, Text, Date, Enum, ForeignKey
 from .database import Base
 from sqlalchemy.orm import relationship
@@ -36,6 +36,8 @@ class User(Base):
     role = Column(Enum(UserRole), nullable=False)
     daily_rate = Column(Float, nullable=True, default=0.0)
     is_active = Column(Boolean, default=True)
+    reset_token = Column(String(100), nullable=True)
+    notifications = relationship("Notification", back_populates="recipient") 
 
 class Account(Base):
     __tablename__ = "accounts"
@@ -404,3 +406,23 @@ class BCItem(Base):
     
     bc = relationship("BonDeCommande", back_populates="items")
     merged_po = relationship("MergedPO")
+ # Alerts (e.g., Export finished, Maintenance)
+
+class Notification(Base):
+    __tablename__ = "notifications"
+
+    id = Column(Integer, primary_key=True, index=True)
+    recipient_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    
+    type = Column(Enum(NotificationType), nullable=False)
+    title = Column(String(255), nullable=False)
+    message = Column(Text, nullable=False)
+    
+    # Optional: Link to the relevant resource (e.g., /bc/detail/5)
+    link = Column(String(500), nullable=True) 
+    
+    is_read = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.datetime.now)
+
+    recipient = relationship("User", back_populates="notifications")
+

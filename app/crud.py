@@ -2581,3 +2581,103 @@ def get_aging_analysis(db: Session):
             buckets[row.age_bucket] = row.total_gap or 0.0
 
     return [{"bucket": k, "amount": v} for k, v in buckets.items()]
+def create_notification(
+    db: Session, 
+    recipient_id: int, 
+    type: models.NotificationType, 
+    title: str, 
+    message: str, 
+    link: str = None
+):
+    notif = models.Notification(
+        recipient_id=recipient_id,
+        type=type,
+        title=title,
+        message=message,
+        link=link
+    )
+    db.add(notif)
+    # We usually commit in the main flow, but you can commit here if you want it instant
+    # db.commit() 
+    return notif
+
+def get_my_notifications(db: Session, user_id: int, unread_only: bool = False):
+    query = db.query(models.Notification).filter(models.Notification.recipient_id == user_id)
+    if unread_only:
+        query = query.filter(models.Notification.is_read == False)
+    return query.order_by(models.Notification.created_at.desc()).limit(50).all()
+
+def mark_notification_read(db: Session, notif_id: int, user_id: int):
+    notif = db.query(models.Notification).filter(
+        models.Notification.id == notif_id, 
+        models.Notification.recipient_id == user_id
+    ).first()
+    if notif:
+        notif.is_read = True
+        db.commit()
+    return notif
+
+def check_system_state_notifications(db: Session, user: models.User):
+    """
+    Generates dynamic 'virtual' notifications based on system state.
+    These are not stored in the DB, just calculated on request.
+    """
+    virtual_todos = []
+    print(f"DEBUG NOTIF: User Role is: '{user.role}'")
+
+    # 1. Check for TBD Sites (Only for Admins/PDs)
+    role_str = str(user.role).upper() # Force uppercase for comparison
+    print(f"DEBUG NOTIF: User Role UPPER is: '{role_str}'")
+
+    if "ADMIN" in role_str or "PD" in role_str :
+        tbd_project = db.query(models.InternalProject).filter(models.InternalProject.name == "To Be Determined").first()
+        
+        if tbd_project:
+            # Simple query using the direct relationship you confirmed exists
+            tbd_count = db.query(models.MergedPO).filter(
+                models.MergedPO.internal_project_id == tbd_project.id
+            ).count()
+            
+            print(f"DEBUG NOTIF: TBD Project ID is {tbd_project.id}. Count found: {tbd_count}")
+            
+            if tbd_count > 0:
+                virtual_todos.append({
+                    "id": "virtual-1",
+                    "title": "Assign TBD Sites",
+                    "desc": f"{tbd_count} sites are waiting in 'To Be Determined'.",
+                    "priority": "High",
+                    "badgeBg": "danger",
+                    "link": "/site-dispatcher",
+                    "action": "Go to Dispatcher",
+                    "type": "TODO", # Add type for frontend filter
+                    "is_read": False,
+                    "created_at": datetime.now()
+                })
+        else:
+             print("DEBUG NOTIF: 'To Be Determined' project not found in DB")
+
+
+    # 2. Check for Missing Monthly Targets (Only for PMs)
+    if "PM" in role_str:
+        current_month = datetime.now().month
+        current_year = datetime.now().year
+        
+        target = db.query(models.UserPerformanceTarget).filter(
+            models.UserPerformanceTarget.user_id == user.id,
+            models.UserPerformanceTarget.year == current_year,
+            models.UserPerformanceTarget.month == current_month
+        ).first()
+        
+        if not target or (target.po_monthly_update == 0 and target.acceptance_monthly_update == 0):
+            virtual_todos.append({
+                "id": "virtual-2",
+                "title": "Set Monthly Targets",
+                "desc": f"Targets for {datetime.now().strftime('%B')} are missing.",
+                "priority": "Medium",
+                "badgeBg": "warning",
+                "link": "/planning",
+                "action": "Set Targets"
+            })
+
+    return virtual_todos
+

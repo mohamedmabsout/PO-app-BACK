@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 
-from .. import crud, auth, schemas, config
+from .. import crud, auth, schemas, config, models
 from ..dependencies import get_db
 
 router = APIRouter(
@@ -51,3 +51,23 @@ def register_user(user: schemas.UserCreate, db: Session = Depends(get_db)): # <-
             
     return crud.create_user(db=db, user=user)
 
+@router.post("/reset-password")
+def reset_password(
+    payload: schemas.PasswordResetRequest,
+    db: Session = Depends(get_db)
+):
+    # 1. Find user by token
+    user = db.query(models.User).filter(models.User.reset_token == payload.token).first()
+    
+    if not user:
+        raise HTTPException(status_code=400, detail="Invalid or expired token.")
+    
+    # 2. Hash new password
+    hashed_password = auth.get_password_hash(payload.new_password)
+    
+    # 3. Update User
+    user.hashed_password = hashed_password
+    user.reset_token = None # Invalidate token (important for security!)
+    db.commit()
+    
+    return {"message": "Password updated successfully"}

@@ -4,7 +4,11 @@ from sqlalchemy.orm import Session
 from typing import List
 
 from .. import crud, schemas, models, auth
-from ..dependencies import get_db
+from ..dependencies import get_db , require_management
+from ..config import conf
+import secrets
+from fastapi import BackgroundTasks
+from fastapi_mail import FastMail, MessageSchema, MessageType
 
 router = APIRouter(
     prefix="/api/users",
@@ -77,3 +81,41 @@ def delete_user_by_id(
 
     deleted_user = crud.delete_user(db=db, db_user=db_user)
     return deleted_user
+
+@router.post("/invite")
+async def invite_user(
+    user_in: schemas.UserCreate, 
+    background_tasks: BackgroundTasks, # Fast API Background Task
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_management)
+):
+    # 1. Create User with random password (they can't use it anyway)
+    # or handle nullable password in model
+    temp_password = secrets.token_urlsafe(10) 
+    
+    # 2. Generate Reset Token
+    token = secrets.token_urlsafe(32)
+    
+    new_user = crud.create_user(db, user_in)
+    new_user.reset_token = token
+    db.commit()
+    
+    # 3. Send Email (Async)
+    reset_link = f"https://po.sib.co.ma/reset-password?token={token}"
+    
+    message = MessageSchema(
+        subject="Welcome to SIB PO App - Set your Password",
+        recipients=[new_user.email],
+        body=f"""
+        <p>Hello {new_user.first_name},</p>
+        <p>Your account has been created.</p>
+        <p>Please click the link below to set your password and access the system:</p>
+        <a href="{reset_link}">Set Password</a>
+        """,
+        subtype=MessageType.html
+    )
+    
+    fm = FastMail(conf)
+    await fm.send_message(message)
+    
+    return {"message": "User invited and email sent."}

@@ -365,12 +365,39 @@ def read_all_bcs(
 @router.post("/bc/{bc_id}/approve-l1")
 def approve_l1(bc_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
     # Check if PD
-    return crud.approve_bc_l1(db, bc_id, current_user.id)
+    bc = crud.approve_bc_l1(db, bc_id, current_user.id)
+    
+    # FIND ADMINS
+    admins = db.query(models.User).filter(models.User.role == "Admin").all()
+    
+    for admin in admins:
+        crud.create_notification(
+            db, 
+            recipient_id=admin.id,
+            type=models.NotificationType.TODO,
+            title="Final Approval Required",
+            message=f"BC {bc.bc_number} validated L1. Pending final approval.",
+            link=f"/configuration/bc/detail/{bc.id}"
+        )
+    db.commit()
+    return bc
 
 @router.post("/bc/{bc_id}/approve-l2")
 def approve_l2(bc_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
     # Check if Admin
-    return crud.approve_bc_l2(db, bc_id, current_user.id)
+    bc = crud.approve_bc_l2(db, bc_id, current_user.id)
+    
+    # NOTIFY CREATOR
+    crud.create_notification(
+        db, 
+        recipient_id=bc.creator_id,
+        type=models.NotificationType.APP,
+        title="BC Approved",
+        message=f"Your BC {bc.bc_number} has been fully approved.",
+        link=f"/configuration/bc/detail/{bc.id}"
+    )
+    db.commit()
+    return bc
 
 @router.get("/bc/{bc_id}/pdf")
 def download_bc_pdf(bc_id: int, db: Session = Depends(get_db)):
@@ -415,7 +442,23 @@ def submit_bon_de_commande(
     db: Session = Depends(get_db), 
     current_user: models.User = Depends(get_current_user)
 ):
-    return crud.submit_bc(db, bc_id=bc_id)
+    bc = crud.submit_bc(db, bc_id)
+    
+    # FIND PROJECT DIRECTORS
+    pds = db.query(models.User).filter(models.User.role == "PD").all() # Or "Project Director"
+    
+    for pd in pds:
+        crud.create_notification(
+            db, 
+            recipient_id=pd.id,
+            type=models.NotificationType.TODO,
+            title="Approval Required",
+            message=f"BC {bc.bc_number} submitted by {current_user.first_name} requires L1 validation.",
+            link=f"/configuration/bc/detail/{bc.id}"
+        )
+    db.commit()
+    return bc
+
 @router.get("/bc/{bc_id}", response_model=schemas.BCResponse)
 def get_bc_details(
     bc_id: int,

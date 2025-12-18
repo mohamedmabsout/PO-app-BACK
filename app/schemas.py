@@ -479,3 +479,23 @@ class TargetUpdate(BaseModel):
     field: str # "po_master", "po_update", "acc_master", "acc_update"
     value: float
 
+class NotificationItem(BaseModel):
+    id: int
+    type: str
+    title: str
+    message: str
+    link: Optional[str] = None
+    is_read: bool
+    created_at: datetime
+    
+    model_config = ConfigDict(from_attributes=True)
+
+class NotificationResponse(BaseModel):
+    notifications: List[NotificationItem]
+    unread_count: int
+
+    model_config = ConfigDict(from_attributes=True)
+
+class PasswordResetRequest(BaseModel):
+    token: str
+    new_password: str
