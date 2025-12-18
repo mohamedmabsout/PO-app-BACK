@@ -107,7 +107,7 @@ def generate_bc_pdf(bc):
     
     table_headers = [
         "Line", "Site Code", "Description", "UOM", 
-        "Unit Price", "Qty", "Sub Total", "Tax", "Start", "End"
+        "Unit Price", "Qty", "Sub Total", "Tax"
     ]
     
     data = [table_headers]
@@ -131,8 +131,7 @@ def generate_bc_pdf(bc):
             str(item.quantity_sbc),
             f"{item.line_amount_sbc:,.2f}",
             f"{int(item.applied_tax_rate)}%",
-            start,
-            end
+            
         ]
         data.append(row)
 
