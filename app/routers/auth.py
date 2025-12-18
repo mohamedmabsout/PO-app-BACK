@@ -129,7 +129,7 @@ def impersonate_user(
          pass 
 
     # 3. Create a token for the target user
-    access_token_expires = timedelta(minutes=conf.settings.ACCESS_TOKEN_EXPIRE_DAYS)
+    access_token_expires = timedelta(minutes=config.settings.ACCESS_TOKEN_EXPIRE_DAYS)
     access_token = auth.create_access_token(
         data={"sub": target_user.username, "role": target_user.role}, # Add claims as needed
         expires_delta=access_token_expires
