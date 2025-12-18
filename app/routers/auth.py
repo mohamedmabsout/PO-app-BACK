@@ -138,7 +138,7 @@ def impersonate_user(
     return {"access_token": access_token, "token_type": "bearer"}
 @router.post("/change-password")
 def change_password(
-    payload: ChangePasswordSchema,
+    payload: schemas.ChangePasswordSchema,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_active_user)
 ):
