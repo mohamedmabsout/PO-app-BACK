@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from typing import List
 
 from .. import crud, schemas, models, auth
-from ..dependencies import get_db , require_management
+from ..dependencies import get_db , require_management,require_admin
 from ..config import conf
 import secrets
 from fastapi import BackgroundTasks
@@ -122,7 +122,7 @@ async def invite_user(
 @router.post("/{user_id}/admin-reset-password")
 def admin_reset_password(
     user_id: int,
-    payload: AdminResetPasswordRequest,
+    payload: schemas.AdminResetPasswordRequest,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_admin) # Only Admins!
 ):

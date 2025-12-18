@@ -505,3 +505,6 @@ class ForgotPasswordRequest(BaseModel):
 class ChangePasswordSchema(BaseModel):
     current_password: str
     new_password: str
+
+class AdminResetPasswordRequest(BaseModel):
+    new_password: str
