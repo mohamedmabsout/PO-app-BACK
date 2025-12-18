@@ -119,3 +119,19 @@ async def invite_user(
     await fm.send_message(message)
     
     return {"message": "User invited and email sent."}
+@router.post("/{user_id}/admin-reset-password")
+def admin_reset_password(
+    user_id: int,
+    payload: AdminResetPasswordRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_admin) # Only Admins!
+):
+    user = crud.get_user(db, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+        
+    user.hashed_password = auth.get_password_hash(payload.new_password)
+    user.reset_token = None # Clear any pending tokens
+    db.commit()
+    
+    return {"message": f"Password for {user.username} has been manually updated."}
