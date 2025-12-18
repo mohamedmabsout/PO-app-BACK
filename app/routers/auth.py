@@ -140,7 +140,7 @@ def impersonate_user(
 def change_password(
     payload: schemas.ChangePasswordSchema,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_active_user)
+    current_user: models.User = Depends(auth.get_current_user)
 ):
     # 1. Verify Old Password
     if not auth.verify_password(payload.current_password, current_user.hashed_password):
