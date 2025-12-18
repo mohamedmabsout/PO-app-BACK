@@ -130,7 +130,7 @@ def generate_bc_pdf(bc):
             f"{item.unit_price_sbc:,.2f}",
             str(item.quantity_sbc),
             f"{item.line_amount_sbc:,.2f}",
-            f"{int(item.applied_tax_rate * 100)}%",
+            f"{int(item.applied_tax_rate)}%",
             start,
             end
         ]
