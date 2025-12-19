@@ -2681,3 +2681,42 @@ def check_system_state_notifications(db: Session, user: models.User):
 
     return virtual_todos
 
+def import_planning_targets(db: Session, df: pd.DataFrame):
+    count = 0
+    # Expected columns matches the Export format
+    # "PM Name" (We need to resolve this to User ID), "Year", "Month", etc.
+    
+    # Optimization: Cache user map { "First Last": user_id }
+    users = db.query(models.User).all()
+    user_map = {f"{u.first_name} {u.last_name}": u.id for u in users}
+
+    for _, row in df.iterrows():
+        pm_name = row.get("PM Name")
+        user_id = user_map.get(pm_name)
+        
+        if not user_id: continue # Skip if PM not found
+
+        year = row.get("Year")
+        month = row.get("Month")
+        
+        # Upsert logic
+        target = db.query(models.MonthlyTarget).filter(
+            models.MonthlyTarget.user_id == user_id,
+            models.MonthlyTarget.year == year,
+            models.MonthlyTarget.month == month
+        ).first()
+
+        if not target:
+            target = models.MonthlyTarget(user_id=user_id, year=year, month=month)
+            db.add(target)
+        
+        # Update fields
+        target.po_master_plan = row.get("PO Receive (Master Plan)", 0)
+        target.po_monthly_update = row.get("PO Receive (Monthly Update)", 0)
+        target.acceptance_master_plan = row.get("Acceptance (Master Plan)", 0)
+        target.acceptance_monthly_update = row.get("Acceptance (Monthly Update)", 0)
+        
+        count += 1
+
+    db.commit()
+    return count

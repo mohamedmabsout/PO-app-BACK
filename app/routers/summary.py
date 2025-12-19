@@ -2,6 +2,8 @@
 
 from typing import List, Optional
 from fastapi import APIRouter, Depends
+import pandas as pd
+import io
 from sqlalchemy.orm import Session
 from .. import crud, schemas, auth
 from ..dependencies import get_db
@@ -10,7 +12,7 @@ from datetime import date
 from ..models import UserRole
 from .. import models
 from ..dependencies import get_current_user
-
+from fastapi import APIRouter, Depends, UploadFile, File, status
 router = APIRouter(
     prefix="/api/summary",
     tags=["Dashboard Summaries"],
@@ -79,3 +81,16 @@ def get_user_performance(
 @router.get("/aging-analysis")
 def get_aging_analysis_endpoint(db: Session = Depends(get_db)):
     return crud.get_aging_analysis(db)
+@router.post("/planning/import")
+def import_planning_data(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db)
+):
+    try:
+        contents = file.file.read()
+        df = pd.read_excel(io.BytesIO(contents))
+        
+        count = crud.import_planning_targets(db, df)
+        return {"message": f"Successfully updated {count} target records."}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
