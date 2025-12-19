@@ -21,7 +21,7 @@ router = APIRouter(
 
 @router.get("/financial-overview", response_model=schemas.FinancialSummary)
 def get_financial_overview(    db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user) # 👈 Add this
+    current_user: models.User = Depends(auth.get_current_user)
 ):
     """
     Provides a high-level financial overview of all processed POs.

@@ -833,7 +833,7 @@ def get_total_financial_summary(db: Session, user: models.User = None) -> dict:
 
     # --- THIS IS THE FIX ---
     # If a user is provided and their role is PM, filter the data
-    if user and user.role == UserRole.PM: # Assuming UserRole is your Enum
+    if user and user.role in [UserRole.PM, UserRole.PD]:
         # Join with InternalProject to access the project_manager_id
         query = query.join(
             models.InternalProject, 
