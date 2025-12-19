@@ -824,15 +824,34 @@ def get_filtered_merged_pos(
         )
         
     return query
-def get_total_financial_summary(db: Session) -> dict:
-    # Use the SQLAlchemy func module to perform SUM aggregations
-    # coalesce(value, 0) is used to turn NULL results into 0.0
-    total_po_value = db.query(func.sum(models.MergedPO.line_amount_hw)).scalar() or 0.0
-    total_accepted_ac = db.query(func.sum(models.MergedPO.accepted_ac_amount)).scalar() or 0.0
-    total_accepted_pac = db.query(func.sum(models.MergedPO.accepted_pac_amount)).scalar() or 0.0
+def get_total_financial_summary(db: Session, user: models.User = None) -> dict:
+    query = db.query(
+        func.sum(models.MergedPO.line_amount_hw).label("total_po_value"),
+        func.sum(models.MergedPO.accepted_ac_amount).label("total_accepted_ac"),
+        func.sum(models.MergedPO.accepted_pac_amount).label("total_accepted_pac")
+    )
+
+    # --- THIS IS THE FIX ---
+    # If a user is provided and their role is PM, filter the data
+    if user and user.role == UserRole.PM: # Assuming UserRole is your Enum
+        # Join with InternalProject to access the project_manager_id
+        query = query.join(
+            models.InternalProject, 
+            models.MergedPO.internal_project_id == models.InternalProject.id
+        )
+        # Add the WHERE clause
+        query = query.filter(models.InternalProject.project_manager_id == user.id)
+    # -----------------------
     
-    remaining_gap = total_po_value - (total_accepted_ac + total_accepted_pac)
-    
+    # Execute the (now possibly filtered) query
+    result = query.one()
+    remaining_gap = result.total_po_value - (result.total_accepted_ac + result.total_accepted_pac)
+
+    total_po_value = result.total_po_value or 0.0
+    total_accepted_ac = result.total_accepted_ac or 0.0
+    total_accepted_pac = result.total_accepted_pac or 0.0
+
+
     return {
         "total_po_value": total_po_value,
         "total_accepted_ac": total_accepted_ac,
@@ -932,29 +951,25 @@ def get_customer_projects_financial_summary(db: Session):
     return summary_list
 
 
-def get_po_value_by_category(db: Session):
-    """
-    Calculates the total PO value for each category, correctly grouping NULL
-    and 'TBD' values together at the database level.
-    """
-    
-    # --- THIS IS THE FIX ---
-    # We use `coalesce` to tell the database: "if the category is NULL, use 'TBD' instead."
-    # This happens BEFORE the GROUP BY, so the aggregation is correct.
+def get_po_value_by_category(db: Session, user: models.User = None): # <-- Added user
     category_label = coalesce(models.MergedPO.category, "TBD").label("category_name")
 
-    results = db.query(
+    base_query = db.query(
         category_label,
         func.sum(models.MergedPO.line_amount_hw).label("total_value")
-    ).group_by(category_label).all()
+    )
     
-    # Now, the Python part is much simpler because the data is already clean.
-    # The 'row' object will have attributes 'category_name' and 'total_value'.
+    # --- ADD THE FILTER ---
+    if user and user.role in [UserRole.PM, UserRole.PD]:
+        base_query = base_query.join(models.InternalProject).filter(
+            models.InternalProject.project_manager_id == user.id
+        )
+    # ----------------------
+
+    results = base_query.group_by(category_label).all()
+    
     return [{"category": row.category_name, "value": row.total_value or 0} for row in results]
 
-# backend/app/crud.py
-
-# backend/app/crud.py
 
 def get_remaining_to_accept_paginated(
     db: Session, 
@@ -1056,54 +1071,50 @@ def get_financial_summary_by_period(
     db: Session, 
     year: int, 
     month: Optional[int] = None, 
-    week: Optional[int] = None
+    week: Optional[int] = None,
+    user: Optional[models.User] = None  # <-- Added user parameter
 ) -> dict:
     """
-    Calculates the financial summary for a specific period (year, month, or week)
-    using the correct date fields for each metric via conditional aggregation.
+    Calculates the financial summary for a specific period, filtered by user role if applicable.
     """
     
-    # --- Define the date filters for each metric ---
-    # We will build a list of conditions for each date column
-    
-    # Filter for Total PO Value (based on publish_date)
+    # --- Define base query and role-based filtering ---
+    base_query = db.query(models.MergedPO)
+
+    # If a user is provided and they are a PM or PD, join and filter by their projects.
+    if user and user.role in [UserRole.PM, UserRole.PD]:
+        base_query = base_query.join(
+            models.InternalProject, 
+            models.MergedPO.internal_project_id == models.InternalProject.id
+        ).filter(models.InternalProject.project_manager_id == user.id)
+
+    # --- Define date filters for each metric ---
     po_date_filters = [extract('year', models.MergedPO.publish_date) == year]
-    
-    # Filter for Accepted AC (based on date_ac_ok)
     ac_date_filters = [extract('year', models.MergedPO.date_ac_ok) == year]
-    
-    # Filter for Accepted PAC (based on date_pac_ok)
     pac_date_filters = [extract('year', models.MergedPO.date_pac_ok) == year]
 
-    # Add month or week filters if they are provided
     if month:
         po_date_filters.append(extract('month', models.MergedPO.publish_date) == month)
         ac_date_filters.append(extract('month', models.MergedPO.date_ac_ok) == month)
         pac_date_filters.append(extract('month', models.MergedPO.date_pac_ok) == month)
 
     if week:
+        # Note: func.week(..., 3) is MySQL specific for Monday-start weeks.
         po_date_filters.append(func.week(models.MergedPO.publish_date, 3) == week)
         ac_date_filters.append(func.week(models.MergedPO.date_ac_ok, 3) == week)
         pac_date_filters.append(func.week(models.MergedPO.date_pac_ok, 3) == week)
 
-    # --- Perform the conditional aggregation in a single, efficient query ---
-    summary = db.query(
-        # 1. Sum line_amount_hw IF its publish_date matches the period
+    # --- Perform conditional aggregation on the (potentially filtered) base_query ---
+    summary = base_query.with_entities(
         func.sum(case((and_(*po_date_filters), models.MergedPO.line_amount_hw), else_=0)).label("total_po_value"),
-        
-        # 2. Sum accepted_ac_amount IF its date_ac_ok matches the period
         func.sum(case((and_(*ac_date_filters), models.MergedPO.accepted_ac_amount), else_=0)).label("total_accepted_ac"),
-        
-        # 3. Sum accepted_pac_amount IF its date_pac_ok matches the period
         func.sum(case((and_(*pac_date_filters), models.MergedPO.accepted_pac_amount), else_=0)).label("total_accepted_pac")
-        
-    ).one() # .one() executes the query and returns the single row of results
+    ).one()
 
-    # Process the results (this part is the same)
+    # Process results (no change here)
     total_po_value = summary.total_po_value or 0.0
     total_accepted_ac = summary.total_accepted_ac or 0.0
     total_accepted_pac = summary.total_accepted_pac or 0.0
-    
     remaining_gap = total_po_value - (total_accepted_ac + total_accepted_pac)
 
     return {
@@ -1113,24 +1124,31 @@ def get_financial_summary_by_period(
         "remaining_gap": remaining_gap,
     }
 
-
 # --- Also, let's fix the get_yearly_chart_data function ---
 
-def get_yearly_chart_data(db: Session, year: int):
-    # We need to get data for all 12 months
-    months = db.query(
-        extract('month', models.MergedPO.publish_date).label("month")
-    ).filter(
-        extract('year', models.MergedPO.publish_date) == year
-    ).distinct().all()
+def get_yearly_chart_data(db: Session, year: int, user: models.User = None): # <-- Added user
+    # We need to find all months that have ANY activity for this user
+    base_query = db.query(models.MergedPO)
+    if user and user.role in [UserRole.PM, UserRole.PD]:
+        base_query = base_query.join(models.InternalProject).filter(
+            models.InternalProject.project_manager_id == user.id
+        )
+
+    # Union of all distinct months from the three date columns for the given year
+    po_months = base_query.with_entities(extract('month', models.MergedPO.publish_date)).filter(extract('year', models.MergedPO.publish_date) == year)
+    ac_months = base_query.with_entities(extract('month', models.MergedPO.date_ac_ok)).filter(extract('year', models.MergedPO.date_ac_ok) == year)
+    pac_months = base_query.with_entities(extract('month', models.MergedPO.date_pac_ok)).filter(extract('year', models.MergedPO.date_pac_ok) == year)
+    
+    all_months_query = po_months.union(ac_months, pac_months)
+    active_months = db.query(distinct(all_months_query.subquery().c.month)).all()
 
     monthly_data = []
-    for month_row in months:
-        month = month_row.month
+    for month_row in active_months:
+        month = month_row[0]
         if not month: continue
 
-        # For each month, run our powerful conditional aggregation
-        summary = get_financial_summary_by_period(db=db, year=year, month=month)
+        # Pass the user object down to the summary function
+        summary = get_financial_summary_by_period(db=db, year=year, month=month, user=user) # <-- Pass user
         
         total_paid = summary["total_accepted_ac"] + summary["total_accepted_pac"]
         monthly_data.append({
@@ -1140,6 +1158,7 @@ def get_yearly_chart_data(db: Session, year: int):
         })
         
     return sorted(monthly_data, key=lambda x: x['month'])
+
 def get_export_dataframe(
     db: Session,
     internal_project_id: Optional[int] = None,
@@ -2533,7 +2552,7 @@ def get_bcs_export_dataframe(db: Session, search: Optional[str] = None):
             data.append(row)
 
     return pd.DataFrame(data)
-def get_aging_analysis(db: Session):
+def get_aging_analysis(db: Session,user: Optional[models.User] = None):
     """
     Groups the total remaining amount (GAP) into age buckets based on publish_date.
     """
@@ -2565,7 +2584,14 @@ def get_aging_analysis(db: Session):
     ).filter(
         # Only include rows where there IS a gap (gap > 0.01 to avoid float dust)
         gap_expression > 0.01
-    ).group_by(bucket_expression).all()
+    )
+    if user and user.role in [UserRole.PM, UserRole.PD]:
+        base_query = base_query.join(models.InternalProject).filter(
+            models.InternalProject.project_manager_id == user.id
+        )
+    # ----------------------
+
+    results = base_query.group_by(bucket_expression).all()
 
     # Convert to a clean list of dicts, ensuring all buckets exist even if empty
     buckets = {
