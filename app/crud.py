@@ -2700,14 +2700,14 @@ def import_planning_targets(db: Session, df: pd.DataFrame):
         month = row.get("Month")
         
         # Upsert logic
-        target = db.query(models.MonthlyTarget).filter(
-            models.MonthlyTarget.user_id == user_id,
-            models.MonthlyTarget.year == year,
-            models.MonthlyTarget.month == month
+        target = db.query(models.UserPerformanceTarget).filter(
+            models.UserPerformanceTarget.user_id == user_id,
+            models.UserPerformanceTarget.year == year,
+            models.UserPerformanceTarget.month == month
         ).first()
 
         if not target:
-            target = models.MonthlyTarget(user_id=user_id, year=year, month=month)
+            target = models.UserPerformanceTarget(user_id=user_id, year=year, month=month)
             db.add(target)
         
         # Update fields
