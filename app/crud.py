@@ -951,24 +951,41 @@ def get_customer_projects_financial_summary(db: Session):
     return summary_list
 
 
-def get_po_value_by_category(db: Session, user: models.User = None): # <-- Added user
+def get_po_value_by_category(db: Session, user: models.User = None):
+    """
+    Calculates the total PO value for each category, correctly filtered by user role.
+    """
+    # Define the category label once for reuse
     category_label = coalesce(models.MergedPO.category, "TBD").label("category_name")
 
-    base_query = db.query(
-        category_label,
-        func.sum(models.MergedPO.line_amount_hw).label("total_value")
-    )
-    
-    # --- ADD THE FILTER ---
+    # --- THIS IS THE FIX ---
+
+    # 1. Start the query from the main table, MergedPO.
+    base_query = db.query(models.MergedPO)
+
+    # 2. Apply the role-based filter by joining to InternalProject.
+    #    This must be done BEFORE the final select and group_by.
     if user and user.role in [UserRole.PM, UserRole.PD]:
-        base_query = base_query.join(models.InternalProject).filter(
+        base_query = base_query.join(
+            models.InternalProject, 
+            models.MergedPO.internal_project_id == models.InternalProject.id
+        ).filter(
             models.InternalProject.project_manager_id == user.id
         )
-    # ----------------------
 
-    results = base_query.group_by(category_label).all()
+    # 3. Now, with the correct FROM and JOIN clauses established,
+    #    select the final columns and apply the GROUP BY.
+    final_query = base_query.with_entities(
+        category_label,
+        func.sum(models.MergedPO.line_amount_hw).label("total_value")
+    ).group_by(category_label)
+
+    # -----------------------
+
+    results = final_query.all()
     
     return [{"category": row.category_name, "value": row.total_value or 0} for row in results]
+
 
 
 def get_remaining_to_accept_paginated(
