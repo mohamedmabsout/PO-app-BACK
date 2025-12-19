@@ -2578,7 +2578,7 @@ def get_aging_analysis(db: Session,user: Optional[models.User] = None):
     ).label("age_bucket")
 
     # The Query: Sum the GAP, grouped by the Bucket
-    results = db.query(
+    base_query = db.query(
         bucket_expression,
         func.sum(gap_expression).label("total_gap")
     ).filter(
