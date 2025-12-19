@@ -6,7 +6,7 @@ from . import models, schemas
 import pandas as pd
 from sqlalchemy.orm import joinedload,Query
 import sqlalchemy as sa
-from sqlalchemy import func, case, extract, and_,distinct
+from sqlalchemy import func, case, extract, and_,distinct,union_all
 from sqlalchemy.sql.functions import coalesce # More explicit import
 from sqlalchemy.orm import aliased
 from .enum import ProjectType, UserRole
