@@ -39,8 +39,8 @@ def get_internal_projects_overview(
 def get_customer_projects_overview(db: Session = Depends(get_db)):
     return crud.get_customer_projects_financial_summary(db=db)
 @router.get("/value-by-category")
-def get_value_by_category(db: Session = Depends(get_db)):
-    return crud.get_po_value_by_category(db=db)
+def get_value_by_category(db: Session = Depends(get_db), user: models.User = Depends(get_current_user)):
+    return crud.get_po_value_by_category(db=db, user=user)
 @router.get("/yearly-overview", response_model=schemas.FinancialSummary)
 def get_yearly_overview(year: int, db: Session = Depends(get_db),user: models.User = Depends(get_current_user)):
     # Call the new, consolidated function
