@@ -1134,30 +1134,49 @@ def get_yearly_chart_data(db: Session, year: int, user: models.User = None): # <
             models.InternalProject.project_manager_id == user.id
         )
 
-    # Union of all distinct months from the three date columns for the given year
-    po_months = base_query.with_entities(extract('month', models.MergedPO.publish_date)).filter(extract('year', models.MergedPO.publish_date) == year)
-    ac_months = base_query.with_entities(extract('month', models.MergedPO.date_ac_ok)).filter(extract('year', models.MergedPO.date_ac_ok) == year)
-    pac_months = base_query.with_entities(extract('month', models.MergedPO.date_pac_ok)).filter(extract('year', models.MergedPO.date_pac_ok) == year)
+    # --- THIS IS THE FIX ---
+
+    # 2. Define the column we want to extract and give it an explicit label.
+    month_col = extract('month', models.MergedPO.publish_date).label("month_num")
     
-    all_months_query = po_months.union(ac_months, pac_months)
-    active_months = db.query(distinct(all_months_query.subquery().c.month)).all()
+    # 3. Create the UNION queries using the labeled column.
+    po_months = base_query.with_entities(month_col).filter(extract('year', models.MergedPO.publish_date) == year)
+    
+    ac_months = base_query.with_entities(
+        extract('month', models.MergedPO.date_ac_ok).label("month_num")
+    ).filter(extract('year', models.MergedPO.date_ac_ok) == year)
+    
+    pac_months = base_query.with_entities(
+        extract('month', models.MergedPO.date_pac_ok).label("month_num")
+    ).filter(extract('year', models.MergedPO.date_pac_ok) == year)
+    
+    # Use union_all for better performance if duplicates are okay (distinct will handle it later).
+    all_months_query = union_all(po_months, ac_months, pac_months).subquery()
+
+    # 4. Now, we can access the column by its explicit name 'month_num'.
+    active_months_query = db.query(distinct(all_months_query.c.month_num))
+    
+    # Fetch the results as a list of tuples and extract the first element of each tuple.
+    active_months = [row[0] for row in active_months_query.all()]
+
+    # -----------------------
 
     monthly_data = []
-    for month_row in active_months:
-        month = month_row[0]
+    for month in active_months:
         if not month: continue
 
         # Pass the user object down to the summary function
-        summary = get_financial_summary_by_period(db=db, year=year, month=month, user=user) # <-- Pass user
+        summary = get_financial_summary_by_period(db=db, year=year, month=month, user=user)
         
-        total_paid = summary["total_accepted_ac"] + summary["total_accepted_pac"]
+        total_paid = (summary.get("total_accepted_ac", 0) or 0) + (summary.get("total_accepted_pac", 0) or 0)
         monthly_data.append({
             "month": month,
-            "total_po_value": summary["total_po_value"],
+            "total_po_value": summary.get("total_po_value", 0) or 0,
             "total_paid": total_paid
         })
         
     return sorted(monthly_data, key=lambda x: x['month'])
+
 
 def get_export_dataframe(
     db: Session,
