@@ -28,6 +28,11 @@ class BCStatus(str, enum.Enum):
     APPROVED = "APPROVED"
     REJECTED = "REJECTED"
     SUBMITTED = "SUBMITTED"   # <-- NEW STATE
+
+class BCType(str, enum.Enum):
+    STANDARD = "STANDARD"
+    PERSONNE_PHYSIQUE = "PERSONNE_PHYSIQUE"
+
 class NotificationType(str, enum.Enum):
     TODO = "TODO"       # Action Required (e.g., Approve BC)
     APP = "APP"         # Status Update (e.g., Your BC was approved)

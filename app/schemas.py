@@ -361,6 +361,8 @@ class BCItemCreate(BaseModel):
 class BCCreate(BaseModel):
     internal_project_id: int
     sbc_id: int
+    bc_type: str
+    
     items: List[BCItemCreate]
 
 class SBCCreate(BaseModel):

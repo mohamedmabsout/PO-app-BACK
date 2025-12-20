@@ -2008,6 +2008,7 @@ def create_bon_de_commande(db: Session, bc_data: schemas.BCCreate, creator_id: i
         project_id=bc_data.internal_project_id,
         sbc_id=bc_data.sbc_id,
         status=models.BCStatus.DRAFT,
+        bc_type=bc_data.bc_type,
         creator_id=creator_id,
         year=datetime.now().year
     )
@@ -2051,8 +2052,12 @@ def create_bon_de_commande(db: Session, bc_data: schemas.BCCreate, creator_id: i
         # Logic: Find tax based on PO Category + Current Year
         # (Assuming the tax applies to the year the BC is created)
         current_year = datetime.now().year
-        tax_rate_val = get_tax_rate(db, category=po.category, year=current_year)
-        
+        if bc_data.bc_type == models.BCType.PERSONNE_PHYSIQUE:
+            tax_rate_val = 0.0 # No Tax for individuals
+        else:
+            # Standard logic
+            tax_rate_val = get_tax_rate(db, category=po.category, year=current_year)
+
         line_tax = line_amount_sbc * tax_rate_val
         
         # 3. Create Item
@@ -2572,10 +2577,12 @@ def get_bcs_export_dataframe(db: Session, search: Optional[str] = None):
         }
 
         # Add a row for EACH item in the BC
-        for item in bc.items:
+        for index, item in enumerate(bc.items, start=1): # Use enumerate for counter
             row = header_info.copy() # Copy header info
             # Add Item specific info
             row.update({
+                "BC line": index, # <-- NEW COLUMN
+
                 "PO ID": item.merged_po.po_id if item.merged_po else "",
                 "BC ID": f"{bc.bc_number}-{item.line_number}",
                 "Site Code": item.merged_po.site_code if item.merged_po else "",

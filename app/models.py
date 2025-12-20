@@ -1,7 +1,7 @@
 import datetime
 from sqlalchemy import Boolean, Column, Date, Enum, ForeignKey, Integer, String, Float, DateTime
 
-from .enum import ProjectType, UserRole, SBCStatus, BCStatus, NotificationType
+from .enum import ProjectType, UserRole, SBCStatus, BCStatus, NotificationType, BCType
 from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, Text, Date, Enum, ForeignKey
 from .database import Base
 from sqlalchemy.orm import relationship
@@ -360,6 +360,7 @@ class BonDeCommande(Base):
     total_amount_ttc = Column(Float, default=0.0) # HT + Tax
     
     status = Column(Enum(BCStatus), default=BCStatus.DRAFT)
+    bc_type = Column(Enum(BCType), default=BCType.STANDARD, nullable=False)
 
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     rejection_reason = Column(String(500), nullable=True)
