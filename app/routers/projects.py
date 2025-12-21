@@ -320,14 +320,14 @@ async def upload_site_dispatcher_excel(
         print("Dispatch Excel error:", e)
 
 @router.get("/pending-approvals", response_model=List[schemas.MergedPO]) # Use appropriate schema
-def get_my_pending_sites(db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_active_user)):
+def get_my_pending_sites(db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
     return crud.get_pending_sites_for_pm(db, current_user.id)
 
 @router.post("/review-assignments")
 def review_assignments(
     payload: schemas.ReviewPayload,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_active_user)
+    current_user: models.User = Depends(auth.get_current_user)
 ):
     count = crud.process_assignment_review(db, payload.site_ids, payload.action, current_user)
     return {"message": f"Successfully processed {count} sites."}

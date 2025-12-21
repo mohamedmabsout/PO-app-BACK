@@ -57,3 +57,15 @@ docker compose restart backend
 
 
 pip freeze > requirements.txt
+
+
+#DATABASE upgrade
+
+1- local models changes 
+2- push 
+3- docker compose exec backend alembic upgrade head
+  if good : 4- docker compose exec backend alembic revision --autogenerate -m "Add columns"
+if not:
+    4- set the migration number as the local one 
+    5- docker compose exec backend alembic upgrade head
+    6- docker compose exec backend alembic revision --autogenerate -m "Add columns"
