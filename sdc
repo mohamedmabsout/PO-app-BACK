@@ -44,7 +44,7 @@ docker compose exec backend bash
 
 
 # 7. (Inside container) Generate the migration script
-alembic revision --autogenerate -m "Add acceptance columns"
+alembic revision --autogenerate -m "Add columns"
 
 # 8. (Inside container) Apply the migration
 alembic upgrade head

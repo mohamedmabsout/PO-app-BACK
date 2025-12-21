@@ -432,6 +432,9 @@ class BCItemResponse(BCItemCreate):
 class BCResponse(BaseModel):
     id: int
     bc_number: str
+    internal_project: Optional[InternalProject] = None
+    sbc: Optional[SBCResponse] = None
+    bc_type: str
     status: str
     total_amount_ht: float
     total_tax_amount: float
