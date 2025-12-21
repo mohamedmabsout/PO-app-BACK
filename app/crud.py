@@ -877,7 +877,7 @@ def get_internal_projects_financial_summary(db: Session, user: models.User = Non
         models.CustomerProject, models.MergedPO.customer_project_id == models.CustomerProject.id
     ).filter(
         models.MergedPO.assignment_status == models.AssignmentStatus.APPROVED # <--- FILTER ADDED
-    ).group_by(models.CustomerProject.internal_project_id).subquery()
+    ).group_by(models.MergedPO.internal_project_id).subquery()
 
     # 2. Build the main query starting from the InternalProject table.
     query = db.query(
