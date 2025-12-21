@@ -202,7 +202,7 @@ def assign_sites_bulk(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_admin)
 ):
-    result = crud.bulk_assign_sites(db, payload.site_ids, payload.internal_project_id)
+    result = crud.bulk_assign_sites(db, payload.site_ids, payload.internal_project_id, current_user)
     
     if result["updated"] == 0 and result["skipped"] > 0:
         return {"message": "Warning: No sites updated. All selected sites are already assigned to other projects.", "details": result}
