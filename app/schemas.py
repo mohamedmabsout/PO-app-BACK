@@ -513,3 +513,7 @@ class ChangePasswordSchema(BaseModel):
 
 class AdminResetPasswordRequest(BaseModel):
     new_password: str
+class ReviewPayload(BaseModel):
+    site_ids: List[int]
+    action: str # "APPROVE" or "REJECT"
+    comments: Optional[str] = None

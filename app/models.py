@@ -1,7 +1,7 @@
 import datetime
 from sqlalchemy import Boolean, Column, Date, Enum, ForeignKey, Integer, String, Float, DateTime
 
-from .enum import ProjectType, UserRole, SBCStatus, BCStatus, NotificationType, BCType
+from .enum import ProjectType, UserRole, SBCStatus, BCStatus, NotificationType, BCType,AssignmentStatus
 from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, Text, Date, Enum, ForeignKey
 from .database import Base
 from sqlalchemy.orm import relationship
@@ -226,6 +226,8 @@ class MergedPO(Base):
     publish_date = Column(DateTime)
 
     category = Column(String(100), nullable=True)
+    assignment_status = Column(Enum(AssignmentStatus), default=AssignmentStatus.APPROVED, nullable=False)
+    
     
     total_ac_amount = Column(Float, nullable=True)
     accepted_ac_amount = Column(Float, nullable=True)

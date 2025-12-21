@@ -2416,9 +2416,68 @@ def bulk_assign_sites(db: Session, site_ids: List[int], target_project_id: int):
         synchronize_session=False
     )
     
+    # Update to PENDING_APPROVAL instead of just assigning
+    db.query(models.MergedPO).filter(models.MergedPO.site_id.in_(site_ids)).update({
+        "internal_project_id": target_project_id,
+        "assignment_status": models.AssignmentStatus.PENDING_APPROVAL
+    }, synchronize_session=False)
+    
+    db.commit()
+
+    # NOTIFICATION: Notify the PM of the target project
+    target_project = db.query(models.InternalProject).get(target_project_id)
+    if target_project and target_project.project_manager_id:
+        create_notification(
+            db, 
+            recipient_id=target_project.project_manager_id,
+            type=models.NotificationType.TODO,
+            title="New Sites Assigned",
+            message=f"{len(site_ids)} new sites assigned to {target_project.name}. Please review.",
+            link="/projects/approvals" # New page we will build
+        )
+    
+    return {"updated": len(site_ids)}
+def get_pending_sites_for_pm(db: Session, pm_id: int):
+    # Find projects managed by this PM
+    return db.query(models.MergedPO).join(models.InternalProject).filter(
+        models.InternalProject.project_manager_id == pm_id,
+        models.MergedPO.assignment_status == models.AssignmentStatus.PENDING_APPROVAL
+    ).all()
+
+# 3. NEW: Process PM Decision (Approve/Reject)
+def process_assignment_review(db: Session, site_ids: List[int], action: str, pm_user: models.User):
+    # action is 'APPROVE' or 'REJECT'
+    
+    records = db.query(models.MergedPO).filter(models.MergedPO.site_id.in_(site_ids)).all()
+    
+    tbd_project = db.query(models.InternalProject).filter(models.InternalProject.name == "To Be Determined").first()
+    
+    admin_ids = [] # Collect Admins to notify
+    # In a real app, you might query all users with role='ADMIN'
+    
+    for po in records:
+        if action == 'APPROVE':
+            po.assignment_status = models.AssignmentStatus.APPROVED
+        elif action == 'REJECT':
+            # Revert to TBD
+            po.internal_project_id = tbd_project.id
+            po.assignment_status = models.AssignmentStatus.APPROVED # Approved as TBD
+            
     db.commit()
     
-    return {"updated": len(valid_site_ids), "skipped": skipped_count}
+    # Notify Admins (Simple version: notify all admins)
+    admins = db.query(models.User).filter(models.User.role == "ADMIN").all()
+    for admin in admins:
+        create_notification(
+            db,
+            recipient_id=admin.id,
+            type=models.NotificationType.APP,
+            title=f"Site Assignment Update",
+            message=f"{pm_user.first_name} {action}D {len(site_ids)} sites.",
+            link="/site-dispatcher"
+        )
+        
+    return len(records)
 
 def search_merged_pos_by_site_codes(
     db: Session, 
