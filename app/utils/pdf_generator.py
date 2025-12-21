@@ -1,20 +1,23 @@
 import os
+import io
 from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import cm, mm
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image
 from reportlab.lib.enums import TA_LEFT, TA_RIGHT, TA_CENTER
-from xml.sax.saxutils import escape # Import this
+from xml.sax.saxutils import escape
+
+# Assuming you import your models to check the Enum
+from .. import models 
 
 def generate_bc_pdf(bc):
-    # 1. Setup File Path
-    filename = f"generated_bcs/{bc.bc_number}.pdf"
-    os.makedirs(os.path.dirname(filename), exist_ok=True)
-
-    # 2. Document Setup (Portrait A4 to match screenshot vertical flow)
+    # 1. Setup Buffer (Use BytesIO instead of writing to disk for cleaner API response)
+    buffer = io.BytesIO()
+    
+    # 2. Document Setup
     doc = SimpleDocTemplate(
-        filename,
+        buffer,
         pagesize=A4,
         rightMargin=10 * mm,
         leftMargin=10 * mm,
@@ -34,58 +37,75 @@ def generate_bc_pdf(bc):
         'Bold', parent=styles['Normal'], fontSize=8, leading=10, fontName='Helvetica-Bold'
     )
     style_title = ParagraphStyle(
-        'Title', parent=styles['Normal'], fontSize=16, leading=20, fontName='Helvetica-Bold'
+        'Title', parent=styles['Normal'], fontSize=16, leading=20, fontName='Helvetica-Bold', alignment=TA_CENTER
     )
 
-    # --- HEADER SECTION ---
-    # Logo (Left) and Title (Right)
-    logo_path = "logo.png" # Make sure this file exists in root or provide absolute path
-    if os.path.exists(logo_path):
-        logo = Image(logo_path, width=4*cm, height=2*cm)
-    else:
-        logo = Paragraph("<b>[LOGO]</b>", style_title)
+    # --- CHECK BC TYPE ---
+    is_standard = (bc.bc_type == models.BCType.STANDARD)
 
-    # Top Header Table
-    header_data = [
-        [logo, Paragraph("<b>Purchase Order</b>", style_title)],
-        [Paragraph(f"<b>Subcontract No.:</b> {bc.bc_number}", style_bold)]
-    ]
-    
-    t_header = Table(header_data, colWidths=[10*cm, 9*cm])
-    t_header.setStyle(TableStyle([
-        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
-        ('ALIGN', (1,0), (1,0), 'RIGHT'), # Title align right
-        ('ALIGN', (1,1), (1,1), 'RIGHT'),
-        ('BOTTOMPADDING', (0,0), (-1,-1), 10),
-    ]))
-    elements.append(t_header)
+    # ==========================
+    # 1. HEADER SECTION
+    # ==========================
+    if is_standard:
+        # --- STANDARD HEADER (With Logo & Company Info) ---
+        logo_path = "logo.png" 
+        if os.path.exists(logo_path):
+            logo = Image(logo_path, width=4*cm, height=2*cm)
+        else:
+            logo = Paragraph("<b>[SIB LOGO]</b>", style_title)
+
+        header_data = [
+            [logo, Paragraph("<b>BON DE COMMANDE</b>", style_title)],
+            [Paragraph(f"<b>N° BC:</b> {bc.bc_number}", style_bold)]
+        ]
+        
+        t_header = Table(header_data, colWidths=[10*cm, 9*cm])
+        t_header.setStyle(TableStyle([
+            ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+            ('ALIGN', (1,0), (1,0), 'RIGHT'),
+            ('ALIGN', (1,1), (1,1), 'RIGHT'),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 10),
+        ]))
+        elements.append(t_header)
+    else:
+        # --- PERSONNE PHYSIQUE HEADER (Minimal / Anonymous) ---
+        # No Logo. Just the Title.
+        elements.append(Spacer(1, 1*cm))
+        elements.append(Paragraph("BON DE COMMANDE", style_title))
+        elements.append(Spacer(1, 0.5*cm))
+        elements.append(Paragraph(f"<b>N° BC:</b> {bc.bc_number}", style_bold))
+        elements.append(Paragraph(f"<b>Date:</b> {bc.created_at.strftime('%d/%m/%Y')}", style_normal))
+
     elements.append(Spacer(1, 0.5*cm))
 
-    # --- ADDRESS BLOCK (Ship To / Bill To) ---
-    # Left: Supplier (SBC), Right: Bill To (Your Company/SIB)
+
+    # ==========================
+    # 2. ADDRESS BLOCK
+    # ==========================
     
-    # Supplier Info
+    # Supplier Info (Always shown)
     sbc_info = [
-        [Paragraph("<b>Ship To / Supplier:</b>", style_bold)],
-        [Paragraph(f"<b>Name:</b> {bc.sbc.ceo_name or ''}", style_normal)],
-        [Paragraph(f"<b>Company:</b> {bc.sbc.name}", style_normal)],
-        [Paragraph(f"<b>Phone:</b> {bc.sbc.phone_1 or ''}", style_normal)],
-        [Paragraph(f"<b>Fax:</b> -", style_normal)],
-        [Paragraph(f"<b>Currency:</b> MAD", style_normal)],
-      
+        [Paragraph("<b>Fournisseur / Prestataire:</b>", style_bold)],
+        [Paragraph(f"<b>Nom:</b> {bc.sbc.name}", style_normal)],
+        [Paragraph(f"<b>Contact:</b> {bc.sbc.phone_1 or '-'}", style_normal)],
     ]
 
-    # Bill To Info (Static or Configurable)
-    bill_to_info = [
-        [Paragraph("<b>Bill To:</b>", style_bold)],
-        [Paragraph(f"<b>Name:</b> Finance Dept", style_normal)],
-        [Paragraph(f"<b>Company:</b> SOLUTION INTEGRALE BUILDING (SIB)", style_normal)],
-        [Paragraph(f"<b>Address:</b> 123 Main St, Casablanca, Morocco", style_normal)],
-        [Paragraph(f"<b>Phone:</b> +212 5 22 00 00 00", style_normal)],
-        [Paragraph(f"<b>Tax Rate:</b> See Details", style_normal)],
-        [Paragraph(f"<b>Project Info:</b> {bc.internal_project.name}", style_normal)],
-        [Paragraph(f"<b>Created Date:</b> {bc.created_at.strftime('%Y-%m-%d')}", style_normal)],
-    ]
+    # Bill To Info (Conditioned)
+    bill_to_info = []
+    if is_standard:
+        bill_to_info = [
+            [Paragraph("<b>Facturer à:</b>", style_bold)],
+            [Paragraph("SOLUTION INTEGRALE BUILDING (SIB)", style_normal)],
+            [Paragraph("123 Main St, Casablanca, Morocco", style_normal)],
+            [Paragraph("ICE: 0011223344", style_normal)],
+        ]
+    else:
+        # For Personne Physique, we might want to hide the "Bill To" or show minimal info
+        # Or just show project info
+        bill_to_info = [
+            [Paragraph("<b>Détails Projet:</b>", style_bold)],
+            [Paragraph(f"{bc.internal_project.name}", style_normal)],
+        ]
 
     # Combine into a 2-column table
     address_table_data = [[
@@ -96,68 +116,60 @@ def generate_bc_pdf(bc):
     t_address = Table(address_table_data, colWidths=[9.5*cm, 9.5*cm])
     t_address.setStyle(TableStyle([
         ('VALIGN', (0,0), (-1,-1), 'TOP'),
-        ('LINEBELOW', (0,0), (-1,-1), 0.5, colors.lightgrey), # Separator line
+        ('LINEBELOW', (0,0), (-1,-1), 0.5, colors.lightgrey),
     ]))
     elements.append(t_address)
     elements.append(Spacer(1, 0.5*cm))
 
-    # --- MAIN ITEMS TABLE ---
-    # Columns based on screenshot: 
-    # Line No, Site Code, Description, UOM, Unit Price, Qty, Sub Total, Tax Rate, Start, End
+
+    # ==========================
+    # 3. MAIN ITEMS TABLE
+    # ==========================
     
-    table_headers = [
-        "Line", "Site Code", "Description", "UOM", 
-        "Unit Price", "Qty", "Sub Total", "Tax"
-    ]
-    
+    # Define Columns based on Type
+    if is_standard:
+        # Standard: Include Tax column
+        table_headers = ["Line", "Site Code", "Description", "UOM", "Unit Price", "Qty", "Total HT", "Tax"]
+        col_widths = [0.8*cm, 2.5*cm, 6.0*cm, 1.0*cm, 2.0*cm, 1.0*cm, 2.2*cm, 1.5*cm]
+    else:
+        # PP: Remove Tax column, expand Description
+        table_headers = ["Line", "Site Code", "Description", "UOM", "Unit Price", "Qty", "Total"]
+        col_widths = [0.8*cm, 2.5*cm, 7.5*cm, 1.0*cm, 2.0*cm, 1.0*cm, 2.2*cm]
+
     data = [table_headers]
     
     for idx, item in enumerate(bc.items):
-        # Format Dates
-        start = item.merged_po.publish_date.strftime('%Y-%m-%d') if item.merged_po.publish_date else "-"
-        # End date logic? For now assume +3 months or same as start
-        end = "-" 
         raw_desc = item.merged_po.item_description or ""
-        clean_desc = escape(raw_desc) # Converts '<' to '&lt;', '&' to '&amp;' etc.
-        
+        clean_desc = escape(raw_desc)
         raw_site = item.merged_po.site_code or ""
         clean_site = escape(raw_site)
+        
         row = [
             str(idx + 1),
-            Paragraph(clean_site or "", style_normal),
-            Paragraph(clean_desc or "", style_normal),
-            "Unit", # UOM
+            Paragraph(clean_site, style_normal),
+            Paragraph(clean_desc, style_normal),
+            "Unit",
             f"{item.unit_price_sbc:,.2f}",
             str(item.quantity_sbc),
             f"{item.line_amount_sbc:,.2f}",
-            f"{int(item.applied_tax_rate * 100)}%",
-            
         ]
+        
+        # Add Tax column only for Standard
+        if is_standard:
+            row.append(f"{int(item.applied_tax_rate * 100)}%")
+            
         data.append(row)
-
-    # Column Widths (Tweaked to fit A4 Portrait)
-    col_widths = [
-        0.8*cm, # Line
-        2.5*cm, # Site
-        5.0*cm, # Desc (Wide)
-        1.0*cm, # UOM
-        2.0*cm, # Price
-        1.0*cm, # Qty
-        2.2*cm, # SubTotal
-        1.0*cm, # Tax
-        1.8*cm, # Start
-        1.8*cm  # End
-    ]
 
     t_items = Table(data, colWidths=col_widths, repeatRows=1)
     
     t_items.setStyle(TableStyle([
         ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
         ('FONTSIZE', (0,0), (-1,-1), 7),
-        ('BACKGROUND', (0,0), (-1,0), colors.whitesmoke), # Header BG
+        ('BACKGROUND', (0,0), (-1,0), colors.whitesmoke),
         ('ALIGN', (0,0), (-1,-1), 'LEFT'),
-        ('ALIGN', (4,0), (7,-1), 'RIGHT'), # Numbers align right
-        ('GRID', (0,0), (-1,-1), 0.5, colors.black), # Full Grid
+        # Adjust alignment for numbers
+        ('ALIGN', (4,0), (-1,-1), 'RIGHT'), 
+        ('GRID', (0,0), (-1,-1), 0.5, colors.black),
         ('VALIGN', (0,0), (-1,-1), 'TOP'),
         ('LEFTPADDING', (0,0), (-1,-1), 2),
         ('RIGHTPADDING', (0,0), (-1,-1), 2),
@@ -166,12 +178,24 @@ def generate_bc_pdf(bc):
     elements.append(t_items)
     elements.append(Spacer(1, 0.5*cm))
 
-    # --- TOTALS SECTION (Right Aligned) ---
-    totals_data = [
-        ["Total Amount (Exclude Tax):", f"{bc.total_amount_ht:,.2f}"],
-        ["Total Tax Amount:", f"{bc.total_tax_amount:,.2f}"],
-        ["Total Amount (Include Tax):", f"{bc.total_amount_ttc:,.2f}"]
-    ]
+
+    # ==========================
+    # 4. TOTALS SECTION
+    # ==========================
+    
+    totals_data = []
+    
+    if is_standard:
+        totals_data = [
+            ["Total HT:", f"{bc.total_amount_ht:,.2f}"],
+            ["Total TVA:", f"{bc.total_tax_amount:,.2f}"],
+            ["Total TTC:", f"{bc.total_amount_ttc:,.2f} MAD"]
+        ]
+    else:
+        # Only show the Net Pay for PP
+        totals_data = [
+            ["Net à Payer:", f"{bc.total_amount_ht:,.2f} MAD"]
+        ]
     
     t_totals = Table(totals_data, colWidths=[5*cm, 3*cm])
     t_totals.setStyle(TableStyle([
@@ -186,18 +210,28 @@ def generate_bc_pdf(bc):
     elements.append(t_totals_container)
     elements.append(Spacer(1, 1*cm))
 
-    # --- LEGAL NOTES ---
-    notes_text = """
-    <b>Notes:</b><br/>
-    1. This Purchase Order (“PO”) is governed by all applicable agreements executed between the Supplier named under this PO and 
-    SIB, whether by physical signature or online.<br/>
-    2. Within forty-eight (48) hours after receipting this PO, Supplier shall either confirm its acceptance or inquire about it.<br/>
-    3. The PO number and the applicable line number(s) shall appear on each invoice.<br/>
-    4. Any change made to an existing PO shall be subject to written confirmation.
-    """
+
+    # ==========================
+    # 5. FOOTER & NOTES
+    # ==========================
     
-    elements.append(Paragraph(notes_text, style_normal))
+    # Only show legal notes if it's a Standard BC
+    if is_standard:
+        notes_text = """
+        <b>Notes:</b><br/>
+        1. This Purchase Order is governed by the agreements executed between the Supplier and SIB.<br/>
+        2. Payment terms as agreed in the Framework Contract.
+        """
+        elements.append(Paragraph(notes_text, style_normal))
+        
+        # Footer
+        # (Usually handled by canvas.saveState/restoreState in a page template, 
+        # but simplistic approach here for single page)
+        elements.append(Spacer(1, 1*cm))
+        footer = Paragraph("<i>SIB S.A.R.L - RC: 12345 - ICE: 0011223344 - Casablanca</i>", style_normal)
+        elements.append(footer)
 
     # Build PDF
     doc.build(elements)
-    return filename
+    buffer.seek(0)
+    return buffer
