@@ -825,7 +825,10 @@ def get_filtered_merged_pos(
         
     return query
 def get_total_financial_summary(db: Session, user: models.User = None) -> dict:
-    query = db.query(
+    base_query = db.query(models.MergedPO).filter(
+        models.MergedPO.assignment_status == models.AssignmentStatus.APPROVED
+    )
+    query = base_query.query(
         func.sum(models.MergedPO.line_amount_hw).label("total_po_value"),
         func.sum(models.MergedPO.accepted_ac_amount).label("total_accepted_ac"),
         func.sum(models.MergedPO.accepted_pac_amount).label("total_accepted_pac")
@@ -859,43 +862,43 @@ def get_total_financial_summary(db: Session, user: models.User = None) -> dict:
         "remaining_gap": remaining_gap
     }
 def get_internal_projects_financial_summary(db: Session, user: models.User = None):
-    """
-    Calculates the financial summary for internal projects in a single, efficient query,
-    including project manager details.
-    """
     # 1. Create a subquery to pre-aggregate all financial data from MergedPO.
-    # This is efficient and avoids GROUP BY complexity in the main query.
+    # CRITICAL UPDATE: Filter by APPROVED status here.
+    
+    # Note: MergedPO now links to CustomerProject, not InternalProject directly.
+    # We must join to aggregate correctly by InternalProject.
+    
     po_summary_subquery = db.query(
-        models.MergedPO.internal_project_id,
+        models.CustomerProject.internal_project_id, # Group by Internal Project ID
         func.sum(models.MergedPO.line_amount_hw).label("total_po_value"),
         (func.coalesce(func.sum(models.MergedPO.accepted_ac_amount), 0) + 
          func.coalesce(func.sum(models.MergedPO.accepted_pac_amount), 0)).label("total_accepted")
-    ).group_by(models.MergedPO.internal_project_id).subquery()
+    ).join(
+        models.CustomerProject, models.MergedPO.customer_project_id == models.CustomerProject.id
+    ).filter(
+        models.MergedPO.assignment_status == models.AssignmentStatus.APPROVED # <--- FILTER ADDED
+    ).group_by(models.CustomerProject.internal_project_id).subquery()
 
     # 2. Build the main query starting from the InternalProject table.
-    #    This ensures we get all projects, even those without POs yet.
     query = db.query(
         models.InternalProject,
         po_summary_subquery.c.total_po_value,
         po_summary_subquery.c.total_accepted
     ).outerjoin(
-        # Use an outerjoin in case a project has no POs yet
         po_summary_subquery, 
         models.InternalProject.id == po_summary_subquery.c.internal_project_id
     ).options(
-        # Eagerly load the related project_manager (User) object in the same query
         joinedload(models.InternalProject.project_manager)
     )
 
-    # 3. Apply role-based filtering if a user is provided
-    if user and user.role in [UserRole.PM, UserRole.PD]:
-        # Filter to only show projects managed by the current user
+    # 3. Apply role-based filtering
+    if user and user.role in [models.UserRole.PM, models.UserRole.PD]:
         query = query.filter(models.InternalProject.project_manager_id == user.id)
 
-    # 4. Execute the single query
+    # 4. Execute
     results = query.all()
  
-    # 5. Process the results in memory (NO MORE DATABASE QUERIES)
+    # 5. Process results
     summary_list = []
     for project, total_po, total_acc in results:
         po_value = total_po or 0
@@ -906,7 +909,6 @@ def get_internal_projects_financial_summary(db: Session, user: models.User = Non
         summary_list.append({
             "project_id": project.id,
             "project_name": project.name,
-            # This works because we used joinedload() to fetch the related User object
             "project_manager": project.project_manager, 
             "total_po_value": po_value,
             "total_accepted": accepted,
@@ -916,24 +918,27 @@ def get_internal_projects_financial_summary(db: Session, user: models.User = Non
         
     return summary_list
 
+
 def get_customer_projects_financial_summary(db: Session):
     results = db.query(
         models.CustomerProject.id.label("project_id"),
         models.CustomerProject.name.label("project_name"),
-        # Use coalesce to turn NULL sums into 0.0
         func.coalesce(func.sum(models.MergedPO.line_amount_hw), 0).label("total_po_value"),
         (
             func.coalesce(func.sum(models.MergedPO.accepted_ac_amount), 0) + 
             func.coalesce(func.sum(models.MergedPO.accepted_pac_amount), 0)
         ).label("total_accepted")
     ).outerjoin( 
-        # Use outerjoin (LEFT JOIN) so projects with no POs still show up
-        models.MergedPO, models.CustomerProject.id == models.MergedPO.customer_project_id
+        models.MergedPO, 
+        and_(
+            models.CustomerProject.id == models.MergedPO.customer_project_id,
+            # --- UPDATE: Filter inside the JOIN ---
+            models.MergedPO.assignment_status == models.AssignmentStatus.APPROVED
+        )
     ).group_by(models.CustomerProject.id, models.CustomerProject.name).all()
     
     summary_list = []
     for row in results:
-        # Data is already clean from the query, but we cast to float to be safe
         po_value = float(row.total_po_value)
         accepted = float(row.total_accepted)
         
@@ -949,7 +954,6 @@ def get_customer_projects_financial_summary(db: Session):
             "completion_percentage": completion
         })
     return summary_list
-
 
 def get_po_value_by_category(db: Session, user: models.User = None):
     """
@@ -1120,13 +1124,17 @@ def get_financial_summary_by_period(
         po_date_filters.append(func.week(models.MergedPO.publish_date, 3) == week)
         ac_date_filters.append(func.week(models.MergedPO.date_ac_ok, 3) == week)
         pac_date_filters.append(func.week(models.MergedPO.date_pac_ok, 3) == week)
+        # Only count POs that have been formally approved for their project
+    status_filter = (models.MergedPO.assignment_status == models.AssignmentStatus.APPROVED)
 
     # --- Perform conditional aggregation on the (potentially filtered) base_query ---
     summary = base_query.with_entities(
-        func.sum(case((and_(*po_date_filters), models.MergedPO.line_amount_hw), else_=0)).label("total_po_value"),
-        func.sum(case((and_(*ac_date_filters), models.MergedPO.accepted_ac_amount), else_=0)).label("total_accepted_ac"),
-        func.sum(case((and_(*pac_date_filters), models.MergedPO.accepted_pac_amount), else_=0)).label("total_accepted_pac")
+        # Add the status filter to every SUM condition using AND
+        func.sum(case((and_(*po_date_filters, status_filter), models.MergedPO.line_amount_hw), else_=0)).label("total_po_value"),
+        func.sum(case((and_(*ac_date_filters, status_filter), models.MergedPO.accepted_ac_amount), else_=0)).label("total_accepted_ac"),
+        func.sum(case((and_(*pac_date_filters, status_filter), models.MergedPO.accepted_pac_amount), else_=0)).label("total_accepted_pac")
     ).one()
+
 
     # Process results (no change here)
     total_po_value = summary.total_po_value or 0.0
@@ -1143,20 +1151,24 @@ def get_financial_summary_by_period(
 
 # --- Also, let's fix the get_yearly_chart_data function ---
 
-def get_yearly_chart_data(db: Session, year: int, user: models.User = None): # <-- Added user
-    # We need to find all months that have ANY activity for this user
+def get_yearly_chart_data(db: Session, year: int, user: models.User = None):
+    # Base query for MergedPO
     base_query = db.query(models.MergedPO)
-    if user and user.role in [UserRole.PM, UserRole.PD]:
-        base_query = base_query.join(models.InternalProject).filter(
+    
+    # Filter: Only Approved POs
+    base_query = base_query.filter(models.MergedPO.assignment_status == models.AssignmentStatus.APPROVED)
+
+    # Filter: User Role (PM/PD)
+    if user and user.role in [models.UserRole.PM, models.UserRole.PD]:
+        # Since MergedPO doesn't link directly to InternalProject anymore,
+        # we must join through CustomerProject -> InternalProject
+        base_query = base_query.join(models.CustomerProject).join(models.InternalProject).filter(
             models.InternalProject.project_manager_id == user.id
         )
 
-    # --- THIS IS THE FIX ---
-
-    # 2. Define the column we want to extract and give it an explicit label.
+    # --- Identify Active Months ---
     month_col = extract('month', models.MergedPO.publish_date).label("month_num")
     
-    # 3. Create the UNION queries using the labeled column.
     po_months = base_query.with_entities(month_col).filter(extract('year', models.MergedPO.publish_date) == year)
     
     ac_months = base_query.with_entities(
@@ -1167,22 +1179,17 @@ def get_yearly_chart_data(db: Session, year: int, user: models.User = None): # <
         extract('month', models.MergedPO.date_pac_ok).label("month_num")
     ).filter(extract('year', models.MergedPO.date_pac_ok) == year)
     
-    # Use union_all for better performance if duplicates are okay (distinct will handle it later).
     all_months_query = union_all(po_months, ac_months, pac_months).subquery()
-
-    # 4. Now, we can access the column by its explicit name 'month_num'.
     active_months_query = db.query(distinct(all_months_query.c.month_num))
-    
-    # Fetch the results as a list of tuples and extract the first element of each tuple.
     active_months = [row[0] for row in active_months_query.all()]
 
-    # -----------------------
-
+    # --- Fetch Data ---
     monthly_data = []
     for month in active_months:
         if not month: continue
 
-        # Pass the user object down to the summary function
+        # The helper function 'get_financial_summary_by_period' MUST also be updated 
+        # to filter by APPROVED status (as provided in the previous response).
         summary = get_financial_summary_by_period(db=db, year=year, month=month, user=user)
         
         total_paid = (summary.get("total_accepted_ac", 0) or 0) + (summary.get("total_accepted_pac", 0) or 0)
@@ -1193,6 +1200,7 @@ def get_yearly_chart_data(db: Session, year: int, user: models.User = None): # <
         })
         
     return sorted(monthly_data, key=lambda x: x['month'])
+
 
 
 def get_export_dataframe(
@@ -2346,97 +2354,43 @@ def assign_site_to_internal_project_by_code(
     db.commit()
     return updated_rows
 
-def bulk_assign_sites(db: Session, site_ids: List[int], target_project_id: int):
-    """
-    Assigns sites to a project.
-    CONSTRAINT: Only sites currently in 'To Be Determined' (or unassigned) can be moved.
-    This preserves historical assignments.
-    """
-    
-    # 1. Find the TBD Project ID
+def bulk_assign_sites(db: Session, site_ids: List[int], target_project_id: int, admin_user: models.User):
+    # 1. Get the target project details (needed for the notification text)
+    target_project = db.query(models.InternalProject).get(target_project_id)
+    if not target_project:
+        return {"updated": 0, "error": "Target project not found"}
+
+    # 2. Get the "To Be Determined" project ID to ensure we only move unassigned sites
     tbd_project = db.query(models.InternalProject).filter_by(name="To Be Determined").first()
-    if not tbd_project:
-        # Should not happen, but fail safe
-        return 0
-    tbd_id = tbd_project.id
+    tbd_id = tbd_project.id if tbd_project else 0
 
-    # 2. Filter the requested IDs: Keep only those that are currently TBD
-    # We check the SiteProjectAllocation table. 
-    # Logic: 
-    # - If no allocation exists -> It is TBD (implicitly). ALLOW.
-    # - If allocation exists AND points to TBD -> ALLOW.
-    # - If allocation exists AND points to Project A -> BLOCK.
-    
-    # Let's fetch current allocations for these sites
-    existing_allocations = db.query(models.SiteProjectAllocation).filter(
-        models.SiteProjectAllocation.site_id.in_(site_ids)
-    ).all()
-    
-    # Map site_id -> current_project_id
-    current_map = {a.site_id: a.internal_project_id for a in existing_allocations}
-    
-    valid_site_ids = []
-    skipped_count = 0
-    
-    for sid in site_ids:
-        current_proj = current_map.get(sid)
-        
-        # Condition: Allow if No Allocation OR Allocation is TBD
-        if current_proj is None or current_proj == tbd_id:
-            valid_site_ids.append(sid)
-        else:
-            skipped_count += 1
-
-    if not valid_site_ids:
-        return {"updated": 0, "skipped": skipped_count}
-
-    # 3. Perform Assignment (Upsert Logic) for VALID sites only
-    
-    # A. Delete old TBD allocations if they exist (clean up)
-    db.query(models.SiteProjectAllocation).filter(
-        models.SiteProjectAllocation.site_id.in_(valid_site_ids)
-    ).delete(synchronize_session=False)
-    
-    # B. Insert new allocations
-    new_allocs = [
-        models.SiteProjectAllocation(
-            site_id=sid, 
-            internal_project_id=target_project_id,
-            customer_project_id=1 # Default/Placeholder
-        ) 
-        for sid in valid_site_ids
-    ]
-    db.bulk_save_objects(new_allocs)
-    
-    # 4. Update MergedPO History
-    db.query(models.MergedPO).filter(
-        models.MergedPO.site_id.in_(valid_site_ids)
-    ).update(
-        {models.MergedPO.internal_project_id: target_project_id},
-        synchronize_session=False
-    )
-    
-    # Update to PENDING_APPROVAL instead of just assigning
-    db.query(models.MergedPO).filter(models.MergedPO.site_id.in_(site_ids)).update({
+    # 3. Perform the Update
+    # We update Internal Project AND set Status to PENDING
+    # We only touch sites that are currently TBD (safety check)
+    result = db.query(models.MergedPO).filter(
+        models.MergedPO.site_id.in_(site_ids),
+        models.MergedPO.internal_project_id == tbd_id 
+    ).update({
         "internal_project_id": target_project_id,
         "assignment_status": models.AssignmentStatus.PENDING_APPROVAL
     }, synchronize_session=False)
     
     db.commit()
 
-    # NOTIFICATION: Notify the PM of the target project
-    target_project = db.query(models.InternalProject).get(target_project_id)
-    if target_project and target_project.project_manager_id:
+    # 4. Create Notification
+    # Check if the project actually has a manager assigned
+    if target_project.project_manager_id:
         create_notification(
             db, 
             recipient_id=target_project.project_manager_id,
             type=models.NotificationType.TODO,
-            title="New Sites Assigned",
-            message=f"{len(site_ids)} new sites assigned to {target_project.name}. Please review.",
-            link="/projects/approvals" # New page we will build
+            title="Site Assignment Request",
+            message=f"{result} sites have been assigned to '{target_project.name}' and require your approval.",
+            link="/projects/approvals" # Link to the PM approval page
         )
     
-    return {"updated": len(site_ids)}
+    return {"updated": result}
+
 def get_pending_sites_for_pm(db: Session, pm_id: int):
     # Find projects managed by this PM
     return db.query(models.MergedPO).join(models.InternalProject).filter(
@@ -2446,38 +2400,60 @@ def get_pending_sites_for_pm(db: Session, pm_id: int):
 
 # 3. NEW: Process PM Decision (Approve/Reject)
 def process_assignment_review(db: Session, site_ids: List[int], action: str, pm_user: models.User):
-    # action is 'APPROVE' or 'REJECT'
+    """
+    Handles the PM's decision.
+    action: "APPROVE" or "REJECT"
+    """
     
-    records = db.query(models.MergedPO).filter(models.MergedPO.site_id.in_(site_ids)).all()
+    # 1. Identify the records involved
+    # We filter by site_id AND PENDING status to be safe
+    query = db.query(models.MergedPO).filter(
+        models.MergedPO.site_id.in_(site_ids),
+        models.MergedPO.assignment_status == models.AssignmentStatus.PENDING_APPROVAL
+    )
     
-    tbd_project = db.query(models.InternalProject).filter(models.InternalProject.name == "To Be Determined").first()
-    
-    admin_ids = [] # Collect Admins to notify
-    # In a real app, you might query all users with role='ADMIN'
-    
-    for po in records:
-        if action == 'APPROVE':
-            po.assignment_status = models.AssignmentStatus.APPROVED
-        elif action == 'REJECT':
-            # Revert to TBD
-            po.internal_project_id = tbd_project.id
-            po.assignment_status = models.AssignmentStatus.APPROVED # Approved as TBD
-            
+    count = query.count()
+    if count == 0:
+        return 0
+
+    # 2. Handle Logic
+    if action == "APPROVE":
+        # Simply change status to APPROVED. 
+        # They stay in the project they were assigned to.
+        query.update({
+            "assignment_status": models.AssignmentStatus.APPROVED
+        }, synchronize_session=False)
+
+    elif action == "REJECT":
+        # 1. Find TBD Project
+        tbd_project = db.query(models.InternalProject).filter_by(name="To Be Determined").first()
+        
+        # 2. Revert project ID to TBD
+        # 3. Set status to APPROVED (because they are now officially TBD)
+        query.update({
+            "internal_project_id": tbd_project.id,
+            "assignment_status": models.AssignmentStatus.APPROVED
+        }, synchronize_session=False)
+
     db.commit()
-    
-    # Notify Admins (Simple version: notify all admins)
+
+    # 3. Optional: Notify Admin (The one who assigned them)
+    # Since we don't store WHO assigned them, we can notify all Admins or just log it.
+    # For now, let's notify all admins.
     admins = db.query(models.User).filter(models.User.role == "ADMIN").all()
     for admin in admins:
         create_notification(
             db,
             recipient_id=admin.id,
             type=models.NotificationType.APP,
-            title=f"Site Assignment Update",
-            message=f"{pm_user.first_name} {action}D {len(site_ids)} sites.",
+            title="Assignment Review Completed",
+            message=f"PM {pm_user.first_name} {action.lower()}ed {count} sites.",
             link="/site-dispatcher"
         )
-        
-    return len(records)
+    db.commit() # Commit notifications
+
+    return count
+
 
 def search_merged_pos_by_site_codes(
     db: Session, 
