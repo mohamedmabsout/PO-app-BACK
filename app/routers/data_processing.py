@@ -14,6 +14,9 @@ from datetime import datetime, date
 from xlsxwriter.utility import xl_col_to_name
 from ..utils.pdf_generator import generate_bc_pdf # Import the function
 from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse # <-- Import this
+    
+from backend.app.utils import pdf_generator
  
 router = APIRouter(prefix="/api/data", tags=["data_processing"])
 logger = logging.getLogger(__name__)
@@ -400,13 +403,27 @@ def approve_l2(bc_id: int, db: Session = Depends(get_db), current_user: models.U
     return bc
 
 @router.get("/bc/{bc_id}/pdf")
-def download_bc_pdf(bc_id: int, db: Session = Depends(get_db)):
-    bc = db.query(models.BonDeCommande).get(bc_id)
-    if not bc or bc.status != models.BCStatus.APPROVED:
-        raise HTTPException(status_code=400, detail="BC not approved yet")
+def get_bc_pdf(
+    bc_id: int, 
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_active_user)
+):
+    bc = crud.get_bc_by_id(db, bc_id)
+    if not bc:
+        raise HTTPException(status_code=404, detail="Bon de Commande not found")
     
-    pdf_path = generate_bc_pdf(bc) # Returns path to generated file
-    return FileResponse(pdf_path, filename=f"{bc.bc_number}.pdf", media_type='application/pdf')
+    # 1. Generate PDF into memory buffer
+    pdf_buffer = pdf_generator.generate_bc_pdf(bc)
+    
+    # 2. Return as a stream
+    filename = f"BC_{bc.bc_number}.pdf"
+    
+    return StreamingResponse(
+        pdf_buffer, 
+        media_type="application/pdf", 
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
+
 @router.post("/import/assign-projects-only")
 async def assign_projects_only(
     file: UploadFile = File(...),
