@@ -825,13 +825,13 @@ def get_filtered_merged_pos(
         
     return query
 def get_total_financial_summary(db: Session, user: models.User = None) -> dict:
-    base_query = db.query(models.MergedPO).filter(
-        models.MergedPO.assignment_status == models.AssignmentStatus.APPROVED
-    )
-    query = base_query.query(
+    # base_query = db.query(models.MergedPO)
+    query = db.query(
         func.sum(models.MergedPO.line_amount_hw).label("total_po_value"),
         func.sum(models.MergedPO.accepted_ac_amount).label("total_accepted_ac"),
         func.sum(models.MergedPO.accepted_pac_amount).label("total_accepted_pac")
+    ).filter(
+        models.MergedPO.assignment_status == models.AssignmentStatus.APPROVED
     )
 
     # --- THIS IS THE FIX ---
