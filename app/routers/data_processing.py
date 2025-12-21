@@ -15,8 +15,8 @@ from xlsxwriter.utility import xl_col_to_name
 from ..utils.pdf_generator import generate_bc_pdf # Import the function
 from fastapi.responses import FileResponse
 from fastapi.responses import StreamingResponse # <-- Import this
-    
-from backend.app.utils import pdf_generator
+
+from ..utils import pdf_generator
  
 router = APIRouter(prefix="/api/data", tags=["data_processing"])
 logger = logging.getLogger(__name__)
