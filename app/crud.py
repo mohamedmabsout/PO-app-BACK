@@ -869,7 +869,7 @@ def get_internal_projects_financial_summary(db: Session, user: models.User = Non
     # We must join to aggregate correctly by InternalProject.
     
     po_summary_subquery = db.query(
-        models.CustomerProject.internal_project_id, # Group by Internal Project ID
+        models.MergedPO.internal_project_id, # Group by Internal Project ID
         func.sum(models.MergedPO.line_amount_hw).label("total_po_value"),
         (func.coalesce(func.sum(models.MergedPO.accepted_ac_amount), 0) + 
          func.coalesce(func.sum(models.MergedPO.accepted_pac_amount), 0)).label("total_accepted")
