@@ -406,7 +406,7 @@ def approve_l2(bc_id: int, db: Session = Depends(get_db), current_user: models.U
 def get_bc_pdf(
     bc_id: int, 
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_active_user)
+    current_user: models.User = Depends(auth.get_current_user)
 ):
     bc = crud.get_bc_by_id(db, bc_id)
     if not bc:
