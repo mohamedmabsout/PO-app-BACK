@@ -447,7 +447,7 @@ class BCResponse(BaseModel):
     total_tax_amount: float
     total_amount_ttc: float
     rejection_reason: Optional[str] = None
-    created_by: Optional[UserInfo] = None
+    creator: Optional[UserInfo] = None
     created_at: datetime
     items: List[BCItemResponse]
     model_config = ConfigDict(from_attributes=True)
