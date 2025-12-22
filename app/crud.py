@@ -2243,28 +2243,34 @@ def get_bcs_by_status(db: Session, status: models.BCStatus, search_term: Optiona
         )
     return query.all()
 def get_all_bcs(db: Session, current_user: models.User, search: Optional[str] = None):
-    query = db.query(models.BonDeCommande).options(
-        joinedload(models.BonDeCommande.sbc),
-        joinedload(models.BonDeCommande.internal_project),
-        joinedload(models.BonDeCommande.creator) # <-- EAGERLY LOAD THE CREATOR
-    )
-    # -----------------------
+    query = db.query(models.BonDeCommande)
 
+    # --- MAKE THE JOINEDLOADS EXPLICIT ---
+    # This explicitly tells SQLAlchemy to fetch these related objects.
+    query = query.options(
+        joinedload(models.BonDeCommande.creator),
+        joinedload(models.BonDeCommande.sbc),
+        joinedload(models.BonDeCommande.internal_project).joinedload(models.InternalProject.project_manager)
+    )
+    # ----------------------------------------
+
+    # Apply role-based filtering
     if current_user.role == models.UserRole.PM: 
         query = query.filter(models.BonDeCommande.creator_id == current_user.id)
 
+    # Apply search filter
     if search:
         search_term = f"%{search}%"
-        # The join to SBC and InternalProject is now implicit due to `joinedload`
-        # but we add them here to make the filter explicit and clear
-        query = query.join(models.SBC, isouter=True).join(models.InternalProject, isouter=True).filter(
+        # The joins are already handled by the options, but we can add them here for clarity if needed.
+        query = query.filter(
             (models.BonDeCommande.bc_number.ilike(search_term)) |
             (models.SBC.short_name.ilike(search_term)) |
             (models.InternalProject.name.ilike(search_term))
         )
     
-    # Order by newest first
+    # Order by newest first and execute
     return query.order_by(models.BonDeCommande.created_at.desc()).all()
+
 
 
 def approve_bc_l2(db: Session, bc_id: int, approver_id: int):
