@@ -1073,7 +1073,7 @@ def get_remaining_to_accept_paginated(
     }
 
 # NEW HELPER: Get Stats efficiently without fetching all rows
-def get_remaining_stats(db: Session):
+def get_remaining_stats(db: Session,user: models.User = None) -> dict:
     remaining_expr = models.MergedPO.line_amount_hw - (
         func.coalesce(models.MergedPO.accepted_ac_amount, 0) + func.coalesce(models.MergedPO.accepted_pac_amount, 0)
     )
