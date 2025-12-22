@@ -1651,7 +1651,15 @@ def get_performance_matrix(
 def get_planning_matrix(db: Session, year: int):
     # 1. Get all PMs
     # Using your role logic
-    pms = db.query(models.User).filter(models.User.role.in_(['PM', 'ADMIN', 'PD'])).all()
+    pms_to_process = []
+    if user and user.role in [UserRole.PM, UserRole.PD]:
+        # If the user is a PM or PD, they only see their own data
+        pms_to_process = [user]
+    else: # This covers ADMIN or cases where no user is passed
+        # Admins see everyone
+        pms_to_process = db.query(models.User).filter(
+            models.User.role.in_(['PM', 'ADMIN', 'PD'])
+        ).all()
     
     matrix_data = []
 

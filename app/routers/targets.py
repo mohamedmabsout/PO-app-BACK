@@ -39,11 +39,11 @@ def get_matrix(
         
     return crud.get_performance_matrix(db, year, month, filter_user_id=None)
 @router.get("/yearly-matrix", response_model=List[dict]) # Use generic dict or define strict schema
-def get_yearly_matrix(year: int, db: Session = Depends(get_db)):
-    return crud.get_planning_matrix(db, year)
+def get_yearly_matrix(year: int, db: Session = Depends(get_db),current_user: models.User = Depends(get_current_user)):
+    return crud.get_planning_matrix(db, year,current_user)
 @router.get("/planning/matrix/{year}", response_model=List[dict])
-def get_planning_matrix_endpoint(year: int, db: Session = Depends(get_db)):
-    return crud.get_planning_matrix(db, year)
+def get_planning_matrix_endpoint(year: int, db: Session = Depends(get_db),current_user: models.User = Depends(get_current_user)):
+    return crud.get_planning_matrix(db, year,current_user)
 
 @router.post("/planning/update")
 def update_target_cell(payload: schemas.TargetUpdate, db: Session = Depends(get_db)):
