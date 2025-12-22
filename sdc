@@ -12,6 +12,16 @@ WL-MBTS-LTE FDD-EXP-SE002-PO752-Casa Modernize-Q4-2022
 WL-MBTS-LTE FDD-EXP-JAD1006-PO752-Casa Modernize-Q4-2022
 
 
+# BACK
+git add . 
+git commit -m "jkdcbv"
+git push 
+
+# FRONT
+git add . 
+git commit -m "jkdcbv"
+git push origin ListUsers
+
 # On the server, in your project directory
 
 # Step 1: Stop the running containers
