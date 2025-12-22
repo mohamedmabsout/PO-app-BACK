@@ -2243,16 +2243,13 @@ def get_bcs_by_status(db: Session, status: models.BCStatus, search_term: Optiona
         )
     return query.all()
 def get_all_bcs(db: Session, current_user: models.User, search: Optional[str] = None):
-        query = db.query(models.BonDeCommande).options(
+    query = db.query(models.BonDeCommande).options(
         joinedload(models.BonDeCommande.sbc),
         joinedload(models.BonDeCommande.internal_project),
         
         # --- ADD THIS LINE ---
         joinedload(models.BonDeCommande.creator) 
     )
-
-    # ----------------------------------------
-
     # Apply role-based filtering
     if current_user.role == models.UserRole.PM: 
         query = query.filter(models.BonDeCommande.creator_id == current_user.id)
