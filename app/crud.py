@@ -969,7 +969,7 @@ def get_po_value_by_category(db: Session, user: models.User = None):
 
     # 2. Apply the role-based filter by joining to InternalProject.
     #    This must be done BEFORE the final select and group_by.
-    if user and user.role in [UserRole.PM, UserRole.PD]:
+    if user and user.role in [UserRole.PM]:
         base_query = base_query.join(
             models.InternalProject, 
             models.MergedPO.internal_project_id == models.InternalProject.id
@@ -1025,7 +1025,7 @@ def get_remaining_to_accept_paginated(
         func.abs(remaining_expr) > 0.01
     )
 
-    if user and user.role in [UserRole.PM, UserRole.PD]:
+    if user and user.role in [UserRole.PM]:
         query = query.join(
             models.InternalProject,
             models.MergedPO.internal_project_id == models.InternalProject.id
@@ -1093,7 +1093,7 @@ def get_remaining_stats(db: Session,user: models.User = None) -> dict:
 
     # --- THIS IS THE FIX ---
     # Apply the same role-based filter
-    if user and user.role in [UserRole.PM, UserRole.PD]:
+    if user and user.role in [UserRole.PM]:
         base_query = base_query.join(
             models.InternalProject,
             models.MergedPO.internal_project_id == models.InternalProject.id
@@ -1130,7 +1130,7 @@ def get_financial_summary_by_period(
     base_query = db.query(models.MergedPO)
 
     # If a user is provided and they are a PM or PD, join and filter by their projects.
-    if user and user.role in [UserRole.PM, UserRole.PD]:
+    if user and user.role in [UserRole.PM]:
         base_query = base_query.join(
             models.InternalProject, 
             models.MergedPO.internal_project_id == models.InternalProject.id
@@ -1498,9 +1498,9 @@ def get_performance_matrix(
 ):
     # 1. Get eligible users
     pms_to_process = []
-    if current_user and current_user.role in [UserRole.PM, UserRole.PD]:
+    if current_user and current_user.role in [UserRole.PM]:
         # If the user is a PM or PD, they only see their own data
-        pms_to_process = [user]
+        pms_to_process = [current_user]
     else: # This covers ADMIN or cases where no user is passed
         # Admins see everyone
         pms_to_process = db.query(models.User).filter(
@@ -1658,7 +1658,7 @@ def get_planning_matrix(db: Session, year: int, user: Optional[models.User] = No
     # 1. Get all PMs
     # Using your role logic
     pms_to_process = []
-    if user and user.role in [UserRole.PM, UserRole.PD]:
+    if user and user.role in [UserRole.PM]:
         # If the user is a PM or PD, they only see their own data
         pms_to_process = [user]
     else: # This covers ADMIN or cases where no user is passed
@@ -1769,7 +1769,7 @@ def get_internal_projects_for_user(db: Session, user: models.User):
     if user.role == UserRole.ADMIN:
         return query.order_by(models.InternalProject.name).all()
     
-    elif user.role in [UserRole.PM, UserRole.PD]:
+    elif user.role in [UserRole.PM]:
         return query.filter(models.InternalProject.project_manager_id == user.id).order_by(models.InternalProject.name).all()
     
     else:
@@ -2642,7 +2642,7 @@ def get_aging_analysis(db: Session,user: Optional[models.User] = None):
         # Only include rows where there IS a gap (gap > 0.01 to avoid float dust)
         gap_expression > 0.01
     )
-    if user and user.role in [UserRole.PM, UserRole.PD]:
+    if user and user.role in [UserRole.PM]:
         base_query = base_query.join(models.InternalProject).filter(
             models.InternalProject.project_manager_id == user.id
         )
