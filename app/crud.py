@@ -1830,12 +1830,8 @@ def get_remaining_to_accept_dataframe(
         func.abs(remaining_expr) > 0.01
     )
     # --------------------------------
-    if user.role in [UserRole.PM, UserRole.PD]:
-        query = query.join(
-            models.InternalProject, models.MergedPO.internal_project_id == models.InternalProject.id
-        ).filter(
-            models.InternalProject.project_manager_id == user.id
-        )
+    if user and user.role in [UserRole.PM]:
+        query = query.filter(models.InternalProject.project_manager_id == user.id)
     # Apply filters (no change here)
     if filter_stage != "ALL":
         query = query.filter(stage_expr == filter_stage)
