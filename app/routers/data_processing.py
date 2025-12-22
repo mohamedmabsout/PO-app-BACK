@@ -486,3 +486,16 @@ def get_bc_details(
         raise HTTPException(status_code=404, detail="BC not found")
     return bc
 
+@router.post("/bc/{bc_id}/cancel", status_code=status.HTTP_200_OK)
+def cancel_bc_endpoint(
+    bc_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """Cancels a Bon de Commande if it's in DRAFT status."""
+    try:
+        # Pass the current user to the CRUD function for ownership check
+        crud.cancel_bc(db, bc_id, current_user.id)
+        return {"message": "BC cancelled successfully."}
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))

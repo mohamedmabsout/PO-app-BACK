@@ -7,7 +7,6 @@ from .database import Base
 from sqlalchemy.orm import relationship
 import sqlalchemy as sa 
 from sqlalchemy.sql import func # <--- AJOUTER CET IMPORT
-
 class User(Base):
     __tablename__ = "users"
 
@@ -37,6 +36,8 @@ class User(Base):
     daily_rate = Column(Float, nullable=True, default=0.0)
     is_active = Column(Boolean, default=True)
     reset_token = Column(String(100), nullable=True)
+    created_bcs = relationship("BonDeCommande", back_populates="creator")
+
     notifications = relationship("Notification", back_populates="recipient") 
 
 class Account(Base):

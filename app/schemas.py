@@ -50,7 +50,14 @@ class UserUpdate(BaseModel):
     email: Optional[EmailStr] = None
     role: Optional[str] = None
 
-model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(from_attributes=True)
+class UserInfo(BaseModel):
+    id: int
+    first_name: str
+    last_name: str
+    
+    model_config = ConfigDict(from_attributes=True)
+
 class AccountBase(BaseModel):
     name: str
 
@@ -440,7 +447,7 @@ class BCResponse(BaseModel):
     total_tax_amount: float
     total_amount_ttc: float
     rejection_reason: Optional[str] = None
-    created_by: Optional[User] = None
+    created_by: Optional[UserInfo] = None
     created_at: datetime
     items: List[BCItemResponse]
     model_config = ConfigDict(from_attributes=True)

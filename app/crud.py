@@ -2243,14 +2243,21 @@ def get_bcs_by_status(db: Session, status: models.BCStatus, search_term: Optiona
         )
     return query.all()
 def get_all_bcs(db: Session, current_user: models.User, search: Optional[str] = None):
-    query = db.query(models.BonDeCommande)
+    query = db.query(models.BonDeCommande).options(
+        joinedload(models.BonDeCommande.sbc),
+        joinedload(models.BonDeCommande.internal_project),
+        joinedload(models.BonDeCommande.creator) # <-- EAGERLY LOAD THE CREATOR
+    )
+    # -----------------------
+
     if current_user.role == models.UserRole.PM: 
         query = query.filter(models.BonDeCommande.creator_id == current_user.id)
 
     if search:
         search_term = f"%{search}%"
-        # Join to search related names
-        query = query.join(models.SBC).join(models.InternalProject).filter(
+        # The join to SBC and InternalProject is now implicit due to `joinedload`
+        # but we add them here to make the filter explicit and clear
+        query = query.join(models.SBC, isouter=True).join(models.InternalProject, isouter=True).filter(
             (models.BonDeCommande.bc_number.ilike(search_term)) |
             (models.SBC.short_name.ilike(search_term)) |
             (models.InternalProject.name.ilike(search_term))
@@ -2258,6 +2265,7 @@ def get_all_bcs(db: Session, current_user: models.User, search: Optional[str] = 
     
     # Order by newest first
     return query.order_by(models.BonDeCommande.created_at.desc()).all()
+
 
 def approve_bc_l2(db: Session, bc_id: int, approver_id: int):
     bc = db.query(models.BonDeCommande).get(bc_id)
@@ -2824,3 +2832,22 @@ def import_planning_targets(db: Session, df: pd.DataFrame):
 
     db.commit()
     return count
+
+def cancel_bc(db: Session, bc_id: int, user_id: int):
+    """Deletes a BC if it's in DRAFT and owned by the user."""
+    bc = db.query(models.BonDeCommande).get(bc_id)
+
+    if not bc:
+        raise ValueError("BC not found.")
+    
+    # Security Check: Only the creator can cancel it
+    if bc.creator_id != user_id:
+        raise ValueError("Forbidden: You are not the creator of this BC.")
+
+    # Business Logic Check: Can only cancel drafts
+    if bc.status != models.BCStatus.DRAFT:
+        raise ValueError("Forbidden: Only BCs in Draft status can be cancelled.")
+
+    # Perform the deletion
+    db.delete(bc)
+    db.commit()
