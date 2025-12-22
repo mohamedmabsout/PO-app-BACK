@@ -36,7 +36,11 @@ class User(Base):
     daily_rate = Column(Float, nullable=True, default=0.0)
     is_active = Column(Boolean, default=True)
     reset_token = Column(String(100), nullable=True)
-    created_bcs = relationship("BonDeCommande", back_populates="creator", foreign_keys='BonDeCommande.creator_id')
+    created_bcs = relationship(
+        "BonDeCommande", 
+        back_populates="creator", 
+        foreign_keys="BonDeCommande.creator_id"
+    )
 
     notifications = relationship("Notification", back_populates="recipient") 
 
@@ -369,7 +373,12 @@ class BonDeCommande(Base):
     rejection_reason = Column(String(500), nullable=True)
 
     creator_id = Column(Integer, ForeignKey("users.id"))
-    creator = relationship("User", foreign_keys=[creator_id])
+    # Define the creator relationship with its corresponding back-population.
+    creator = relationship(
+        "User", 
+        back_populates="created_bcs", 
+        foreign_keys=[creator_id]
+    )
     # Relationships
     internal_project = relationship("InternalProject")
     sbc = relationship("SBC")
