@@ -1,7 +1,7 @@
 """Fix circular dependency in User-BonDeCommande relationship
 
 Revision ID: b0324b406b8b
-Revises: 2158942b9b06
+Revises: 1a2a7cd9d778
 Create Date: 2025-12-22 12:28:33.981981
 
 """
@@ -13,7 +13,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = 'b0324b406b8b'
-down_revision: Union[str, Sequence[str], None] = '2158942b9b06'
+down_revision: Union[str, Sequence[str], None] = '1a2a7cd9d778'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
