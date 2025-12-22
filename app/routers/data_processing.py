@@ -269,11 +269,11 @@ def get_remaining_pos(
 ):
     data = crud.get_remaining_to_accept_paginated(
                 db, page, size, filter_stage, 
-                search, internal_project_id, customer_project_id
+                search, internal_project_id, customer_project_id,user=current_user
     )
     # Note: Stats are usually global, calculating them with filters might be expensive 
     # but let's keep the global stats for the cards at the top
-    stats = crud.get_remaining_stats(db) 
+    stats = crud.get_remaining_stats(db,user=current_user) 
     
     return {
         "data": data,

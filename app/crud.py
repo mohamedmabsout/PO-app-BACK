@@ -1000,7 +1000,9 @@ def get_remaining_to_accept_paginated(
     # --- NEW FILTERS ---
     search: Optional[str] = None,
     internal_project_id: Optional[int] = None,
-    customer_project_id: Optional[int] = None
+    customer_project_id: Optional[int] = None,
+        user: models.User = None  # <-- Add user parameter
+
 ):
     # 1. Define SQL Expressions (Same as before)
     remaining_expr = models.MergedPO.line_amount_hw - (
@@ -1023,6 +1025,11 @@ def get_remaining_to_accept_paginated(
         func.abs(remaining_expr) > 0.01
     )
 
+    if user and user.role in [UserRole.PM, UserRole.PD]:
+        query = query.join(
+            models.InternalProject,
+            models.MergedPO.internal_project_id == models.InternalProject.id
+        ).filter(models.InternalProject.project_manager_id == user.id)
 
     # 3. Apply Filters
     if filter_stage != "ALL":
@@ -1076,16 +1083,36 @@ def get_remaining_stats(db: Session):
         else_="PARTIAL_GAP"
     )
     
-    # We group by stage and sum the gap
-    stats = db.query(
-        stage_expr.label("stage"),
-        func.count(models.MergedPO.id).label("count"),
-        func.sum(remaining_expr).label("total_gap")
+    base_query = db.query(
+    stage_expr.label("stage"),
+    func.count(models.MergedPO.id).label("count"),
+    func.sum(remaining_expr).label("total_gap")
     ).filter(
         func.abs(remaining_expr) > 0.01
-    ).group_by(stage_expr).all()
+    )
+
+    # --- THIS IS THE FIX ---
+    # Apply the same role-based filter
+    if user and user.role in [UserRole.PM, UserRole.PD]:
+        base_query = base_query.join(
+            models.InternalProject,
+            models.MergedPO.internal_project_id == models.InternalProject.id
+        ).filter(models.InternalProject.project_manager_id == user.id)
+    # -----------------------
+
+    # Now group by and execute on the (potentially filtered) query
+    stats = base_query.group_by(stage_expr).all()
     
-    return {row.stage: {"count": row.count, "gap": row.total_gap or 0} for row in stats}
+    # Initialize all buckets to 0
+    all_stages = ["WAITING_AC", "WAITING_PAC", "PARTIAL_GAP"]
+    result_dict = {stage: {"count": 0, "gap": 0.0} for stage in all_stages}
+
+    # Populate the dictionary with actual results
+    for row in stats:
+        if row.stage in result_dict:
+            result_dict[row.stage] = {"count": row.count, "gap": row.total_gap or 0}
+
+    return result_dict
 
 
 def get_financial_summary_by_period(
@@ -1749,96 +1776,6 @@ def get_internal_project_selector_for_user(db: Session, user: models.User, searc
         query = query.filter(models.InternalProject.name.ilike(f"%{search}%"))
         
     return query.limit(20).all()
-def get_remaining_to_accept_paginated(
-    db: Session, 
-    page: int = 1, 
-    size: int = 20, 
-    filter_stage: str = "ALL",
-    search: Optional[str] = None,
-    internal_project_id: Optional[int] = None,
-    customer_project_id: Optional[int] = None
-):
-    # 1. Expressions
-    remaining_expr = models.MergedPO.line_amount_hw - (
-        func.coalesce(models.MergedPO.accepted_ac_amount, 0) + 
-        func.coalesce(models.MergedPO.accepted_pac_amount, 0)
-    )
-    
-    stage_expr = case(
-        (models.MergedPO.date_ac_ok.is_(None), "WAITING_AC"),
-        (and_(models.MergedPO.date_ac_ok.isnot(None), models.MergedPO.date_pac_ok.is_(None)), "WAITING_PAC"),
-        else_="PARTIAL_GAP"
-    )
-
-    # 2. Base Query with Eager Loading (To get Project Names)
-    query = db.query(
-        models.MergedPO,
-        remaining_expr.label("remaining_amount"),
-        stage_expr.label("remaining_stage")
-    ).options(
-        joinedload(models.MergedPO.internal_project), # <--- Critical for Project Name
-        joinedload(models.MergedPO.customer_project)  # <--- Critical for Customer Project Name
-    ).filter(
-        func.abs(remaining_expr) > 0.01
-    )
-
-    # 3. APPLY FILTERS (This is the part that was likely failing)
-    
-    # Stage Filter
-    if filter_stage != "ALL":
-        query = query.filter(stage_expr == filter_stage)
-        
-    # Internal Project Filter
-    if internal_project_id:
-        query = query.filter(models.MergedPO.internal_project_id == internal_project_id)
-        
-    # Customer Project Filter
-    if customer_project_id:
-        query = query.filter(models.MergedPO.customer_project_id == customer_project_id)
-
-    # Search Filter
-    if search:
-        term = f"%{search}%"
-        query = query.filter(
-            (models.MergedPO.po_no.ilike(term)) | 
-            (models.MergedPO.site_code.ilike(term)) |
-            (models.MergedPO.item_description.ilike(term))
-        )
-
-    # 4. Pagination
-    total_items = query.count()
-    results = query.order_by(models.MergedPO.publish_date.desc())\
-                   .offset((page - 1) * size).limit(size).all()
-
-    # 5. Format Output
-    items = []
-    for po, rem_amount, stage in results:
-        po_dict = po.__dict__.copy() # Copy to avoid mutation issues
-        if '_sa_instance_state' in po_dict: del po_dict['_sa_instance_state']
-        
-        po_dict['remaining_amount'] = rem_amount
-        po_dict['remaining_stage'] = stage
-        
-        # --- FIX: Populate Names manually if serialization fails ---
-        if po.internal_project:
-            po_dict['internal_project_name'] = po.internal_project.name
-        else:
-            po_dict['internal_project_name'] = "—"
-            
-        if po.customer_project:
-            po_dict['customer_project_name'] = po.customer_project.name
-        else:
-            po_dict['customer_project_name'] = "—"
-
-        items.append(po_dict)
-
-    return {
-        "items": items,
-        "total_items": total_items,
-        "page": page,
-        "size": size,
-        "total_pages": (total_items + size - 1) // size
-    }
 
 def get_remaining_to_accept_dataframe(
     db: Session,

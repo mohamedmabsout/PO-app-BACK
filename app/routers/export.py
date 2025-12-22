@@ -21,7 +21,9 @@ def export_remaining_to_accept(
     search: Optional[str] = None,
     internal_project_id: Optional[int] = None,
     customer_project_id: Optional[int] = None,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+        current_user: models.User = Depends(auth.get_current_user)
+
 ):
     """
     Génère et renvoie un fichier Excel en se basant sur les filtres fournis.
