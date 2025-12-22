@@ -1102,7 +1102,7 @@ def get_remaining_stats(db: Session,user: models.User = None) -> dict:
 
     # Now group by and execute on the (potentially filtered) query
     stats = base_query.group_by(stage_expr).all()
-    
+
     # Initialize all buckets to 0
     all_stages = ["WAITING_AC", "WAITING_PAC", "PARTIAL_GAP"]
     result_dict = {stage: {"count": 0, "gap": 0.0} for stage in all_stages}
@@ -1785,9 +1785,10 @@ def get_remaining_to_accept_dataframe(
     customer_project_id: Optional[int] = None
 ) -> pd.DataFrame:
     """
-    Construit une requête pour l'export "Remaining To Accept" en se basant sur les filtres,
-    et retourne un DataFrame Pandas prêt à être exporté.
+    Builds a query for the "Remaining To Accept" export based on filters,
+    and returns a Pandas DataFrame ready for export.
     """
+    # Define SQL expressions
     remaining_expr = models.MergedPO.line_amount_hw - (
         func.coalesce(models.MergedPO.accepted_ac_amount, 0) + 
         func.coalesce(models.MergedPO.accepted_pac_amount, 0)
@@ -1798,13 +1799,19 @@ def get_remaining_to_accept_dataframe(
         else_="PARTIAL_GAP"
     )
 
-    # --- CORRECTION DE LA REQUÊTE AVEC LES BONNES JOINTURES ---
+    # --- THIS IS THE UPDATED QUERY ---
     query = db.query(
+        # 1. Add the new requested columns
+        models.MergedPO.po_id,
         models.MergedPO.po_no,
+        models.MergedPO.po_line_no,
+        func.concat(models.User.first_name, " ", models.User.last_name).label("pm_name"),
+        models.InternalProject.name.label("internal_project_name"),
+
+        # 2. Keep the original columns
         models.MergedPO.site_code,
         models.MergedPO.item_description,
-        models.InternalProject.name.label("internal_project_name"), # On sélectionne le nom depuis la table jointe
-        models.CustomerProject.name.label("customer_project_name"), # Idem pour le projet client
+        models.CustomerProject.name.label("customer_project_name"),
         models.MergedPO.line_amount_hw,
         models.MergedPO.accepted_ac_amount,
         models.MergedPO.accepted_pac_amount,
@@ -1814,12 +1821,16 @@ def get_remaining_to_accept_dataframe(
     ).select_from(models.MergedPO).outerjoin(
         models.InternalProject, models.MergedPO.internal_project_id == models.InternalProject.id
     ).outerjoin(
+        # Add a join to the User table to get the PM name
+        models.User, models.InternalProject.project_manager_id == models.User.id
+    ).outerjoin(
         models.CustomerProject, models.MergedPO.customer_project_id == models.CustomerProject.id
     ).filter(
         func.abs(remaining_expr) > 0.01
     )
+    # --------------------------------
 
-    # 3. On applique les mêmes filtres que pour la pagination
+    # Apply filters (no change here)
     if filter_stage != "ALL":
         query = query.filter(stage_expr == filter_stage)
     if internal_project_id:
@@ -1834,18 +1845,23 @@ def get_remaining_to_accept_dataframe(
             (models.MergedPO.item_description.ilike(term))
         )
     
-    # 4. On exécute la requête et on la charge dans un DataFrame SANS pagination
+    # Execute query and load into DataFrame (no change here)
     df = pd.read_sql(query.statement, db.bind)
 
     if df.empty:
         return pd.DataFrame()
 
-    # 5. On renomme les colonnes pour le fichier Excel
+    # --- THIS IS THE UPDATED RENAMING ---
+    # Rename the columns for the final Excel file output
     df.rename(columns={
+        'po_id': 'PO ID',
         'po_no': 'PO Number',
+        'po_line_no': 'PO Line',
+        'pm_name': 'PM',
+        'internal_project_name': 'Internal Project',
+        'customer_project_name': 'Customer Project',
         'site_code': 'Site Code',
         'item_description': 'Item Description',
-        'name': 'Internal Project', # Nom de colonne après la jointure
         'line_amount_hw': 'Total PO Value',
         'accepted_ac_amount': 'Accepted AC',
         'accepted_pac_amount': 'Accepted PAC',
@@ -1853,9 +1869,9 @@ def get_remaining_to_accept_dataframe(
         'remaining_stage': 'Stage',
         'publish_date': 'Publish Date'
     }, inplace=True)
+    # ------------------------------------
     
-    return df
-   
+    return df   
 def get_eligible_pos_for_bc(
     db: Session, 
     project_id: int, 
