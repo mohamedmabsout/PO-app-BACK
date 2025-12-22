@@ -1493,17 +1493,23 @@ def get_performance_matrix(
     db: Session, 
     year: int, 
     month: Optional[int] = None, 
-    filter_user_id: Optional[int] = None
+    filter_user_id: Optional[int] = None,
+    current_user: models.User = None
 ):
     # 1. Get eligible users
-    query = db.query(models.User).filter(models.User.role.in_(['PM', 'ADMIN', 'PD']))
-    if filter_user_id:
-        query = query.filter(models.User.id == filter_user_id)
-    pms = query.all()
+    pms_to_process = []
+    if current_user and current_user.role in [UserRole.PM, UserRole.PD]:
+        # If the user is a PM or PD, they only see their own data
+        pms_to_process = [user]
+    else: # This covers ADMIN or cases where no user is passed
+        # Admins see everyone
+        pms_to_process = db.query(models.User).filter(
+            models.User.role.in_(['PM', 'ADMIN', 'PD'])
+        ).all()
     
     results = []
 
-    for pm in pms:
+    for pm in pms_to_process:
         # A. Fetch Targets (Plan) - STRICTLY FOR THE PERIOD
         target_query = db.query(
             func.sum(models.UserPerformanceTarget.po_monthly_update),
@@ -1648,7 +1654,7 @@ def get_performance_matrix(
 #         })
 
 #     return matrix_data
-def get_planning_matrix(db: Session, year: int):
+def get_planning_matrix(db: Session, year: int, user: Optional[models.User] = None):
     # 1. Get all PMs
     # Using your role logic
     pms_to_process = []
@@ -1663,7 +1669,7 @@ def get_planning_matrix(db: Session, year: int):
     
     matrix_data = []
 
-    for pm in pms:
+    for pm in pms_to_process:
         # --- Initialize 12-month arrays for ALL 6 data rows ---
         po_master = [0.0] * 12
         po_update = [0.0] * 12
