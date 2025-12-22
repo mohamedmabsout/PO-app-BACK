@@ -1782,7 +1782,8 @@ def get_remaining_to_accept_dataframe(
     filter_stage: str = "ALL",
     search: Optional[str] = None,
     internal_project_id: Optional[int] = None,
-    customer_project_id: Optional[int] = None
+    customer_project_id: Optional[int] = None,
+    user: models.User = None
 ) -> pd.DataFrame:
     """
     Builds a query for the "Remaining To Accept" export based on filters,
@@ -1829,7 +1830,12 @@ def get_remaining_to_accept_dataframe(
         func.abs(remaining_expr) > 0.01
     )
     # --------------------------------
-
+    if user.role in [UserRole.PM, UserRole.PD]:
+        query = query.join(
+            models.InternalProject, models.MergedPO.internal_project_id == models.InternalProject.id
+        ).filter(
+            models.InternalProject.project_manager_id == user.id
+        )
     # Apply filters (no change here)
     if filter_stage != "ALL":
         query = query.filter(stage_expr == filter_stage)

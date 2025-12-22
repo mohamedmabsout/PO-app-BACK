@@ -34,7 +34,8 @@ def export_remaining_to_accept(
         filter_stage=filter_stage,
         search=search,
         internal_project_id=internal_project_id,
-        customer_project_id=customer_project_id
+        customer_project_id=customer_project_id,
+        user=current_user
     )
 
     if df.empty:
