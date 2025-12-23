@@ -2794,8 +2794,8 @@ def import_planning_targets(db: Session, df: pd.DataFrame):
             db.add(target)
         
         # Update fields
-        target.po_master_plan = row.get("PO Receive (Master Plan)", 0)
-        target.po_monthly_update = row.get("PO Receive (Monthly Update)", 0)
+        target.po_master_plan = row.get("PO (Master Plan)", 0)
+        target.po_monthly_update = row.get("PO (Monthly Update)", 0)
         target.acceptance_master_plan = row.get("Acceptance (Master Plan)", 0)
         target.acceptance_monthly_update = row.get("Acceptance (Monthly Update)", 0)
         
