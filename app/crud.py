@@ -435,7 +435,7 @@ def process_po_file_background(file_path: str, history_id: int, user_id: int):
         history = db.query(models.UploadHistory).get(history_id)
         if history:
             history.status = "SUCCESS"
-            history.total_rows = len(new_record_ids) # Or updated_count, whichever you prefer to track
+            history.total_rows = processed_count # Or updated_count, whichever you prefer to track
             history.notes = f"Processed {processed_count} MergedPOs"
             db.commit()
             
