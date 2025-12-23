@@ -428,14 +428,15 @@ def process_po_file_background(file_path: str, history_id: int, user_id: int):
         
         # 2. Run the existing logic
         # Note: We pass the db session we just created
-       create_raw_purchase_orders_from_dataframe(db, df, user_id)
+        new_record_ids = create_raw_purchase_orders_from_dataframe(db, df, user_id)
         processed_count = process_and_merge_pos(db)
         
         # 3. Update History to SUCCESS
         history = db.query(models.UploadHistory).get(history_id)
         if history:
             history.status = "SUCCESS"
-            history.total_rows = processed_count
+            history.total_rows = len(new_record_ids) # Or updated_count, whichever you prefer to track
+            history.notes = f"Processed {processed_count} MergedPOs"
             db.commit()
             
         # Optional: Send Notification to User here using create_notification
@@ -480,7 +481,7 @@ def process_acceptance_file_background(file_path: str, history_id: int, user_id:
             history.status = "SUCCESS"
             history.total_rows = len(new_record_ids) # Or updated_count, whichever you prefer to track
             # Optionally store detailed info in a note column if you have one
-            # history.notes = f"Updated {updated_count} MergedPOs"
+            history.notes = f"Updated {updated_count} MergedPOs"
             db.commit()
 
         # Optional: Send Notification to User
