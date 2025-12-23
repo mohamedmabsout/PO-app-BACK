@@ -17,6 +17,10 @@ import os
 import shutil
 from pathlib import Path
 from .database import SessionLocal # Import the session factory
+import logging
+logger = logging.getLogger(__name__)
+
+
 UPLOAD_DIR = "uploads/sbc_docs"
 
 PAYMENT_TERM_MAP = {
@@ -443,7 +447,7 @@ def process_po_file_background(file_path: str, history_id: int, user_id: int):
         
     except Exception as e:
         # 4. Handle Errors
-        print(f"Background processing error: {e}")
+        logger.error(f"Background Task Failed: {e}", exc_info=True) # exc_info gives the traceback
         db.rollback()
         history = db.query(models.UploadHistory).get(history_id)
         if history:
@@ -481,7 +485,7 @@ def process_acceptance_file_background(file_path: str, history_id: int, user_id:
             acceptance_df[col] = pd.to_numeric(acceptance_df[col], errors='coerce').fillna(0)
 
 
-        raw_count = create_raw_acceptances_from_dataframe(db, acceptance_df, current_user.id)
+        raw_count = create_raw_acceptances_from_dataframe(db, acceptance_df, user_id)
         # Call the core logic function in py to do all the work
         updated_count = process_acceptance_dataframe(db=db, acceptance_df=acceptance_df)
         history_record.status = "SUCCESS"
@@ -501,7 +505,7 @@ def process_acceptance_file_background(file_path: str, history_id: int, user_id:
 
     except Exception as e:
         # 5. Handle Errors
-        print(f"Background Acceptance processing error: {e}")
+        logger.error(f"Background Task Failed: {e}", exc_info=True)
         db.rollback()
         history = db.query(models.UploadHistory).get(history_id)
         if history:
