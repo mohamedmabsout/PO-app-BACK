@@ -38,7 +38,6 @@ def upload_and_process_acceptances(
         filename=file.filename,
         status="PROCESSING",
         user_id=current_user.id,
-        upload_type="Acceptance",  # Ensure this matches your Enum/String for acceptance types
     )
 
     try:
