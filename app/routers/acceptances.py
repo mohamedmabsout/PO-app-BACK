@@ -9,6 +9,7 @@ from ..dependencies import get_db
 from .. import crud
 from ..auth import get_current_user  # Import your authentication dependency
 from .. import models  # To specify the user model type
+from fastapi import BackgroundTasks # Import this
 
 router = APIRouter(
     prefix="/api/acceptances",

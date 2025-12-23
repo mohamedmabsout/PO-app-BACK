@@ -15,6 +15,7 @@ from xlsxwriter.utility import xl_col_to_name
 from ..utils.pdf_generator import generate_bc_pdf  # Import the function
 from fastapi.responses import FileResponse
 from fastapi.responses import StreamingResponse  # <-- Import this
+from fastapi import BackgroundTasks # Import this
 
 from ..utils import pdf_generator
 
