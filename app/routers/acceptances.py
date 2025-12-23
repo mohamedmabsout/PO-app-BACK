@@ -70,6 +70,5 @@ def upload_and_process_acceptances(
         history_record.status = "FAILED"
         history_record.error_message = f"Upload failed: {str(e)}"
         db.commit()
-        raise HTTPException(
-            status_code=500, detail="Failed to save file for processing."
-        )
+        raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
+
