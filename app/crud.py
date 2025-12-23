@@ -466,7 +466,6 @@ def process_acceptance_file_background(file_path: str, history_id: int, user_id:
     
     try:
         # 1. Read the file
-         contents = file.file.read()
         acceptance_df = pd.read_excel(file_path)
         column_mapping = {
             'ShipmentNO.': 'shipment_no', 'AcceptanceQty': 'acceptance_qty', 'ApplicationProcessed': 'application_processed_date',
