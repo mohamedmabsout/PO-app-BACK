@@ -2175,6 +2175,24 @@ def reject_sbc(db: Session, sbc_id: int):
     sbc.status = models.SBCStatus.BLACKLISTED # Or return to Draft logic if you prefer
     db.commit()
     return sbc
+def cancel_bc(db: Session, bc_id: int, user_id: int):
+    """Deletes a BC if it's in DRAFT and owned by the user."""
+    bc = db.query(models.BonDeCommande).get(bc_id)
+
+    if not bc:
+        raise ValueError("BC not found.")
+    
+    # Security Check: Only the creator can cancel it
+    if bc.creator_id != user_id:
+        raise ValueError("Forbidden: You are not the creator of this BC.")
+
+    # Business Logic Check: Can only cancel drafts
+    if bc.status != models.BCStatus.DRAFT:
+        raise ValueError("Forbidden: Only BCs in Draft status can be cancelled.")
+
+    # Perform the deletion
+    db.delete(bc)
+    db.commit()
 
 def submit_bc(db: Session, bc_id: int):
     """Moves BC from DRAFT to SUBMITTED (Ready for L1)"""
@@ -2804,21 +2822,3 @@ def import_planning_targets(db: Session, df: pd.DataFrame):
     db.commit()
     return count
 
-def cancel_bc(db: Session, bc_id: int, user_id: int):
-    """Deletes a BC if it's in DRAFT and owned by the user."""
-    bc = db.query(models.BonDeCommande).get(bc_id)
-
-    if not bc:
-        raise ValueError("BC not found.")
-    
-    # Security Check: Only the creator can cancel it
-    if bc.creator_id != user_id:
-        raise ValueError("Forbidden: You are not the creator of this BC.")
-
-    # Business Logic Check: Can only cancel drafts
-    if bc.status != models.BCStatus.DRAFT:
-        raise ValueError("Forbidden: Only BCs in Draft status can be cancelled.")
-
-    # Perform the deletion
-    db.delete(bc)
-    db.commit()

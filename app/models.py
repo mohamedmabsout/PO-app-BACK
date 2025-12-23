@@ -382,7 +382,13 @@ class BonDeCommande(Base):
     # Relationships
     internal_project = relationship("InternalProject")
     sbc = relationship("SBC")
-    items = relationship("BCItem", back_populates="bc")
+    items = relationship(
+        "BCItem", 
+        back_populates="bc",
+        # --- THIS IS THE FIX ---
+        cascade="all, delete-orphan"
+    )
+
     submitted_at = Column(DateTime, nullable=True)
     
     # L1 Approval (Project Director)
