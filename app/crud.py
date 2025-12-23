@@ -16,6 +16,7 @@ import re
 import os
 import shutil
 from pathlib import Path
+from .database import SessionLocal # Import the session factory
 
 UPLOAD_DIR = "uploads/sbc_docs"
 

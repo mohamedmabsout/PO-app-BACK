@@ -16,7 +16,8 @@ from ..utils.pdf_generator import generate_bc_pdf  # Import the function
 from fastapi.responses import FileResponse
 from fastapi.responses import StreamingResponse  # <-- Import this
 from fastapi import BackgroundTasks # Import this
-
+import shutil
+import os
 from ..utils import pdf_generator
 
 router = APIRouter(prefix="/api/data", tags=["data_processing"])
