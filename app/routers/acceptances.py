@@ -24,7 +24,7 @@ def upload_and_process_acceptances(
     background_tasks: BackgroundTasks,  # <-- Add this parameter
     file: UploadFile = File(..., description="The Acceptance Excel file"),
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user),
+    current_user: models.User = Depends(get_current_user),
 ):
     if not file.filename.endswith((".xlsx", ".xls")):
         raise HTTPException(
