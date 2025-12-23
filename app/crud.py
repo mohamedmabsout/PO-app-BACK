@@ -466,23 +466,28 @@ def process_acceptance_file_background(file_path: str, history_id: int, user_id:
     
     try:
         # 1. Read the file
-        acceptance_df = pd.read_excel(file_path)
-        
-        # 2. Run the existing logic: Create Raw Records
-        # This function returns the list of IDs
-        new_record_ids = create_raw_acceptances_from_dataframe(db, acceptance_df, user_id)
-        
-        # 3. Run the existing logic: Process those records
-        updated_count = process_acceptance_dataframe(db, raw_acceptance_ids=new_record_ids)
-        
-        # 4. Update History to SUCCESS
-        history = db.query(models.UploadHistory).get(history_id)
-        if history:
-            history.status = "SUCCESS"
-            history.total_rows = len(new_record_ids) # Or updated_count, whichever you prefer to track
-            # Optionally store detailed info in a note column if you have one
-            history.notes = f"Updated {updated_count} MergedPOs"
-            db.commit()
+         contents = file.file.read()
+        acceptance_df = pd.read_excel(io.BytesIO(contents))
+        column_mapping = {
+            'ShipmentNO.': 'shipment_no', 'AcceptanceQty': 'acceptance_qty', 'ApplicationProcessed': 'application_processed_date',
+            'PONo.': 'po_no', 'POLineNo.': 'po_line_no', 
+        }
+        acceptance_df.rename(columns=column_mapping, inplace=True)
+        # Basic validation and type conversion
+        acceptance_df['application_processed_date'] = pd.to_datetime(acceptance_df['application_processed_date'])
+        numeric_cols = [
+            'acceptance_qty', 'po_line_no', 'shipment_no',
+        ]
+        for col in numeric_cols:
+            acceptance_df[col] = pd.to_numeric(acceptance_df[col], errors='coerce').fillna(0)
+
+
+        raw_count = create_raw_acceptances_from_dataframe(db, acceptance_df, current_user.id)
+        # Call the core logic function in py to do all the work
+        updated_count = process_acceptance_dataframe(db=db, acceptance_df=acceptance_df)
+        history_record.status = "SUCCESS"
+        history_record.total_rows = raw_count # Store how many rows were in the file
+        db.commit()
 
         # Optional: Send Notification to User
         create_notification(
@@ -2373,7 +2378,7 @@ def reject_bc(db: Session, bc_id: int, reason: str, rejector_id: int):
     db.commit()
     return bc
 
-# backend/app/crud.py
+# backend/app/py
 from sqlalchemy.orm import joinedload
 
 def get_bc_by_id(db: Session, bc_id: int):
