@@ -461,50 +461,64 @@ def process_po_file_background(file_path: str, history_id: int, user_id: int):
         # Delete the temp file to save space
         if os.path.exists(file_path):
             os.remove(file_path)
+# backend/app/crud.py
+
 def process_acceptance_file_background(file_path: str, history_id: int, user_id: int):
     """
-    Background task to process the Acceptance file.
+    Background task: Reads file, saves raw data, triggers processing, updates history.
     """
-    # Create a NEW database session for this background task
     db = SessionLocal()
-    
     try:
-        # 1. Read the file
+        # 1. Read and Clean the Excel File
         acceptance_df = pd.read_excel(file_path)
+        
+        # Standardize Headers (Excel -> DB Column Names)
         column_mapping = {
-            'ShipmentNO.': 'shipment_no', 'AcceptanceQty': 'acceptance_qty', 'ApplicationProcessed': 'application_processed_date',
-            'PONo.': 'po_no', 'POLineNo.': 'po_line_no', 
+            'ShipmentNO.': 'shipment_no', 
+            'AcceptanceQty': 'acceptance_qty', 
+            'ApplicationProcessed': 'application_processed_date',
+            'PONo.': 'po_no', 
+            'POLineNo.': 'po_line_no', 
         }
         acceptance_df.rename(columns=column_mapping, inplace=True)
-        # Basic validation and type conversion
-        acceptance_df['application_processed_date'] = pd.to_datetime(acceptance_df['application_processed_date'])
-        numeric_cols = [
-            'acceptance_qty', 'po_line_no', 'shipment_no',
-        ]
-        for col in numeric_cols:
+        
+        # Data Type Conversion & Validation
+        acceptance_df['application_processed_date'] = pd.to_datetime(acceptance_df['application_processed_date'], errors='coerce')
+        for col in ['acceptance_qty', 'po_line_no', 'shipment_no']:
             acceptance_df[col] = pd.to_numeric(acceptance_df[col], errors='coerce').fillna(0)
 
+        # Drop invalid rows
+        acceptance_df.dropna(subset=['po_no', 'po_line_no'], inplace=True)
 
-        raw_count = create_raw_acceptances_from_dataframe(db, acceptance_df, user_id)
-        # Call the core logic function in py to do all the work
-        updated_count = process_acceptance_dataframe(db=db, acceptance_df=acceptance_df)
-        history_record.status = "SUCCESS"
-        history_record.total_rows = raw_count # Store how many rows were in the file
-        db.commit()
+        # 2. Save Raw Data and GET THE IDs
+        # We need the IDs to ensure we only process THIS file's data
+        new_record_ids = create_raw_acceptances_from_dataframe(db, acceptance_df, user_id)
 
-        # Optional: Send Notification to User
+        # 3. Process Only These Specific Records
+        updated_count = process_acceptances_by_ids(db, new_record_ids)
+
+        # 4. Success: Update History & Notify
+        history_record = db.query(models.UploadHistory).get(history_id)
+        if history_record:
+            history_record.status = "SUCCESS"
+            history_record.total_rows = len(new_record_ids)
+            # Optional: Add details about how many POs were actually updated
+            # history_record.error_message = f"Updated {updated_count} POs." 
+            db.commit()
+
+        # Create Notification
         create_notification(
             db, 
             recipient_id=user_id,
             type=models.NotificationType.APP,
-            title="Import Complete",
-            message=f"Acceptance file processed. {updated_count} POs updated.",
-            link="/site-dispatcher" # Or appropriate link
+            title="Acceptance Import Complete",
+            message=f"File processed successfully. {updated_count} Merged POs updated.",
+            link="/site-dispatcher"
         )
         db.commit()
 
     except Exception as e:
-        # 5. Handle Errors
+        # 5. Error Handling
         logger.error(f"Background Task Failed: {e}", exc_info=True)
         db.rollback()
         history = db.query(models.UploadHistory).get(history_id)
@@ -555,12 +569,27 @@ def create_po_data_from_dataframe(db: Session, df: pd.DataFrame, user_id: int):
     db.bulk_insert_mappings(models.RawPurchaseOrder, records)
     db.commit()
 
-def create_raw_acceptances_from_dataframe(db: Session, df: pd.DataFrame, user_id: int):
+def create_raw_acceptances_from_dataframe(db: Session, df: pd.DataFrame, user_id: int) -> List[int]:
+    """
+    Saves DataFrame to RawAcceptance table and returns the list of new IDs.
+    """
     df['uploader_id'] = user_id
-    records = df.to_dict("records")
-    db.bulk_insert_mappings(models.RawAcceptance, records)
+    
+    # Filter to ensure we only try to save columns that exist in the model
+    valid_columns = [c.key for c in models.RawAcceptance.__table__.columns if c.key != 'id']
+    df_final = df[[c for c in df.columns if c in valid_columns]]
+
+    records = df_final.to_dict("records")
+    
+    # Create objects
+    new_instances = [models.RawAcceptance(**rec) for rec in records]
+    
+    # Add and Commit to generate IDs
+    db.add_all(new_instances)
     db.commit()
-    return len(records)
+    
+    # Return the IDs
+    return [instance.id for instance in new_instances]
 
 
 
@@ -730,6 +759,104 @@ def deduce_category(description: str) -> str:
 
     return "TBD"  # Default if no keywords match
 
+def process_acceptances_by_ids(db: Session, raw_acceptance_ids: List[int]):
+    """
+    Processes specific RawAcceptance records by ID.
+    Aggregates them, calculates AC/PAC, updates MergedPO, and marks them processed.
+    """
+    if not raw_acceptance_ids:
+        return 0
+
+    # 1. Fetch only the requested raw records
+    # We filter by ID to ensure we don't accidentally process old stuck records
+    query_raw = db.query(models.RawAcceptance).filter(
+        models.RawAcceptance.id.in_(raw_acceptance_ids),
+        models.RawAcceptance.is_processed == False
+    )
+    
+    # Read into DataFrame for easy aggregation
+    acceptance_df = pd.read_sql(query_raw.statement, db.bind)
+    
+    if acceptance_df.empty:
+        return 0
+
+    # 2. Generate IDs for Aggregation
+    acceptance_df['po_id'] = acceptance_df['po_no'] + '-' + acceptance_df['po_line_no'].astype(int).astype(str)
+    acceptance_df['id2'] = acceptance_df['po_id'] + '-' + acceptance_df['shipment_no'].astype(int).astype(str)
+
+    # 3. Aggregate (Sum qty, take max date)
+    aggregated_df = acceptance_df.groupby("id2").agg(
+        acceptance_qty=("acceptance_qty", "sum"),
+        application_processed_date=("application_processed_date", "max"),
+        po_id=("po_id", "first"),
+        shipment_no=("shipment_no", "first"),
+    ).reset_index()
+
+    # 4. Fetch related MergedPOs
+    po_ids_to_update = aggregated_df['po_id'].unique().tolist()
+    merged_po_records = db.query(models.MergedPO).filter(models.MergedPO.po_id.in_(po_ids_to_update)).all()
+    merged_po_map = {mp.po_id: mp for mp in merged_po_records}
+    
+    updated_count = 0
+
+    # 5. Calculation Loop
+    for index, row in aggregated_df.iterrows():
+        po_id = row['po_id']
+        
+        if po_id in merged_po_map:
+            merged_po = merged_po_map[po_id]
+            updated_count += 1
+            
+            unit_price = merged_po.unit_price or 0
+            req_qty = merged_po.requested_qty or 0
+            agg_qty = row['acceptance_qty']
+            
+            # Handle Date: If valid, use it. If qty is 0, set to None (per your previous requirement)
+            proc_date = row['application_processed_date']
+            if pd.notna(proc_date) and agg_qty > 0:
+                valid_date = proc_date.date()
+            else:
+                valid_date = None
+
+            payment_term = merged_po.payment_term
+            shipment_no = row['shipment_no']
+
+            # --- LOGIC ---
+            
+            # Deduce Category
+            if merged_po.item_description:
+                 merged_po.category = deduce_category(merged_po.item_description)
+
+            # AC Calculation (Always on Shipment 1)
+            if shipment_no == 1:
+                merged_po.total_ac_amount = unit_price * req_qty * 0.80
+                merged_po.accepted_ac_amount = unit_price * agg_qty * 0.80
+                merged_po.date_ac_ok = valid_date
+                
+                # AC PAC 100% Case
+                if payment_term == "AC PAC 100%":
+                    merged_po.total_pac_amount = unit_price * req_qty * 0.20
+                    merged_po.accepted_pac_amount = unit_price * agg_qty * 0.20
+                    merged_po.date_pac_ok = valid_date
+
+            # PAC Calculation (Only on Shipment 2 for split terms)
+            elif shipment_no == 2:
+                if payment_term == "AC1 80 | PAC 20":
+                    merged_po.total_pac_amount = unit_price * req_qty * 0.20
+                    merged_po.accepted_pac_amount = unit_price * agg_qty * 0.20
+                    merged_po.date_pac_ok = valid_date
+
+            # Update Total Accepted Qty (accumulate)
+            # Initialize if None
+            if merged_po.total_acceptance_qty is None:
+                merged_po.total_acceptance_qty = 0.0
+            merged_po.total_acceptance_qty += agg_qty
+
+    # 6. Mark as Processed & Commit
+    query_raw.update({"is_processed": True})
+    db.commit()
+
+    return updated_count
 
 # --- FINAL REVISED FUNCTION ---
 def process_acceptance_dataframe(db: Session, acceptance_df: pd.DataFrame):
