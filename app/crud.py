@@ -415,6 +415,100 @@ def process_and_merge_pos(db: Session):
     
     db.commit()
     return len(clean_pos_list)
+def process_po_file_background(file_path: str, history_id: int, user_id: int):
+    """
+    Background task to process the PO file.
+    """
+    # Create a NEW database session for this background task
+    db = SessionLocal() 
+    
+    try:
+        # 1. Read the file from the temp path
+        df = pd.read_excel(file_path)
+        
+        # 2. Run the existing logic
+        # Note: We pass the db session we just created
+        crud.create_raw_purchase_orders_from_dataframe(db, df, user_id)
+        processed_count = crud.process_and_merge_pos(db)
+        
+        # 3. Update History to SUCCESS
+        history = db.query(models.UploadHistory).get(history_id)
+        if history:
+            history.status = "SUCCESS"
+            history.total_rows = processed_count
+            db.commit()
+            
+        # Optional: Send Notification to User here using create_notification
+        
+    except Exception as e:
+        # 4. Handle Errors
+        print(f"Background processing error: {e}")
+        db.rollback()
+        history = db.query(models.UploadHistory).get(history_id)
+        if history:
+            history.status = "FAILED"
+            history.error_message = str(e)[:500] # Truncate error if too long
+            db.commit()
+            
+    finally:
+        # 5. Cleanup
+        db.close()
+        # Delete the temp file to save space
+        if os.path.exists(file_path):
+            os.remove(file_path)
+def process_acceptance_file_background(file_path: str, history_id: int, user_id: int):
+    """
+    Background task to process the Acceptance file.
+    """
+    # Create a NEW database session for this background task
+    db = SessionLocal()
+    
+    try:
+        # 1. Read the file
+        acceptance_df = pd.read_excel(file_path)
+        
+        # 2. Run the existing logic: Create Raw Records
+        # This function returns the list of IDs
+        new_record_ids = create_raw_acceptances_from_dataframe(db, acceptance_df, user_id)
+        
+        # 3. Run the existing logic: Process those records
+        updated_count = process_acceptances_by_ids(db, raw_acceptance_ids=new_record_ids)
+        
+        # 4. Update History to SUCCESS
+        history = db.query(models.UploadHistory).get(history_id)
+        if history:
+            history.status = "SUCCESS"
+            history.total_rows = len(new_record_ids) # Or updated_count, whichever you prefer to track
+            # Optionally store detailed info in a note column if you have one
+            # history.notes = f"Updated {updated_count} MergedPOs"
+            db.commit()
+
+        # Optional: Send Notification to User
+        create_notification(
+            db, 
+            recipient_id=user_id,
+            type=models.NotificationType.APP,
+            title="Import Complete",
+            message=f"Acceptance file processed. {updated_count} POs updated.",
+            link="/site-dispatcher" # Or appropriate link
+        )
+        db.commit()
+
+    except Exception as e:
+        # 5. Handle Errors
+        print(f"Background Acceptance processing error: {e}")
+        db.rollback()
+        history = db.query(models.UploadHistory).get(history_id)
+        if history:
+            history.status = "FAILED"
+            history.error_message = str(e)[:500] 
+            db.commit()
+            
+    finally:
+        # 6. Cleanup
+        db.close()
+        if os.path.exists(file_path):
+            os.remove(file_path)
 
 def get_all_po_data(db: Session):
     """

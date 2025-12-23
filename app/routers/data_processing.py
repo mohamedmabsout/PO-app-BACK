@@ -24,48 +24,44 @@ logger = logging.getLogger(__name__)
 
 @router.post("/import/purchase-orders")
 async def import_purchase_orders(
+    background_tasks: BackgroundTasks, # <-- Add this parameter
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user),
+    current_user: models.User = Depends(auth.get_current_active_user)
 ):
-    if not file.filename.endswith((".xlsx", ".xls")):
+    if not file.filename.endswith(('.xlsx', '.xls')):
         raise HTTPException(status_code=400, detail="Invalid file type.")
 
+    # 1. Create the History Record immediately as "PROCESSING"
     history_record = crud.create_upload_history_record(
-        db=db, filename=file.filename, status="PROCESSING", user_id=current_user.id
+        db=db,
+        filename=file.filename,
+        status="PROCESSING", # <-- Shows spinner in frontend
+        user_id=current_user.id
+    )
+    
+    # 2. Save the file to a temporary location on the server
+    # We can't pass the 'file' object to background task because it closes
+    temp_dir = "temp_uploads"
+    os.makedirs(temp_dir, exist_ok=True)
+    temp_file_path = f"{temp_dir}/{history_record.id}_{file.filename}"
+    
+    with open(temp_file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    # 3. Add the task to the background queue
+    background_tasks.add_task(
+        crud.process_po_file_background, 
+        temp_file_path, 
+        history_record.id, 
+        current_user.id
     )
 
-    try:
-        contents = await file.read()
-        df = pd.read_excel(io.BytesIO(contents))
-
-        # --- FIX 1: Delegate ALL logic to a new, smart CRUD function ---
-        num_raw_records = crud.create_raw_purchase_orders_from_dataframe(
-            db=db, df=df, user_id=current_user.id
-        )
-
-        # --- FIX 2: Immediately trigger the merge process ---
-        num_merged_records = crud.process_and_merge_pos(db=db)
-
-        # Update history on success
-        history_record.status = "SUCCESS"
-        history_record.total_rows = num_raw_records
-        db.commit()
-
-        return {
-            "message": f"{num_raw_records} POs saved and {num_merged_records} records merged.",
-            "raw_records_saved": num_raw_records,
-            "merged_records_processed": num_merged_records,
-        }
-
-    except Exception as e:
-        db.rollback()
-        history_record.status = "FAILURE"
-        history_record.error_message = str(e)
-        db.commit()
-        logger.error(f"Error during PO import: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
+    # 4. Respond IMMEDIATELY
+    return {
+        "message": "File uploaded. Processing started in background.",
+        "history_id": history_record.id
+    }
 
 @router.get("/import/history", response_model=List[schemas.UploadHistory])
 def read_upload_history(

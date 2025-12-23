@@ -19,76 +19,57 @@ router = APIRouter(
 
 @router.post("/upload", status_code=status.HTTP_200_OK)
 def upload_and_process_acceptances(
-    file: UploadFile = File(..., description="The Acceptance Excel file (.xlsx or .xls) to be processed."),
+    background_tasks: BackgroundTasks, # <-- Add this parameter
+    file: UploadFile = File(..., description="The Acceptance Excel file"),
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user) # Get the user object if needed for logging
+    current_user: models.User = Depends(auth.get_current_active_user)
 ):
-    """
-    Uploads an Excel file containing acceptance data.
-
-    The system will perform the following steps:
-    1. Pre-process and aggregate the data from the file.
-    2. Deduce the 'category' for each corresponding PO.
-    3. Calculate AC (Acceptance Certificate) and PAC (Provisional Acceptance Certificate) amounts and dates.
-    4. Update the existing records in the Merged PO table.
-    """
-    # Check if the uploaded file is an Excel file
     if not file.filename.endswith(('.xlsx', '.xls')):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, 
-            detail="Invalid file type. Please upload an Excel file (.xlsx or .xls)."
+            detail="Invalid file type. Please upload an Excel file."
         )
+
+    # 1. Create History Record (PROCESSING)
     history_record = crud.create_upload_history_record(
         db=db,
         filename=file.filename,
         status="PROCESSING",
         user_id=current_user.id,
-total_rows=0
+        upload_type="Acceptance" # Ensure this matches your Enum/String for acceptance types
     )
+
     try:
-        # Read the Excel file directly into a Pandas DataFrame
-        contents = file.file.read()
-        acceptance_df = pd.read_excel(io.BytesIO(contents))
-        column_mapping = {
-            'ShipmentNO.': 'shipment_no', 'AcceptanceQty': 'acceptance_qty', 'ApplicationProcessed': 'application_processed_date',
-            'PONo.': 'po_no', 'POLineNo.': 'po_line_no', 
-        }
-        acceptance_df.rename(columns=column_mapping, inplace=True)
-        # Basic validation and type conversion
-        acceptance_df['application_processed_date'] = pd.to_datetime(acceptance_df['application_processed_date'])
-        numeric_cols = [
-            'acceptance_qty', 'po_line_no', 'shipment_no',
-        ]
-        for col in numeric_cols:
-            acceptance_df[col] = pd.to_numeric(acceptance_df[col], errors='coerce').fillna(0)
-
-
-        raw_count = crud.create_raw_acceptances_from_dataframe(db, acceptance_df, current_user.id)
-        # Call the core logic function in crud.py to do all the work
-        updated_count = crud.process_acceptance_dataframe(db=db, acceptance_df=acceptance_df)
-        history_record.status = "SUCCESS"
-        history_record.total_rows = raw_count # Store how many rows were in the file
-        db.commit()
+        # 2. Save file to disk
+        temp_dir = "temp_uploads"
+        os.makedirs(temp_dir, exist_ok=True)
+        temp_file_path = f"{temp_dir}/{history_record.id}_{file.filename}"
         
-        # Return a detailed success message
+        with open(temp_file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        # 3. Dispatch Background Task
+        # Pass the file path, history ID, and user ID to the worker
+        background_tasks.add_task(
+            crud.process_acceptance_file_background, 
+            temp_file_path, 
+            history_record.id, 
+            current_user.id
+        )
+        
+        # 4. Return Immediate Success
         return {
-            "message": "Acceptance file processed successfully.",
+            "message": "Acceptance file uploaded. Processing started in background.",
             "filename": file.filename,
-            "total_records_updated": updated_count
+            "history_id": history_record.id
         }
 
     except Exception as e:
-        # Log the actual, detailed error on the server for debugging
-        # In a real production app, you'd use a proper logger here
-        db.rollback() # Rollback any partial changes
+        # If saving to disk fails before dispatching, update history to failed immediately
         history_record.status = "FAILED"
-        history_record.error_message = str(e)
+        history_record.error_message = f"Upload failed: {str(e)}"
         db.commit()
-        
-        print(f"An error occurred during acceptance processing for user {current_user.last_name}: {e}")
-        
-        # Return a user-friendly error message
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"An unexpected error occurred while processing the file. Please check the file format and content."
+            status_code=500, 
+            detail="Failed to save file for processing."
         )
