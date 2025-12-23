@@ -762,13 +762,12 @@ def deduce_category(description: str) -> str:
 def process_acceptances_by_ids(db: Session, raw_acceptance_ids: List[int]):
     """
     Processes specific RawAcceptance records by ID.
-    Aggregates them, calculates AC/PAC, updates MergedPO, and marks them processed.
+    Replicates exact logic: Aggregate -> Deduce Category -> Calc AC/PAC -> Update.
     """
     if not raw_acceptance_ids:
         return 0
 
     # 1. Fetch only the requested raw records
-    # We filter by ID to ensure we don't accidentally process old stuck records
     query_raw = db.query(models.RawAcceptance).filter(
         models.RawAcceptance.id.in_(raw_acceptance_ids),
         models.RawAcceptance.is_processed == False
@@ -780,7 +779,7 @@ def process_acceptances_by_ids(db: Session, raw_acceptance_ids: List[int]):
     if acceptance_df.empty:
         return 0
 
-    # 2. Generate IDs for Aggregation
+    # 2. Generate IDs for Aggregation (Exact same logic as before)
     acceptance_df['po_id'] = acceptance_df['po_no'] + '-' + acceptance_df['po_line_no'].astype(int).astype(str)
     acceptance_df['id2'] = acceptance_df['po_id'] + '-' + acceptance_df['shipment_no'].astype(int).astype(str)
 
@@ -798,66 +797,75 @@ def process_acceptances_by_ids(db: Session, raw_acceptance_ids: List[int]):
     merged_po_map = {mp.po_id: mp for mp in merged_po_records}
     
     updated_count = 0
+    updated_po_ids = set()
 
     # 5. Calculation Loop
-    for index, row in aggregated_df.iterrows():
-        po_id = row['po_id']
+    for index, acceptance_row in aggregated_df.iterrows():
+        po_id = acceptance_row['po_id']
         
         if po_id in merged_po_map:
-            merged_po = merged_po_map[po_id]
+            merged_po_to_update = merged_po_map[po_id]
+            updated_po_ids.add(po_id)
             updated_count += 1
             
-            unit_price = merged_po.unit_price or 0
-            req_qty = merged_po.requested_qty or 0
-            agg_qty = row['acceptance_qty']
+            unit_price = merged_po_to_update.unit_price or 0
+            req_qty = merged_po_to_update.requested_qty or 0
             
-            # Handle Date: If valid, use it. If qty is 0, set to None (per your previous requirement)
-            proc_date = row['application_processed_date']
-            if pd.notna(proc_date) and agg_qty > 0:
-                valid_date = proc_date.date()
+            # --- Logic: Handle Aggregated Qty and Date ---
+            agg_acceptance_qty = acceptance_row['acceptance_qty']
+            
+            # Date Logic: Use date if valid AND qty > 0, else None
+            proc_date_val = acceptance_row['application_processed_date']
+            if pd.notna(proc_date_val) and agg_acceptance_qty > 0:
+                latest_processed_date = proc_date_val.date()
             else:
-                valid_date = None
+                latest_processed_date = None
 
-            payment_term = merged_po.payment_term
-            shipment_no = row['shipment_no']
+            payment_term = merged_po_to_update.payment_term
+            shipment_no = acceptance_row['shipment_no']
 
-            # --- LOGIC ---
-            
-            # Deduce Category
-            if merged_po.item_description:
-                 merged_po.category = deduce_category(merged_po.item_description)
+            # --- Logic: Deduce Category ---
+            # Using the helper function you defined earlier
+            if merged_po_to_update.item_description:
+                merged_po_to_update.category = deduce_category(merged_po_to_update.item_description)
 
-            # AC Calculation (Always on Shipment 1)
+            # --- Logic: AC/PAC Calculation ---
+
+            # Case 1: Shipment 1
             if shipment_no == 1:
-                merged_po.total_ac_amount = unit_price * req_qty * 0.80
-                merged_po.accepted_ac_amount = unit_price * agg_qty * 0.80
-                merged_po.date_ac_ok = valid_date
+                # Always calculate AC for Shipment 1
+                merged_po_to_update.total_ac_amount = unit_price * req_qty * 0.80
+                merged_po_to_update.accepted_ac_amount = unit_price * agg_acceptance_qty * 0.80
+                merged_po_to_update.date_ac_ok = latest_processed_date
                 
-                # AC PAC 100% Case
+                # IF term is "AC PAC 100%", calculate PAC too
                 if payment_term == "AC PAC 100%":
-                    merged_po.total_pac_amount = unit_price * req_qty * 0.20
-                    merged_po.accepted_pac_amount = unit_price * agg_qty * 0.20
-                    merged_po.date_pac_ok = valid_date
+                    merged_po_to_update.total_pac_amount = unit_price * req_qty * 0.20
+                    merged_po_to_update.accepted_pac_amount = unit_price * agg_acceptance_qty * 0.20
+                    merged_po_to_update.date_pac_ok = latest_processed_date
 
-            # PAC Calculation (Only on Shipment 2 for split terms)
+            # Case 2: Shipment 2
             elif shipment_no == 2:
+                # ONLY calculate PAC if term is "AC1 80 | PAC 20"
                 if payment_term == "AC1 80 | PAC 20":
-                    merged_po.total_pac_amount = unit_price * req_qty * 0.20
-                    merged_po.accepted_pac_amount = unit_price * agg_qty * 0.20
-                    merged_po.date_pac_ok = valid_date
+                    merged_po_to_update.total_pac_amount = unit_price * req_qty * 0.20
+                    merged_po_to_update.accepted_pac_amount = unit_price * agg_acceptance_qty * 0.20
+                    merged_po_to_update.date_pac_ok = latest_processed_date
 
-            # Update Total Accepted Qty (accumulate)
-            # Initialize if None
-            if merged_po.total_acceptance_qty is None:
-                merged_po.total_acceptance_qty = 0.0
-            merged_po.total_acceptance_qty += agg_qty
+            # --- Logic: Update Total Acceptance Qty (Optional - remove if column doesn't exist) ---
+            # Since you got an error here, I am removing this block to respect your current DB schema.
+            # If you WANT this, you must run the migration first. 
+            # For now, I'm commenting it out to fix the crash.
+            # if hasattr(merged_po_to_update, 'total_acceptance_qty'):
+            #     if merged_po_to_update.total_acceptance_qty is None:
+            #         merged_po_to_update.total_acceptance_qty = 0.0
+            #     merged_po_to_update.total_acceptance_qty += agg_acceptance_qty
 
     # 6. Mark as Processed & Commit
     query_raw.update({"is_processed": True})
     db.commit()
 
-    return updated_count
-
+    return len(updated_po_ids)
 # --- FINAL REVISED FUNCTION ---
 def process_acceptance_dataframe(db: Session, acceptance_df: pd.DataFrame):
     """
