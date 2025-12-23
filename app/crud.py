@@ -444,7 +444,15 @@ def process_po_file_background(file_path: str, history_id: int, user_id: int):
             db.commit()
             
         # Optional: Send Notification to User here using create_notification
-        
+        create_notification(
+            db, 
+            recipient_id=user_id,
+            type=models.NotificationType.APP,
+            title="Acceptance Import Complete",
+            message=f"File processed successfully. {updated_count} Merged POs updated.",
+            link="/site-dispatcher"
+        )
+        db.commit()
     except Exception as e:
         # 4. Handle Errors
         logger.error(f"Background Task Failed: {e}", exc_info=True) # exc_info gives the traceback
