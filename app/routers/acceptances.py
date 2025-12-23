@@ -7,27 +7,28 @@ import io
 
 from ..dependencies import get_db
 from .. import crud
-from ..auth import get_current_user # Import your authentication dependency
-from .. import models # To specify the user model type
+from ..auth import get_current_user  # Import your authentication dependency
+from .. import models  # To specify the user model type
 
 router = APIRouter(
     prefix="/api/acceptances",
     tags=["Acceptances"],
     # This ensures all routes in this file require an authenticated user
-    dependencies=[Depends(get_current_user)] 
+    dependencies=[Depends(get_current_user)],
 )
+
 
 @router.post("/upload", status_code=status.HTTP_200_OK)
 def upload_and_process_acceptances(
-    background_tasks: BackgroundTasks, # <-- Add this parameter
+    background_tasks: BackgroundTasks,  # <-- Add this parameter
     file: UploadFile = File(..., description="The Acceptance Excel file"),
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_active_user)
+    current_user: models.User = Depends(auth.get_current_user),
 ):
-    if not file.filename.endswith(('.xlsx', '.xls')):
+    if not file.filename.endswith((".xlsx", ".xls")):
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, 
-            detail="Invalid file type. Please upload an Excel file."
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid file type. Please upload an Excel file.",
         )
 
     # 1. Create History Record (PROCESSING)
@@ -36,7 +37,7 @@ def upload_and_process_acceptances(
         filename=file.filename,
         status="PROCESSING",
         user_id=current_user.id,
-        upload_type="Acceptance" # Ensure this matches your Enum/String for acceptance types
+        upload_type="Acceptance",  # Ensure this matches your Enum/String for acceptance types
     )
 
     try:
@@ -44,24 +45,24 @@ def upload_and_process_acceptances(
         temp_dir = "temp_uploads"
         os.makedirs(temp_dir, exist_ok=True)
         temp_file_path = f"{temp_dir}/{history_record.id}_{file.filename}"
-        
+
         with open(temp_file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
         # 3. Dispatch Background Task
         # Pass the file path, history ID, and user ID to the worker
         background_tasks.add_task(
-            crud.process_acceptance_file_background, 
-            temp_file_path, 
-            history_record.id, 
-            current_user.id
+            crud.process_acceptance_file_background,
+            temp_file_path,
+            history_record.id,
+            current_user.id,
         )
-        
+
         # 4. Return Immediate Success
         return {
             "message": "Acceptance file uploaded. Processing started in background.",
             "filename": file.filename,
-            "history_id": history_record.id
+            "history_id": history_record.id,
         }
 
     except Exception as e:
@@ -70,6 +71,5 @@ def upload_and_process_acceptances(
         history_record.error_message = f"Upload failed: {str(e)}"
         db.commit()
         raise HTTPException(
-            status_code=500, 
-            detail="Failed to save file for processing."
+            status_code=500, detail="Failed to save file for processing."
         )

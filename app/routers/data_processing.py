@@ -12,56 +12,57 @@ from ..dependencies import get_current_user, get_db
 from .. import crud, models, auth, schemas
 from datetime import datetime, date
 from xlsxwriter.utility import xl_col_to_name
-from ..utils.pdf_generator import generate_bc_pdf # Import the function
+from ..utils.pdf_generator import generate_bc_pdf  # Import the function
 from fastapi.responses import FileResponse
-from fastapi.responses import StreamingResponse # <-- Import this
+from fastapi.responses import StreamingResponse  # <-- Import this
 
 from ..utils import pdf_generator
- 
+
 router = APIRouter(prefix="/api/data", tags=["data_processing"])
 logger = logging.getLogger(__name__)
 
 
 @router.post("/import/purchase-orders")
 async def import_purchase_orders(
-    background_tasks: BackgroundTasks, # <-- Add this parameter
+    background_tasks: BackgroundTasks,  # <-- Add this parameter
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_active_user)
+    current_user: models.User = Depends(auth.get_current_user),
 ):
-    if not file.filename.endswith(('.xlsx', '.xls')):
+    if not file.filename.endswith((".xlsx", ".xls")):
         raise HTTPException(status_code=400, detail="Invalid file type.")
 
     # 1. Create the History Record immediately as "PROCESSING"
     history_record = crud.create_upload_history_record(
         db=db,
         filename=file.filename,
-        status="PROCESSING", # <-- Shows spinner in frontend
-        user_id=current_user.id
+        status="PROCESSING",  # <-- Shows spinner in frontend
+        user_id=current_user.id,
     )
-    
+
     # 2. Save the file to a temporary location on the server
     # We can't pass the 'file' object to background task because it closes
     temp_dir = "temp_uploads"
     os.makedirs(temp_dir, exist_ok=True)
     temp_file_path = f"{temp_dir}/{history_record.id}_{file.filename}"
-    
+
     with open(temp_file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
     # 3. Add the task to the background queue
     background_tasks.add_task(
-        crud.process_po_file_background, 
-        temp_file_path, 
-        history_record.id, 
-        current_user.id
+        crud.process_po_file_background,
+        temp_file_path,
+        history_record.id,
+        current_user.id,
     )
 
     # 4. Respond IMMEDIATELY
     return {
         "message": "File uploaded. Processing started in background.",
-        "history_id": history_record.id
+        "history_id": history_record.id,
     }
+
 
 @router.get("/import/history", response_model=List[schemas.UploadHistory])
 def read_upload_history(
@@ -133,6 +134,7 @@ def get_merged_pos_preview(
         "total_pages": (total_items + per_page - 1) // per_page,
     }
 
+
 @router.get("/export-merged-pos", status_code=status.HTTP_200_OK)
 def export_merged_pos_report(
     db: Session = Depends(get_db),
@@ -165,17 +167,32 @@ def export_merged_pos_report(
             )
         all_columns_in_order = [
             # Your newly requested columns first
-            "PO ID","Internal Project", "PM", "Unit Price", "Requested Qty", "Internal Check", "Payment Term",
+            "PO ID",
+            "Internal Project",
+            "PM",
+            "Unit Price",
+            "Requested Qty",
+            "Internal Check",
+            "Payment Term",
             # The rest of the original columns
-             "Customer Project", "Site Code", "PO No.", 
-            "PO Line No.", "Item Description", "Category", "Publish Date", 
+            "Customer Project",
+            "Site Code",
+            "PO No.",
+            "PO Line No.",
+            "Item Description",
+            "Category",
+            "Publish Date",
             "Line Amount",
             # AC/PAC and Remaining columns
-            "Total AC (80%)", "Accepted AC Amount", "Date AC OK",
-            "Total PAC (20%)", "Accepted PAC Amount", "Date PAC OK",
-            "Remaining Amount"
+            "Total AC (80%)",
+            "Accepted AC Amount",
+            "Date AC OK",
+            "Total PAC (20%)",
+            "Accepted PAC Amount",
+            "Date PAC OK",
+            "Remaining Amount",
         ]
-        
+
         # Reorder the dataframe to match the desired output
         export_df = export_df[all_columns_in_order]
 
@@ -184,23 +201,35 @@ def export_merged_pos_report(
         for col in date_columns:
             if col in export_df.columns:
                 # Convert to datetime, then format. Fill NaT/None with an empty string.
-                export_df[col] = pd.to_datetime(export_df[col], errors='coerce').dt.strftime("%Y-%m-%d").fillna("")
-        
+                export_df[col] = (
+                    pd.to_datetime(export_df[col], errors="coerce")
+                    .dt.strftime("%Y-%m-%d")
+                    .fillna("")
+                )
+
         # 3. Setup Excel Writer
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-            export_df.to_excel(writer, sheet_name="Export Data", startrow=1, header=False, index=False)
+            export_df.to_excel(
+                writer, sheet_name="Export Data", startrow=1, header=False, index=False
+            )
 
             workbook = writer.book
             worksheet = writer.sheets["Export Data"]
-            
+
             # --- DEFINING FORMATS (No change) ---
             # ... (fmt_header_std, fmt_header_ac, etc. are the same)
-            header_base = {'bold': True, 'text_wrap': True, 'valign': 'vcenter', 'align': 'center', 'border': 1}
-            fmt_header_std = workbook.add_format({**header_base, 'fg_color': '#EEEEEE'})
-            fmt_header_ac = workbook.add_format({**header_base, 'fg_color': '#93c47d'})
-            fmt_header_pac = workbook.add_format({**header_base, 'fg_color': '#6d9eeb'})
-            fmt_header_red = workbook.add_format({**header_base, 'fg_color': '#e06666'})
+            header_base = {
+                "bold": True,
+                "text_wrap": True,
+                "valign": "vcenter",
+                "align": "center",
+                "border": 1,
+            }
+            fmt_header_std = workbook.add_format({**header_base, "fg_color": "#EEEEEE"})
+            fmt_header_ac = workbook.add_format({**header_base, "fg_color": "#93c47d"})
+            fmt_header_pac = workbook.add_format({**header_base, "fg_color": "#6d9eeb"})
+            fmt_header_red = workbook.add_format({**header_base, "fg_color": "#e06666"})
             fmt_bg_ac = workbook.add_format({"bg_color": "#D9EAD3"})
             fmt_bg_pac = workbook.add_format({"bg_color": "#CFE2F3"})
             fmt_bg_red = workbook.add_format({"bg_color": "#F4CCCC"})
@@ -211,7 +240,7 @@ def export_merged_pos_report(
             for col_idx, col_name in enumerate(headers):
                 # Set a default width
                 col_width = 20
-                
+
                 # --- FIX 2: APPLY FULL-COLUMN BACKGROUND COLORS ---
                 if "AC" in col_name and "PAC" not in col_name:
                     worksheet.set_column(col_idx, col_idx, col_width, fmt_bg_ac)
@@ -232,7 +261,7 @@ def export_merged_pos_report(
                     style = fmt_header_red
                 else:
                     style = fmt_header_std
-                
+
                 worksheet.write(0, col_idx, col_name, style)
 
         # ... (StreamingResponse part is the same) ...
@@ -240,7 +269,7 @@ def export_merged_pos_report(
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
         filename = f"PO_Export_{timestamp}.xlsx"
         headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
-        
+
         return StreamingResponse(
             output,
             media_type="application/vnd.openxmlformats-officedocument.sheet",
@@ -249,7 +278,9 @@ def export_merged_pos_report(
 
     except Exception as e:
         print(f"Error during export: {e}")
-        raise HTTPException(status_code=500, detail="Could not generate the Excel report.")
+        raise HTTPException(
+            status_code=500, detail="Could not generate the Excel report."
+        )
 
 
 @router.get("/remaining-to-accept")
@@ -261,47 +292,54 @@ def get_remaining_pos(
     internal_project_id: Optional[int] = None,
     customer_project_id: Optional[int] = None,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user)
+    current_user: models.User = Depends(auth.get_current_user),
 ):
     data = crud.get_remaining_to_accept_paginated(
-                db, page, size, filter_stage, 
-                search, internal_project_id, customer_project_id,user=current_user
+        db,
+        page,
+        size,
+        filter_stage,
+        search,
+        internal_project_id,
+        customer_project_id,
+        user=current_user,
     )
-    # Note: Stats are usually global, calculating them with filters might be expensive 
+    # Note: Stats are usually global, calculating them with filters might be expensive
     # but let's keep the global stats for the cards at the top
-    stats = crud.get_remaining_stats(db,user=current_user) 
-    
-    return {
-        "data": data,
-        "stats": stats
-    }
+    stats = crud.get_remaining_stats(db, user=current_user)
+
+    return {"data": data, "stats": stats}
+
+
 @router.get("/bc/export", status_code=status.HTTP_200_OK)
 def export_bcs(
     search: Optional[str] = None,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user)
+    current_user: models.User = Depends(auth.get_current_user),
 ):
     try:
         # 1. Get DataFrame
         df = crud.get_bcs_export_dataframe(db, search)
-        
+
         if df.empty:
-             raise HTTPException(status_code=404, detail="No data found to export.")
+            raise HTTPException(status_code=404, detail="No data found to export.")
 
         # 2. Format Dates
-        for col in df.select_dtypes(include=['datetime64']).columns:
-            df[col] = pd.to_datetime(df[col]).dt.strftime('%d/%m/%Y %H:%M').fillna('')
+        for col in df.select_dtypes(include=["datetime64"]).columns:
+            df[col] = pd.to_datetime(df[col]).dt.strftime("%d/%m/%Y %H:%M").fillna("")
 
         # 3. Create Excel
         output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            df.to_excel(writer, sheet_name='BC Details', index=False)
-            
+        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+            df.to_excel(writer, sheet_name="BC Details", index=False)
+
             # Optional: Add simple coloring or formatting here if desired
             workbook = writer.book
-            worksheet = writer.sheets['BC Details']
-            header_format = workbook.add_format({'bold': True, 'bg_color': '#f0f0f0', 'border': 1})
-            
+            worksheet = writer.sheets["BC Details"]
+            header_format = workbook.add_format(
+                {"bold": True, "bg_color": "#f0f0f0", "border": 1}
+            )
+
             # Apply header format
             for col_num, value in enumerate(df.columns.values):
                 worksheet.write(0, col_num, value, header_format)
@@ -310,20 +348,29 @@ def export_bcs(
 
         output.seek(0)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-        headers = {'Content-Disposition': f'attachment; filename="BC_Export_{timestamp}.xlsx"'}
-        return StreamingResponse(output, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', headers=headers)
+        headers = {
+            "Content-Disposition": f'attachment; filename="BC_Export_{timestamp}.xlsx"'
+        }
+        return StreamingResponse(
+            output,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers=headers,
+        )
 
     except Exception as e:
         print(f"Export Error: {e}")
         raise HTTPException(status_code=500, detail="Export failed")
 
-@router.get("/bc-candidates", response_model=List[schemas.MergedPO]) # Use MergedPO schema
+
+@router.get(
+    "/bc-candidates", response_model=List[schemas.MergedPO]
+)  # Use MergedPO schema
 def get_bc_candidates(
     project_id: int,
     site_codes: Optional[str] = Query(None, description="Comma separated codes"),
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     """
     Returns list of POs eligible for BC creation based on filters.
@@ -331,16 +378,16 @@ def get_bc_candidates(
     code_list = []
     if site_codes:
         # Split by newline (Excel paste) or comma
-        code_list = site_codes.replace('\n', ',').split(',')
-        
-    return crud.get_eligible_pos_for_bc(
-        db, project_id, code_list, start_date, end_date
-    )
+        code_list = site_codes.replace("\n", ",").split(",")
+
+    return crud.get_eligible_pos_for_bc(db, project_id, code_list, start_date, end_date)
+
+
 @router.post("/create-bc", response_model=schemas.BCResponse)
 def generate_bc(
     bc_data: schemas.BCCreate,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user)
+    current_user: models.User = Depends(auth.get_current_user),
 ):
     try:
         return crud.create_bon_de_commande(db, bc_data, current_user.id)
@@ -349,82 +396,99 @@ def generate_bc(
     except Exception as e:
         print(e)
         raise HTTPException(status_code=500, detail="Failed to generate BC")
+
+
 @router.get("/bc/list/{status}", response_model=List[schemas.BCResponse])
 def list_bcs(status: str, db: Session = Depends(get_db)):
     # Map string to Enum
-    status_enum = models.BCStatus(status) 
+    status_enum = models.BCStatus(status)
     return crud.get_bcs_by_status(db, status_enum)
-@router.get("/bc/all", response_model=List[schemas.BCResponse]) # Use your schema
+
+
+@router.get("/bc/all", response_model=List[schemas.BCResponse])  # Use your schema
 def read_all_bcs(
     search: Optional[str] = None,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user)
+    current_user: models.User = Depends(get_current_user),
 ):
     return crud.get_all_bcs(db, current_user, search=search)
+
+
 @router.post("/bc/{bc_id}/approve-l1")
-def approve_l1(bc_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
+def approve_l1(
+    bc_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user),
+):
     # Check if PD
     bc = crud.approve_bc_l1(db, bc_id, current_user.id)
-    
+
     # FIND ADMINS
     admins = db.query(models.User).filter(models.User.role == "Admin").all()
-    
+
     for admin in admins:
         crud.create_notification(
-            db, 
+            db,
             recipient_id=admin.id,
             type=models.NotificationType.TODO,
             title="Final Approval Required",
             message=f"BC {bc.bc_number} validated L1. Pending final approval.",
-            link=f"/configuration/bc/detail/{bc.id}"
+            link=f"/configuration/bc/detail/{bc.id}",
         )
     db.commit()
     return bc
 
+
 @router.post("/bc/{bc_id}/approve-l2")
-def approve_l2(bc_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
+def approve_l2(
+    bc_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user),
+):
     # Check if Admin
     bc = crud.approve_bc_l2(db, bc_id, current_user.id)
-    
+
     # NOTIFY CREATOR
     crud.create_notification(
-        db, 
+        db,
         recipient_id=bc.creator_id,
         type=models.NotificationType.APP,
         title="BC Approved",
         message=f"Your BC {bc.bc_number} has been fully approved.",
-        link=f"/configuration/bc/detail/{bc.id}"
+        link=f"/configuration/bc/detail/{bc.id}",
     )
     db.commit()
     return bc
 
+
 @router.get("/bc/{bc_id}/pdf")
 def get_bc_pdf(
-    bc_id: int, 
+    bc_id: int,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user)
+    current_user: models.User = Depends(auth.get_current_user),
 ):
     bc = crud.get_bc_by_id(db, bc_id)
     if not bc:
         raise HTTPException(status_code=404, detail="Bon de Commande not found")
-    
+
     # 1. Generate PDF into memory buffer
     pdf_buffer = pdf_generator.generate_bc_pdf(bc)
-    
+
     # 2. Return as a stream
     filename = f"BC_{bc.bc_number}.pdf"
-    
+
     return StreamingResponse(
-        pdf_buffer, 
-        media_type="application/pdf", 
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+        pdf_buffer,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
 
 @router.post("/import/assign-projects-only")
 async def assign_projects_only(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user)
+    current_user: models.User = Depends(auth.get_current_user),
 ):
     # if current_user.role != auth.UserRole.ADMIN:
     #     raise HTTPException(status_code=403, detail="Admin only")
@@ -440,53 +504,55 @@ async def assign_projects_only(
 
 @router.post("/bc/{bc_id}/reject")
 def reject_bon_de_commande(
-    bc_id: int, 
+    bc_id: int,
     rejection_data: schemas.BCRejectionRequest,
-    db: Session = Depends(get_db), 
-    current_user: models.User = Depends(auth.get_current_user)
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user),
 ):
     return crud.reject_bc(
         db, bc_id=bc_id, reason=rejection_data.reason, rejector_id=current_user.id
     )
 
+
 @router.post("/bc/{bc_id}/submit")
 def submit_bon_de_commande(
-    bc_id: int, 
-    db: Session = Depends(get_db), 
-    current_user: models.User = Depends(get_current_user)
+    bc_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
 ):
     bc = crud.submit_bc(db, bc_id)
-    
+
     # FIND PROJECT DIRECTORS
-    pds = db.query(models.User).filter(models.User.role == "PD").all() # Or "Project Director"
-    
+    pds = (
+        db.query(models.User).filter(models.User.role == "PD").all()
+    )  # Or "Project Director"
+
     for pd in pds:
         crud.create_notification(
-            db, 
+            db,
             recipient_id=pd.id,
             type=models.NotificationType.TODO,
             title="Approval Required",
             message=f"BC {bc.bc_number} submitted by {current_user.first_name} requires L1 validation.",
-            link=f"/configuration/bc/detail/{bc.id}"
+            link=f"/configuration/bc/detail/{bc.id}",
         )
     db.commit()
     return bc
 
+
 @router.get("/bc/{bc_id}", response_model=schemas.BCResponse)
-def get_bc_details(
-    bc_id: int,
-    db: Session = Depends(get_db)
-):
+def get_bc_details(bc_id: int, db: Session = Depends(get_db)):
     bc = crud.get_bc_by_id(db, bc_id)
     if not bc:
         raise HTTPException(status_code=404, detail="BC not found")
     return bc
 
+
 @router.post("/bc/{bc_id}/cancel", status_code=status.HTTP_200_OK)
 def cancel_bc_endpoint(
     bc_id: int,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user)
+    current_user: models.User = Depends(auth.get_current_user),
 ):
     """Cancels a Bon de Commande if it's in DRAFT status."""
     try:
