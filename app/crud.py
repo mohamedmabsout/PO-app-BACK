@@ -473,7 +473,7 @@ def process_acceptance_file_background(file_path: str, history_id: int, user_id:
         new_record_ids = create_raw_acceptances_from_dataframe(db, acceptance_df, user_id)
         
         # 3. Run the existing logic: Process those records
-        updated_count = process_acceptances_by_ids(db, raw_acceptance_ids=new_record_ids)
+        updated_count = process_acceptance_dataFrame(db, raw_acceptance_ids=new_record_ids)
         
         # 4. Update History to SUCCESS
         history = db.query(models.UploadHistory).get(history_id)
