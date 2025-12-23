@@ -17,7 +17,6 @@ import os
 import shutil
 from pathlib import Path
 from .database import SessionLocal # Import the session factory
-from .. import crud
 UPLOAD_DIR = "uploads/sbc_docs"
 
 PAYMENT_TERM_MAP = {
@@ -429,8 +428,8 @@ def process_po_file_background(file_path: str, history_id: int, user_id: int):
         
         # 2. Run the existing logic
         # Note: We pass the db session we just created
-        crud.create_raw_purchase_orders_from_dataframe(db, df, user_id)
-        processed_count = crud.process_and_merge_pos(db)
+       create_raw_purchase_orders_from_dataframe(db, df, user_id)
+        processed_count = process_and_merge_pos(db)
         
         # 3. Update History to SUCCESS
         history = db.query(models.UploadHistory).get(history_id)
