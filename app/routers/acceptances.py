@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 import pandas as pd
 import io
 import os
+import shutil
 from ..dependencies import get_db
 from .. import crud
 from ..auth import get_current_user  # Import your authentication dependency
