@@ -1,4 +1,5 @@
 from datetime import datetime,date
+from fastapi import BackgroundTasks
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from . import auth
@@ -18,6 +19,9 @@ import shutil
 from pathlib import Path
 from .database import SessionLocal # Import the session factory
 import logging
+from fastapi_mail import FastMail, MessageSchema, MessageType
+import secrets
+from .config import conf
 logger = logging.getLogger(__name__)
 
 
@@ -449,7 +453,7 @@ def process_po_file_background(file_path: str, history_id: int, user_id: int):
             recipient_id=user_id,
             type=models.NotificationType.APP,
             title="Acceptance Import Complete",
-            message=f"File processed successfully. {updated_count} Merged POs updated.",
+            message=f"File processed successfully. {processed_count} Merged POs updated.",
             link="/site-dispatcher"
         )
         db.commit()
@@ -2400,18 +2404,62 @@ def get_all_sbcs(db: Session, search: Optional[str] = None):
             (models.SBC.phone_1.ilike(term))
         )
     return return_query.order_by(models.SBC.created_at.desc()).all()
-def approve_sbc(db: Session, sbc_id: int, approver_id: int):
+async def approve_sbc(db: Session, sbc_id: int, approver_id: int, background_tasks: BackgroundTasks = None):
     sbc = db.query(models.SBC).get(sbc_id)
     if not sbc:
         raise ValueError("SBC not found")
         
     sbc.status = models.SBCStatus.ACTIVE
     sbc.approver_id = approver_id
-    # You could add approval_date here if you add that column to the model
     
+    # --- NEW: Create a User Account for this SBC ---
+    # Check if a user with this email already exists
+    existing_user = db.query(models.User).filter(models.User.email == sbc.email).first()
+    
+    if not existing_user:
+        # Generate a temporary password and token
+        temp_password = secrets.token_urlsafe(10)
+        reset_token = secrets.token_urlsafe(32)
+        
+        # Create the User
+        new_user = models.User(
+            first_name=sbc.short_name,  # Use Company Short Name as First Name
+            last_name="(External)",     # Distinction
+            username=sbc.sbc_code,      # Use SBC-00X as username
+            email=sbc.email,            # The email provided in SBC creation
+            role=models.UserRole.SBC,   # Make sure 'SBC' is in your UserRole Enum
+            hashed_password=auth.get_password_hash(temp_password),
+            sbc_id=sbc.id,              # LINK THE ACCOUNT
+            reset_token=reset_token,
+            is_active=True
+        )
+        db.add(new_user)
+        
+        # Send Invitation Email (Reusing your existing logic)
+        # Note: You need to pass 'background_tasks' to this function from the router
+        if background_tasks:
+            reset_link = f"https://po.sib.co.ma/reset-password?token={reset_token}"
+            message = MessageSchema(
+        subject="Welcome to SIB PO App - Set your Password",
+        recipients=[new_user.email],
+        body=f"""
+        <p>Hello {new_user.first_name},</p>
+        <p>Your account has been created.</p>
+        <p>Please click the link below to set your password and access the system:</p>
+        <a href="{reset_link}">Set Password</a>
+        """,
+        subtype=MessageType.html
+    )
+    
+    fm = FastMail(conf)
+    await fm.send_message(message)
+    
+    
+            
     db.commit()
     db.refresh(sbc)
     return sbc
+
 
 def reject_sbc(db: Session, sbc_id: int):
     sbc = db.query(models.SBC).get(sbc_id)

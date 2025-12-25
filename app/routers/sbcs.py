@@ -1,8 +1,8 @@
-from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, UploadFile, File, Form, HTTPException
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from .. import crud, schemas, auth, models
-from ..dependencies  import get_db
+from ..dependencies  import get_db,require_admin
 
 router = APIRouter(prefix="/api/sbcs", tags=["SBC Management"])
 
@@ -64,15 +64,15 @@ def get_all_sbcs_list(
 
 @router.post("/{sbc_id}/approve")
 def approve_sbc_endpoint(
-    sbc_id: int,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user)
+    sbc_id: int, 
+    background_tasks: BackgroundTasks, # Add this
+    db: Session = Depends(get_db), 
+    current_user: models.User = Depends(require_admin)
 ):
-    # Ideally check permission here: if current_user.role != PD...
-    try:
-        return crud.approve_sbc(db, sbc_id, current_user.id)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    print(f"DEBUG NOTIF: User Role is: '{current_user.role}'")
+
+    
+    return crud.approve_sbc(db, sbc_id, current_user.id, background_tasks)
 
 @router.post("/{sbc_id}/reject")
 def reject_sbc_endpoint(

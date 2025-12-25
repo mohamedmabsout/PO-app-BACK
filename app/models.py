@@ -41,6 +41,10 @@ class User(Base):
         back_populates="creator", 
         foreign_keys="BonDeCommande.creator_id"
     )
+    sbc_id = Column(Integer, ForeignKey("sbcs.id"), nullable=True)
+    
+    # Relationship
+    sbc = relationship("SBC", back_populates="users",foreign_keys=[sbc_id])
 
     notifications = relationship("Notification", back_populates="recipient") 
 
@@ -351,6 +355,8 @@ class SBC(Base):
     # Relationships
     creator = relationship("User", foreign_keys=[creator_id])
     approver = relationship("User", foreign_keys=[approver_id])
+    users = relationship("User", back_populates="sbc", foreign_keys="[User.sbc_id]")
+
 class BonDeCommande(Base):
     __tablename__ = 'bon_de_commandes'
 
