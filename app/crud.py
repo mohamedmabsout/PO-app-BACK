@@ -1251,6 +1251,7 @@ def get_remaining_to_accept_paginated(
     search: Optional[str] = None,
     internal_project_id: Optional[int] = None,
     customer_project_id: Optional[int] = None,
+    project_manager_id: Optional[int] = None,
         user: models.User = None  # <-- Add user parameter
 
 ):
@@ -1290,7 +1291,11 @@ def get_remaining_to_accept_paginated(
         
     if customer_project_id:
         query = query.filter(models.MergedPO.customer_project_id == customer_project_id)
-
+    if project_manager_id:
+        query = query.join(
+            models.InternalProject,
+            models.MergedPO.internal_project_id == models.InternalProject.id
+        ).filter(models.InternalProject.project_manager_id == project_manager_id)
     if search:
         term = f"%{search}%"
         query = query.filter(
@@ -2404,58 +2409,56 @@ def get_all_sbcs(db: Session, search: Optional[str] = None):
             (models.SBC.phone_1.ilike(term))
         )
     return return_query.order_by(models.SBC.created_at.desc()).all()
-async def approve_sbc(db: Session, sbc_id: int, approver_id: int, background_tasks: BackgroundTasks = None):
+async def approve_sbc(
+    db: Session,
+    sbc_id: int,
+    approver_id: int,
+    background_tasks: Optional[BackgroundTasks] = None
+):
     sbc = db.query(models.SBC).get(sbc_id)
     if not sbc:
         raise ValueError("SBC not found")
-        
+
     sbc.status = models.SBCStatus.ACTIVE
     sbc.approver_id = approver_id
-    
-    # --- NEW: Create a User Account for this SBC ---
-    # Check if a user with this email already exists
+
     existing_user = db.query(models.User).filter(models.User.email == sbc.email).first()
-    
+
     if not existing_user:
-        # Generate a temporary password and token
         temp_password = secrets.token_urlsafe(10)
         reset_token = secrets.token_urlsafe(32)
-        
-        # Create the User
+
         new_user = models.User(
-            first_name=sbc.short_name,  # Use Company Short Name as First Name
-            last_name="(External)",     # Distinction
-            username=sbc.sbc_code,      # Use SBC-00X as username
-            email=sbc.email,            # The email provided in SBC creation
-            role=models.UserRole.SBC,   # Make sure 'SBC' is in your UserRole Enum
+            first_name=sbc.short_name,
+            last_name="(External)",
+            username=sbc.sbc_code,
+            email=sbc.email,
+            role=models.UserRole.SBC,
             hashed_password=auth.get_password_hash(temp_password),
-            sbc_id=sbc.id,              # LINK THE ACCOUNT
+            sbc_id=sbc.id,
             reset_token=reset_token,
-            is_active=True
+            is_active=True,
         )
         db.add(new_user)
-        
-        # Send Invitation Email (Reusing your existing logic)
-        # Note: You need to pass 'background_tasks' to this function from the router
+
         if background_tasks:
             reset_link = f"https://po.sib.co.ma/reset-password?token={reset_token}"
             message = MessageSchema(
-        subject="Welcome to SIB PO App - Set your Password",
-        recipients=[new_user.email],
-        body=f"""
-        <p>Hello {new_user.first_name},</p>
-        <p>Your account has been created.</p>
-        <p>Please click the link below to set your password and access the system:</p>
-        <a href="{reset_link}">Set Password</a>
-        """,
-        subtype=MessageType.html
-    )
-    
-    fm = FastMail(conf)
-    await fm.send_message(message)
-    
-    
-            
+                subject="Welcome to SIB PO App - Set your Password",
+                recipients=[new_user.email],
+                body=f"""
+                <p>Hello {new_user.first_name},</p>
+                <p>Your account has been created.</p>
+                <p>Please click the link below to set your password and access the system:</p>
+                <a href="{reset_link}">Set Password</a>
+                """,
+                subtype=MessageType.html,
+            )
+
+            fm = FastMail(conf)
+            # ✅ IMPORTANT: pas await ici
+            background_tasks.add_task(fm.send_message, message)
+
     db.commit()
     db.refresh(sbc)
     return sbc
@@ -2534,7 +2537,7 @@ def get_all_bcs(db: Session, current_user: models.User, search: Optional[str] = 
     # Apply role-based filtering
     if current_user.role == models.UserRole.PM: 
         query = query.filter(models.BonDeCommande.creator_id == current_user.id)
-
+    
     # Apply search filter
     if search:
         search_term = f"%{search}%"
@@ -2907,17 +2910,18 @@ def get_bcs_export_dataframe(db: Session, search: Optional[str] = None):
             row = header_info.copy() # Copy header info
             # Add Item specific info
             row.update({
-                "BC line": index, # <-- NEW COLUMN
+    "BC line": index + 1,  # ligne 1..N (mieux pour Excel)
 
-                "PO ID": item.merged_po.po_id if item.merged_po else "",
-                "BC ID": f"{bc.bc_number}-{item.line_number}",
-                "Site Code": item.merged_po.site_code if item.merged_po else "",
-                "Item Description": item.merged_po.item_description if item.merged_po else "",
-                "SBC Rate": item.rate_sbc,
-                "SBC Quantity": item.quantity_sbc,
-                "SBC Unit Price": item.unit_price_sbc,
-                "SBC Line Total": item.line_amount_sbc
-            })
+    "PO ID": item.merged_po.po_id if item.merged_po else "",
+    "BC ID": f"{bc.bc_number}-{index + 1}",  # ✅ FIX ICI (au lieu de item.line_number)
+    "Site Code": item.merged_po.site_code if item.merged_po else "",
+    "Item Description": item.merged_po.item_description if item.merged_po else "",
+    "SBC Rate": item.rate_sbc,
+    "SBC Quantity": item.quantity_sbc,
+    "SBC Unit Price": item.unit_price_sbc,
+    "SBC Line Total": item.line_amount_sbc,
+})
+
             data.append(row)
 
     return pd.DataFrame(data)

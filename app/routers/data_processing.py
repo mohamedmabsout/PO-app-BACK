@@ -19,6 +19,7 @@ from fastapi import BackgroundTasks # Import this
 import shutil
 import os
 from ..utils import pdf_generator
+import traceback
 
 router = APIRouter(prefix="/api/data", tags=["data_processing"])
 logger = logging.getLogger(__name__)
@@ -293,6 +294,7 @@ def get_remaining_pos(
     search: Optional[str] = None,
     internal_project_id: Optional[int] = None,
     customer_project_id: Optional[int] = None,
+    project_manager_id: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
 ):
@@ -304,6 +306,7 @@ def get_remaining_pos(
         search,
         internal_project_id,
         customer_project_id,
+        project_manager_id,
         user=current_user,
     )
     # Note: Stats are usually global, calculating them with filters might be expensive
@@ -320,48 +323,52 @@ def export_bcs(
     current_user: models.User = Depends(auth.get_current_user),
 ):
     try:
-        # 1. Get DataFrame
+        # 1) Get DataFrame
         df = crud.get_bcs_export_dataframe(db, search)
 
-        if df.empty:
+        if df is None or df.empty:
             raise HTTPException(status_code=404, detail="No data found to export.")
 
-        # 2. Format Dates
-        for col in df.select_dtypes(include=["datetime64"]).columns:
-            df[col] = pd.to_datetime(df[col]).dt.strftime("%d/%m/%Y %H:%M").fillna("")
+        # 2) Format dates (robuste: convertit ce qui ressemble à une date)
+        for col in df.columns:
+            if "date" in col.lower() or col.lower().endswith("_at"):
+                try:
+                    s = pd.to_datetime(df[col], errors="coerce")
+                    if s.notna().any():
+                        df[col] = s.dt.strftime("%d/%m/%Y %H:%M").fillna("")
+                except Exception:
+                    # si conversion impossible, on laisse la colonne telle quelle
+                    pass
 
-        # 3. Create Excel
+        # 3) Create Excel (ENGINE OPENPYXL)
         output = io.BytesIO()
-        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
             df.to_excel(writer, sheet_name="BC Details", index=False)
 
-            # Optional: Add simple coloring or formatting here if desired
-            workbook = writer.book
-            worksheet = writer.sheets["BC Details"]
-            header_format = workbook.add_format(
-                {"bold": True, "bg_color": "#f0f0f0", "border": 1}
-            )
-
-            # Apply header format
-            for col_num, value in enumerate(df.columns.values):
-                worksheet.write(0, col_num, value, header_format)
-                # Auto-adjust column width (approximate)
-                worksheet.set_column(col_num, col_num, 20)
+            ws = writer.sheets["BC Details"]
+            # Auto width simple
+            for i, col_name in enumerate(df.columns, start=1):
+                max_len = max(len(str(col_name)), int(df[col_name].astype(str).map(len).max() if len(df) else 0))
+                ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = min(max_len + 2, 40)
 
         output.seek(0)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M")
         headers = {
             "Content-Disposition": f'attachment; filename="BC_Export_{timestamp}.xlsx"'
         }
+
         return StreamingResponse(
             output,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             headers=headers,
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"Export Error: {e}")
-        raise HTTPException(status_code=500, detail="Export failed")
+        print("Export Error:", repr(e))
+        traceback.print_exc()
+        raise  
 
 
 @router.get(

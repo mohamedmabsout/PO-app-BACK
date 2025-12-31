@@ -63,16 +63,13 @@ def get_all_sbcs_list(
     return crud.get_all_sbcs(db, search=search)
 
 @router.post("/{sbc_id}/approve")
-def approve_sbc_endpoint(
-    sbc_id: int, 
-    background_tasks: BackgroundTasks, # Add this
-    db: Session = Depends(get_db), 
-    current_user: models.User = Depends(require_admin)
+async def approve_sbc_endpoint(
+    sbc_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_admin),
 ):
-    print(f"DEBUG NOTIF: User Role is: '{current_user.role}'")
-
-    
-    return crud.approve_sbc(db, sbc_id, current_user.id, background_tasks)
+    return await crud.approve_sbc(db, sbc_id, current_user.id, background_tasks)
 
 @router.post("/{sbc_id}/reject")
 def reject_sbc_endpoint(
