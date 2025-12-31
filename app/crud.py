@@ -1261,6 +1261,7 @@ def get_remaining_to_accept_paginated(
     search: Optional[str] = None,
     internal_project_id: Optional[int] = None,
     customer_project_id: Optional[int] = None,
+    project_manager_id: Optional[int] = None,
         user: models.User = None  # <-- Add user parameter
 
 ):
@@ -1300,7 +1301,11 @@ def get_remaining_to_accept_paginated(
         
     if customer_project_id:
         query = query.filter(models.MergedPO.customer_project_id == customer_project_id)
-
+    if project_manager_id:
+        query = query.join(
+            models.InternalProject,
+            models.MergedPO.internal_project_id == models.InternalProject.id
+        ).filter(models.InternalProject.project_manager_id == project_manager_id)
     if search:
         term = f"%{search}%"
         query = query.filter(
@@ -3053,17 +3058,18 @@ def get_bcs_export_dataframe(db: Session, search: Optional[str] = None):
             row = header_info.copy() # Copy header info
             # Add Item specific info
             row.update({
-                "BC line": index, # <-- NEW COLUMN
+    "BC line": index + 1,  # ligne 1..N (mieux pour Excel)
 
-                "PO ID": item.merged_po.po_id if item.merged_po else "",
-                "BC ID": f"{bc.bc_number}-{item.line_number}",
-                "Site Code": item.merged_po.site_code if item.merged_po else "",
-                "Item Description": item.merged_po.item_description if item.merged_po else "",
-                "SBC Rate": item.rate_sbc,
-                "SBC Quantity": item.quantity_sbc,
-                "SBC Unit Price": item.unit_price_sbc,
-                "SBC Line Total": item.line_amount_sbc
-            })
+    "PO ID": item.merged_po.po_id if item.merged_po else "",
+    "BC ID": f"{bc.bc_number}-{index + 1}",  # ✅ FIX ICI (au lieu de item.line_number)
+    "Site Code": item.merged_po.site_code if item.merged_po else "",
+    "Item Description": item.merged_po.item_description if item.merged_po else "",
+    "SBC Rate": item.rate_sbc,
+    "SBC Quantity": item.quantity_sbc,
+    "SBC Unit Price": item.unit_price_sbc,
+    "SBC Line Total": item.line_amount_sbc,
+})
+
             data.append(row)
 
     return pd.DataFrame(data)
