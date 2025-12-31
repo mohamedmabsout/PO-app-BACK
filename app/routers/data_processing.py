@@ -400,20 +400,32 @@ def generate_bc(
         raise HTTPException(status_code=500, detail="Failed to generate BC")
 
 
-@router.get("/bc/list/{status}", response_model=List[schemas.BCResponse])
-def list_bcs(status: str, db: Session = Depends(get_db)):
-    # Map string to Enum
-    status_enum = models.BCStatus(status)
-    return crud.get_bcs_by_status(db, status_enum)
+# data_router.py
 
+@router.get("/bc/list/{status}", response_model=List[schemas.BCResponse])
+def list_bcs(
+    status: str, 
+    search: Optional[str] = Query(None), # Add this
+    db: Session = Depends(get_db)
+):
+    # Map string to Enum
+    try:
+        status_enum = models.BCStatus(status)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid status")
+
+    # Pass the search term to your existing CRUD function
+    return crud.get_bcs_by_status(db, status_enum, search_term=search)
 
 @router.get("/bc/all", response_model=List[schemas.BCResponse])  # Use your schema
 def read_all_bcs(
     search: Optional[str] = None,
+    status_filter: Optional[str] = None, 
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
+
 ):
-    return crud.get_all_bcs(db, current_user, search=search)
+    return crud.get_all_bcs(db, current_user, search=search, status_filter=status_filter)  # <-- Pass status_filter
 
 
 @router.post("/bc/{bc_id}/approve-l1")
@@ -563,3 +575,13 @@ def cancel_bc_endpoint(
         return {"message": "BC cancelled successfully."}
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+@router.post("/bc/item/{item_id}/validate")
+def validate_item(
+    item_id: int, 
+    payload: schemas.ValidationPayload, # { action: "APPROVE"|"REJECT", comment: str }
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    return crud.validate_bc_item(db, item_id, current_user, payload.action, payload.comment)
+
+# Generation Endpoint

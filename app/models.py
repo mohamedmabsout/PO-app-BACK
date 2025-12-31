@@ -1,7 +1,7 @@
 import datetime
 from sqlalchemy import Boolean, Column, Date, Enum, ForeignKey, Integer, String, Float, DateTime
 
-from .enum import ProjectType, UserRole, SBCStatus, BCStatus, NotificationType, BCType,AssignmentStatus
+from .enum import ProjectType, UserRole, SBCStatus, BCStatus, NotificationType, BCType,AssignmentStatus, ValidationState, ItemGlobalStatus
 from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, Text, Date, Enum, ForeignKey
 from .database import Base
 from sqlalchemy.orm import relationship
@@ -245,6 +245,8 @@ class MergedPO(Base):
     total_pac_amount = Column(Float, nullable=True)
     accepted_pac_amount = Column(Float, nullable=True)
     date_pac_ok = Column(Date, nullable=True)
+    assignment_date = Column(DateTime, nullable=True)
+
     
 class UploadHistory(Base):
     __tablename__ = "upload_history"
@@ -259,7 +261,6 @@ class UploadHistory(Base):
     status = Column(String(50), nullable=False) # e.g., "SUCCESS", "FAILURE"
     total_rows = Column(Integer, default=0)
     error_message = Column(Text, nullable=True) # To store detailed errors
-    
     # Who
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     uploader = relationship("User")
@@ -431,7 +432,23 @@ class BCItem(Base):
     
     bc = relationship("BonDeCommande", back_populates="items")
     merged_po = relationship("MergedPO")
- # Alerts (e.g., Export finished, Maintenance)
+    qc_validation_status = Column(Enum(ValidationState), default=ValidationState.PENDING)
+    pm_validation_status = Column(Enum(ValidationState), default=ValidationState.PENDING)
+    
+    # Global State Calculation
+    global_status = Column(Enum(ItemGlobalStatus), default=ItemGlobalStatus.PENDING)
+    
+    # Tracking
+    rejection_count = Column(Integer, default=0)
+    postponed_until = Column(DateTime, nullable=True) # Unlocks after this date
+    
+    # Link to final ACT
+    act_id = Column(Integer, ForeignKey("service_acceptances.id"), nullable=True)
+    act = relationship("ServiceAcceptance", back_populates="items")
+
+    # Relationship for history
+    rejection_history = relationship("ItemRejectionHistory", back_populates="item")
+
 
 class Notification(Base):
     __tablename__ = "notifications"
@@ -450,4 +467,38 @@ class Notification(Base):
     created_at = Column(DateTime, default=datetime.datetime.now)
 
     recipient = relationship("User", back_populates="notifications")
+class ServiceAcceptance(Base):
+    __tablename__ = "service_acceptances"
+    id = Column(Integer, primary_key=True, index=True)
+    
+    # ACT-YYYYMMDDHHMMSSXX
+    act_number = Column(String(50), unique=True, nullable=False)
+    bc_id = Column(Integer, ForeignKey("bon_de_commandes.id"))
+    
+    created_at = Column(DateTime, default=datetime.datetime.now)
+    creator_id = Column(Integer, ForeignKey("users.id")) # The PD
+    
+    items = relationship("BCItem", back_populates="act")
+    bc = relationship("BonDeCommande") # Optional backref
+    file_path = Column(String(500), nullable=True)
+    creator = relationship("User")
+    total_amount_ht = Column(Float, default=0.0)
+    # Optional: If you want to track tax/ttc on the ACT level too
+    total_tax_amount = Column(Float, default=0.0) 
+    total_amount_ttc = Column(Float, default=0.0)
+    applied_tax_rate = Column(Float, default=0.0) # Store the rate used (e.g. 0.20)
 
+class ItemRejectionHistory(Base):
+    __tablename__ = "item_rejection_history"
+    id = Column(Integer, primary_key=True)
+    
+    bc_item_id = Column(Integer, ForeignKey("bc_items.id"), nullable=False)
+    rejected_by_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    
+    comment = Column(Text, nullable=False)
+    rejected_at = Column(DateTime, default=datetime.datetime.now)
+    
+    item = relationship("BCItem", back_populates="rejection_history")
+    rejected_by = relationship("User")
+    bc_item = relationship("BCItem", back_populates="rejection_history")
+    rejected_by = relationship("User") # To get the name (e.g. "rejected_by.first_name")

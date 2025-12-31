@@ -1,4 +1,4 @@
-from datetime import datetime,date
+from datetime import datetime,date, timedelta
 from fastapi import BackgroundTasks
 from sqlalchemy.orm import Session
 from typing import List, Optional
@@ -22,6 +22,9 @@ import logging
 from fastapi_mail import FastMail, MessageSchema, MessageType
 import secrets
 from .config import conf
+from datetime import datetime, timedelta
+from sqlalchemy import func
+from .utils.pdf_generator import generate_act_pdf
 logger = logging.getLogger(__name__)
 
 
@@ -1080,13 +1083,10 @@ def get_total_financial_summary(db: Session, user: models.User = None) -> dict:
         func.sum(models.MergedPO.line_amount_hw).label("total_po_value"),
         func.sum(models.MergedPO.accepted_ac_amount).label("total_accepted_ac"),
         func.sum(models.MergedPO.accepted_pac_amount).label("total_accepted_pac")
-    ).filter(
-        models.MergedPO.assignment_status == models.AssignmentStatus.APPROVED
     )
-
     # --- THIS IS THE FIX ---
     # If a user is provided and their role is PM, filter the data
-    if user and user.role in [UserRole.PM, UserRole.PD]:
+    if user and user.role in [UserRole.PM]:
         # Join with InternalProject to access the project_manager_id
         query = query.join(
             models.InternalProject, 
@@ -1112,54 +1112,63 @@ def get_total_financial_summary(db: Session, user: models.User = None) -> dict:
         "remaining_gap": remaining_gap
     }
 def get_internal_projects_financial_summary(db: Session, user: models.User = None):
-    # 1. Create a subquery to pre-aggregate all financial data from MergedPO.
-    # CRITICAL UPDATE: Filter by APPROVED status here.
-    
-    # Note: MergedPO now links to CustomerProject, not InternalProject directly.
-    # We must join to aggregate correctly by InternalProject.
-    
-    po_summary_subquery = db.query(
-        models.MergedPO.internal_project_id, # Group by Internal Project ID
-        func.sum(models.MergedPO.line_amount_hw).label("total_po_value"),
-        (func.coalesce(func.sum(models.MergedPO.accepted_ac_amount), 0) + 
-         func.coalesce(func.sum(models.MergedPO.accepted_pac_amount), 0)).label("total_accepted")
-    ).join(
-        models.CustomerProject, models.MergedPO.customer_project_id == models.CustomerProject.id
-    ).filter(
-        models.MergedPO.assignment_status == models.AssignmentStatus.APPROVED # <--- FILTER ADDED
-    ).group_by(models.MergedPO.internal_project_id).subquery()
-
-    # 2. Build the main query starting from the InternalProject table.
-    query = db.query(
-        models.InternalProject,
-        po_summary_subquery.c.total_po_value,
-        po_summary_subquery.c.total_accepted
+    # 1. Fetch APPROVED data grouped by Internal Project
+    # We use the direct relationship: MergedPO.internal_project_id
+    results = db.query(
+        models.InternalProject.id.label("project_id"),
+        models.InternalProject.name.label("project_name"),
+        models.InternalProject.project_manager_id,
+        func.coalesce(func.sum(models.MergedPO.line_amount_hw), 0).label("total_po_value"),
+        (
+            func.coalesce(func.sum(models.MergedPO.accepted_ac_amount), 0) + 
+            func.coalesce(func.sum(models.MergedPO.accepted_pac_amount), 0)
+        ).label("total_accepted")
     ).outerjoin(
-        po_summary_subquery, 
-        models.InternalProject.id == po_summary_subquery.c.internal_project_id
-    ).options(
-        joinedload(models.InternalProject.project_manager)
-    )
+        models.MergedPO, 
+        and_(
+            models.InternalProject.id == models.MergedPO.internal_project_id, # Direct Link
+            models.MergedPO.assignment_status == models.AssignmentStatus.APPROVED # Only Approved
+        )
+    ).group_by(models.InternalProject.id, models.InternalProject.name).all()
 
-    # 3. Apply role-based filtering
-    if user and user.role in [models.UserRole.PM, models.UserRole.PD]:
-        query = query.filter(models.InternalProject.project_manager_id == user.id)
+    # 2. Fetch "Pending Approval" data (The Limbo Money)
+    pending_stats = db.query(
+        func.coalesce(func.sum(models.MergedPO.line_amount_hw), 0).label("po_value"),
+        func.coalesce(func.sum(models.MergedPO.accepted_ac_amount), 0).label("ac_value"),
+        func.coalesce(func.sum(models.MergedPO.accepted_pac_amount), 0).label("pac_value")
+    ).filter(
+        models.MergedPO.assignment_status == models.AssignmentStatus.PENDING_APPROVAL
+    ).first()
+    
+    pending_po = float(pending_stats.po_value)
+    pending_accepted = float(pending_stats.ac_value) + float(pending_stats.pac_value)
 
-    # 4. Execute
-    results = query.all()
- 
-    # 5. Process results
+    # 3. Identify TBD Project
+    tbd_project = db.query(models.InternalProject).filter(models.InternalProject.name == "To Be Determined").first()
+    tbd_id = tbd_project.id if tbd_project else -1
+
     summary_list = []
-    for project, total_po, total_acc in results:
-        po_value = total_po or 0
-        accepted = total_acc or 0
+    
+    for row in results:
+        # Role Filtering
+        if user and user.role in [models.UserRole.PM, models.UserRole.PD]:
+             if row.project_manager_id != user.id:
+                 continue
+
+        po_value = float(row.total_po_value)
+        accepted = float(row.total_accepted)
+
+        # CRITICAL: If this is TBD, add the Pending money to it
+        if row.project_id == tbd_id:
+            po_value += pending_po
+            accepted += pending_accepted
+
         gap = po_value - accepted
-        completion = (accepted / po_value * 100) if po_value > 0 else 0
+        completion = (accepted / po_value * 100) if po_value > 0 else 0.0
         
         summary_list.append({
-            "project_id": project.id,
-            "project_name": project.name,
-            "project_manager": project.project_manager, 
+            "project_id": row.project_id,
+            "project_name": row.project_name,
             "total_po_value": po_value,
             "total_accepted": accepted,
             "remaining_gap": gap,
@@ -1167,6 +1176,7 @@ def get_internal_projects_financial_summary(db: Session, user: models.User = Non
         })
         
     return summary_list
+
 
 
 def get_customer_projects_financial_summary(db: Session):
@@ -1746,21 +1756,24 @@ def get_performance_matrix(
     filter_user_id: Optional[int] = None,
     current_user: models.User = None
 ):
-    # 1. Get eligible users
+    # 1. Get eligible users (Standard logic)
     pms_to_process = []
     if current_user and current_user.role in [UserRole.PM]:
-        # If the user is a PM or PD, they only see their own data
         pms_to_process = [current_user]
-    else: # This covers ADMIN or cases where no user is passed
-        # Admins see everyone
+    else: 
         pms_to_process = db.query(models.User).filter(
             models.User.role.in_(['PM', 'ADMIN', 'PD'])
         ).all()
+        
+    # --- FIND THE TBD USER ID ---
+    # Find the user linked to the "To Be Determined" project
+    tbd_project = db.query(models.InternalProject).filter(models.InternalProject.name == "To Be Determined").first()
+    tbd_pm_id = tbd_project.project_manager_id if tbd_project else -1
     
     results = []
 
     for pm in pms_to_process:
-        # A. Fetch Targets (Plan) - STRICTLY FOR THE PERIOD
+        # A. Fetch Targets (Plan) - Remains the same
         target_query = db.query(
             func.sum(models.UserPerformanceTarget.po_monthly_update),
             func.sum(models.UserPerformanceTarget.acceptance_monthly_update)
@@ -1775,8 +1788,11 @@ def get_performance_matrix(
         plan_po = plan_po or 0.0
         plan_invoice = plan_invoice or 0.0
 
-        # B. Fetch Actuals - STRICTLY FOR THE PERIOD (For the "Target PO" and "Target Invoice" columns)
-        base_filters = [models.InternalProject.project_manager_id == pm.id]
+        # B. Fetch APPROVED Actuals (Standard Logic)
+        base_filters = [
+            models.InternalProject.project_manager_id == pm.id,
+            models.MergedPO.assignment_status == models.AssignmentStatus.APPROVED # Only Approved
+        ]
         
         # Period Filters
         po_date_filters = base_filters + [extract('year', models.MergedPO.publish_date) == year]
@@ -1793,38 +1809,68 @@ def get_performance_matrix(
             func.sum(case((and_(*ac_date_filters), models.MergedPO.accepted_ac_amount), else_=0)),
             func.sum(case((and_(*pac_date_filters), models.MergedPO.accepted_pac_amount), else_=0))
         ).join(
+            models.CustomerProject, models.MergedPO.customer_project_id == models.CustomerProject.id
+        ).join(
             models.InternalProject, models.MergedPO.internal_project_id == models.InternalProject.id
         ).first()
 
         actual_po_period = summary[0] or 0.0
         actual_paid_period = (summary[1] or 0.0) + (summary[2] or 0.0)
 
-        # C. Fetch LIFETIME GAP (New Logic)
-        # Calculates (All POs ever assigned to this PM) - (All Payments ever received by this PM)
+        # C. Fetch LIFETIME GAP (Standard Logic)
         lifetime_summary = db.query(
             func.sum(models.MergedPO.line_amount_hw),
             func.sum(models.MergedPO.accepted_ac_amount),
             func.sum(models.MergedPO.accepted_pac_amount)
-        ).join(models.InternalProject).filter(
-            models.InternalProject.project_manager_id == pm.id
+        ).join(
+            models.InternalProject, models.MergedPO.internal_project_id == models.InternalProject.id
+        ).filter(
+            models.InternalProject.project_manager_id == pm.id,
+            models.MergedPO.assignment_status == models.AssignmentStatus.APPROVED # Only Approved
         ).first()
         
         lifetime_po = lifetime_summary[0] or 0.0
         lifetime_paid = (lifetime_summary[1] or 0.0) + (lifetime_summary[2] or 0.0)
         total_lifetime_gap = lifetime_po - lifetime_paid
 
+        # --- D. SPECIAL LOGIC FOR TBD USER: Add Pending Amounts ---
+        if pm.id == tbd_pm_id:
+            # 1. Calculate Pending GAP (Lifetime)
+            # Find all POs that are PENDING approval. These belong to TBD financially.
+            pending_lifetime = db.query(
+                func.sum(models.MergedPO.line_amount_hw),
+                func.sum(models.MergedPO.accepted_ac_amount),
+                func.sum(models.MergedPO.accepted_pac_amount)
+            ).filter(
+                models.MergedPO.assignment_status == models.AssignmentStatus.PENDING_APPROVAL
+            ).first()
+            
+            p_gap_po = pending_lifetime[0] or 0.0
+            p_gap_paid = (pending_lifetime[1] or 0.0) + (pending_lifetime[2] or 0.0)
+            
+            total_lifetime_gap += (p_gap_po - p_gap_paid)
+
+            # 2. Calculate Pending Actuals (Period)
+            # Find Pending POs that match the current period
+            pending_po_period = db.query(func.sum(models.MergedPO.line_amount_hw)).filter(
+                models.MergedPO.assignment_status == models.AssignmentStatus.PENDING_APPROVAL,
+                extract('year', models.MergedPO.publish_date) == year,
+                # Add month filter if applicable
+                extract('month', models.MergedPO.publish_date) == month if month else True
+            ).scalar() or 0.0
+            
+            actual_po_period += pending_po_period
+            
+            # (Note: Usually we don't count pending AC/PAC in Actuals, but if you want to, add logic here)
+
+        # --- E. Final Result Construction ---
         results.append({
             "user_id": pm.id,
             "user_name": f"{pm.first_name} {pm.last_name}",
-            
-            # Use LIFETIME GAP here
             "total_gap": total_lifetime_gap, 
-            
-            # Use PERIOD Stats here
             "plan_po": plan_po,
             "actual_po": actual_po_period,
             "percent_po": (actual_po_period / plan_po * 100) if plan_po > 0 else 0,
-            
             "plan_invoice": plan_invoice,
             "actual_invoice": actual_paid_period,
             "percent_invoice": (actual_paid_period / plan_invoice * 100) if plan_invoice > 0 else 0,
@@ -1954,7 +2000,8 @@ def get_planning_matrix(db: Session, year: int, user: Optional[models.User] = No
             func.sum(models.MergedPO.line_amount_hw)
         ).join(models.CustomerProject).join(models.InternalProject).filter(
             models.InternalProject.project_manager_id == pm.id,
-            extract('year', models.MergedPO.publish_date) == year
+            extract('year', models.MergedPO.publish_date) == year,
+            models.MergedPO.assignment_status == models.AssignmentStatus.APPROVED
         ).group_by('month').all()
 
         for m, val in po_results:
@@ -1965,7 +2012,9 @@ def get_planning_matrix(db: Session, year: int, user: Optional[models.User] = No
         paid_items = db.query(models.MergedPO).join(models.CustomerProject).join(models.InternalProject).filter(
             models.InternalProject.project_manager_id == pm.id,
             (extract('year', models.MergedPO.date_ac_ok) == year) | 
-            (extract('year', models.MergedPO.date_pac_ok) == year)
+            (extract('year', models.MergedPO.date_pac_ok) == year),
+                    models.MergedPO.assignment_status == models.AssignmentStatus.APPROVED
+
         ).all()
 
         for item in paid_items:
@@ -2404,62 +2453,51 @@ def get_all_sbcs(db: Session, search: Optional[str] = None):
             (models.SBC.phone_1.ilike(term))
         )
     return return_query.order_by(models.SBC.created_at.desc()).all()
-async def approve_sbc(db: Session, sbc_id: int, approver_id: int, background_tasks: BackgroundTasks = None):
+def approve_sbc(db: Session, sbc_id: int, approver_id: int):
+    # 1. Get the SBC
     sbc = db.query(models.SBC).get(sbc_id)
     if not sbc:
         raise ValueError("SBC not found")
         
+    # 2. Update SBC Status
     sbc.status = models.SBCStatus.ACTIVE
     sbc.approver_id = approver_id
     
-    # --- NEW: Create a User Account for this SBC ---
-    # Check if a user with this email already exists
-    existing_user = db.query(models.User).filter(models.User.email == sbc.email).first()
+    # 3. Check if a User already exists for this email
+    existing_user = get_user_by_email(db, sbc.email)
     
+    new_user = None
     if not existing_user:
-        # Generate a temporary password and token
+        # 4. Create the User Account with SBC Role
         temp_password = secrets.token_urlsafe(10)
         reset_token = secrets.token_urlsafe(32)
         
-        # Create the User
+        # Split name for First/Last
+        # Assuming sbc.ceo_name is "John Doe"
+        name_parts = (sbc.ceo_name or "SBC User").split(" ")
+        first_name = name_parts[0]
+        last_name = " ".join(name_parts[1:]) if len(name_parts) > 1 else ""
+
         new_user = models.User(
-            first_name=sbc.short_name,  # Use Company Short Name as First Name
-            last_name="(External)",     # Distinction
-            username=sbc.sbc_code,      # Use SBC-00X as username
-            email=sbc.email,            # The email provided in SBC creation
-            role=models.UserRole.SBC,   # Make sure 'SBC' is in your UserRole Enum
+            email=sbc.email,
+            username=sbc.email, # Use email as username for external users
+            first_name=first_name,
+            last_name=last_name,
+            role="SBC", # <--- FORCE THE SBC ROLE HERE
             hashed_password=auth.get_password_hash(temp_password),
-            sbc_id=sbc.id,              # LINK THE ACCOUNT
-            reset_token=reset_token,
-            is_active=True
+            phone_number=sbc.phone_1,
+            is_active=True,
+            reset_token=reset_token # Save token for the email
         )
         db.add(new_user)
-        
-        # Send Invitation Email (Reusing your existing logic)
-        # Note: You need to pass 'background_tasks' to this function from the router
-        if background_tasks:
-            reset_link = f"https://po.sib.co.ma/reset-password?token={reset_token}"
-            message = MessageSchema(
-        subject="Welcome to SIB PO App - Set your Password",
-        recipients=[new_user.email],
-        body=f"""
-        <p>Hello {new_user.first_name},</p>
-        <p>Your account has been created.</p>
-        <p>Please click the link below to set your password and access the system:</p>
-        <a href="{reset_link}">Set Password</a>
-        """,
-        subtype=MessageType.html
-    )
+        # Flush to get the ID, but don't commit yet to keep transaction atomic
+        db.flush() 
     
-    fm = FastMail(conf)
-    await fm.send_message(message)
-    
-    
-            
     db.commit()
     db.refresh(sbc)
-    return sbc
-
+    
+    # Return both the SBC and the New User (if created) so the router can send the email
+    return sbc, new_user
 
 def reject_sbc(db: Session, sbc_id: int):
     sbc = db.query(models.SBC).get(sbc_id)
@@ -2523,17 +2561,15 @@ def get_bcs_by_status(db: Session, status: models.BCStatus, search_term: Optiona
 
         )
     return query.all()
-def get_all_bcs(db: Session, current_user: models.User, search: Optional[str] = None):
+def get_all_bcs(db: Session, current_user: models.User, search: Optional[str] = None, status_filter: Optional[str] = None): # <-- NEW ARGUMENT:
     query = db.query(models.BonDeCommande).options(
         joinedload(models.BonDeCommande.sbc),
         joinedload(models.BonDeCommande.internal_project),
-        
-        # --- ADD THIS LINE ---
         joinedload(models.BonDeCommande.creator) 
     )
     # Apply role-based filtering
-    if current_user.role == models.UserRole.PM: 
-        query = query.filter(models.BonDeCommande.creator_id == current_user.id)
+    # if current_user.role == models.UserRole.PM: 
+    #     query = query.filter(models.BonDeCommande.internal_project.project_manager_id == current_user.id)
 
     # Apply search filter
     if search:
@@ -2544,7 +2580,9 @@ def get_all_bcs(db: Session, current_user: models.User, search: Optional[str] = 
             (models.SBC.short_name.ilike(search_term)) |
             (models.InternalProject.name.ilike(search_term))
         )
-    
+    if status_filter:
+        query = query.filter(models.BonDeCommande.status == status_filter)
+
     # Order by newest first and execute
     return query.order_by(models.BonDeCommande.created_at.desc()).all()
 
@@ -2571,18 +2609,21 @@ def reject_bc(db: Session, bc_id: int, reason: str, rejector_id: int):
     
     db.commit()
     return bc
-
-# backend/app/py
-from sqlalchemy.orm import joinedload
-
 def get_bc_by_id(db: Session, bc_id: int):
+
+    check_and_unlock_postponed_items(db, bc_id)
+
     return db.query(models.BonDeCommande).options(
         # 1. Load items, and for each item, load the associated MergedPO
         joinedload(models.BonDeCommande.items).joinedload(models.BCItem.merged_po),
         # 2. Load other relationships
         joinedload(models.BonDeCommande.sbc),
         joinedload(models.BonDeCommande.internal_project),
-        joinedload(models.BonDeCommande.creator)
+        joinedload(models.BonDeCommande.creator),
+        joinedload(models.BonDeCommande.items)
+            .joinedload(models.BCItem.rejection_history)
+            .joinedload(models.ItemRejectionHistory.rejected_by)
+
     ).filter(models.BonDeCommande.id == bc_id).first()
 
 def assign_site_to_internal_project_by_code(
@@ -2648,40 +2689,145 @@ def assign_site_to_internal_project_by_code(
 def bulk_assign_sites(db: Session, site_ids: List[int], target_project_id: int, admin_user: models.User):
     # 1. Get the target project details (needed for the notification text)
     target_project = db.query(models.InternalProject).get(target_project_id)
-    if not target_project:
-        return {"updated": 0, "error": "Target project not found"}
+    if not target_project: return {"updated": 0, "error": "Target not found"}
 
-    # 2. Get the "To Be Determined" project ID to ensure we only move unassigned sites
+    # 2. Filter Valid Sites (Only TBD or Unassigned)
     tbd_project = db.query(models.InternalProject).filter_by(name="To Be Determined").first()
     tbd_id = tbd_project.id if tbd_project else 0
 
-    # 3. Perform the Update
-    # We update Internal Project AND set Status to PENDING
-    # We only touch sites that are currently TBD (safety check)
+    # Get current allocations to check status
+    existing_allocations = db.query(models.SiteProjectAllocation).filter(
+        models.SiteProjectAllocation.site_id.in_(site_ids)
+    ).all()
+    current_map = {a.site_id: a.internal_project_id for a in existing_allocations}
+    
+    valid_site_ids = []
+    skipped_count = 0
+    
+    for sid in site_ids:
+        # Allow if no allocation OR allocation is TBD
+        current_proj = current_map.get(sid)
+        if current_proj is None or current_proj == tbd_id:
+            valid_site_ids.append(sid)
+        else:
+            skipped_count += 1
+            
+    if not valid_site_ids: return {"updated": 0, "skipped": skipped_count}
+
+    # 3. Update Allocations (Upsert Logic)
+    # We need a sample customer_project_id for new records. Get one from DB or use 1.
+    sample_cp_id = db.query(models.CustomerProject.id).first()
+    default_cp_id = sample_cp_id[0] if sample_cp_id else 1
+
+    for sid in valid_site_ids:
+        # Check if allocation exists
+        alloc = db.query(models.SiteProjectAllocation).filter_by(site_id=sid).first()
+        if alloc:
+            alloc.internal_project_id = target_project_id
+        else:
+            # Create new allocation
+            new_alloc = models.SiteProjectAllocation(
+                site_id=sid,
+                internal_project_id=target_project_id,
+                customer_project_id=default_cp_id 
+            )
+            db.add(new_alloc)
+            
+    # 4. Update MergedPO Records
     result = db.query(models.MergedPO).filter(
-        models.MergedPO.site_id.in_(site_ids),
-        models.MergedPO.internal_project_id == tbd_id 
+        models.MergedPO.site_id.in_(valid_site_ids)
     ).update({
         "internal_project_id": target_project_id,
-        "assignment_status": models.AssignmentStatus.PENDING_APPROVAL
+        "assignment_status": models.AssignmentStatus.PENDING_APPROVAL,
+        "assignment_date": datetime.now() # <--- Set current time
+ 
     }, synchronize_session=False)
     
     db.commit()
 
-    # 4. Create Notification
-    # Check if the project actually has a manager assigned
+    # 5. Notify PM
     if target_project.project_manager_id:
         create_notification(
             db, 
             recipient_id=target_project.project_manager_id,
             type=models.NotificationType.TODO,
-            title="Site Assignment Request",
-            message=f"{result} sites have been assigned to '{target_project.name}' and require your approval.",
-            link="/projects/approvals" # Link to the PM approval page
+            title="Bulk Site Assignment",
+            message=f"{result} sites assigned to '{target_project.name}'. Review required.",
+            link="/projects/approvals"
         )
-    
-    return {"updated": result}
+        db.commit()
 
+    return {"updated": result, "skipped": skipped_count}
+
+def auto_approve_old_assignments(db: Session):
+    """
+    Finds sites pending for > 7 days, auto-approves them, and notifies PMs/Admins.
+    """
+    seven_days_ago = datetime.now() - timedelta(days=7)
+
+    # 1. Identify which PMs are affected
+    # We query for PENDING items older than 7 days, joined with their target Project and PM.
+    # We group by PM so we can send one notification per PM.
+    pending_groups = db.query(
+        models.User.id.label("pm_id"),
+        models.InternalProject.name.label("project_name"),
+        func.count(models.MergedPO.id).label("count")
+    ).join(
+        models.InternalProject, models.MergedPO.internal_project_id == models.InternalProject.id
+    ).join(
+        models.User, models.InternalProject.project_manager_id == models.User.id
+    ).filter(
+        models.MergedPO.assignment_status == models.AssignmentStatus.PENDING_APPROVAL,
+        models.MergedPO.assignment_date <= seven_days_ago
+    ).group_by(models.User.id, models.InternalProject.name).all()
+
+    if not pending_groups:
+        return 0
+
+    total_approved = 0
+
+    # 2. Iterate through groups and notify PMs
+    for group in pending_groups:
+        count = group.count
+        pm_id = group.pm_id
+        project_name = group.project_name
+        
+        # Notify the PM
+        create_notification(
+            db,
+            recipient_id=pm_id,
+            type=models.NotificationType.APP, # 'APP' type for status updates
+            title="Auto-Approval Notice",
+            message=f"{count} sites assigned to '{project_name}' were auto-approved due to inactivity (>7 days).",
+            link="/projects/list" # Link to their project list to see the new sites
+        )
+        total_approved += count
+
+    # 3. Perform the Bulk Update
+    # We update ALL eligible records in one go for efficiency
+    db.query(models.MergedPO).filter(
+        models.MergedPO.assignment_status == models.AssignmentStatus.PENDING_APPROVAL,
+        models.MergedPO.assignment_date <= seven_days_ago
+    ).update({
+        "assignment_status": models.AssignmentStatus.APPROVED,
+        "assignment_date": None 
+    }, synchronize_session=False)
+
+    # 4. Notify Admins
+    # We send a summary to all admins
+    admins = db.query(models.User).filter(models.User.role == "ADMIN").all()
+    for admin in admins:
+        create_notification(
+            db,
+            recipient_id=admin.id,
+            type=models.NotificationType.SYSTEM,
+            title="System Auto-Approval",
+            message=f"System auto-approved {total_approved} overdue site assignments.",
+            link=None
+        )
+
+    db.commit()
+    return total_approved
 def get_pending_sites_for_pm(db: Session, pm_id: int):
     # Find projects managed by this PM
     return db.query(models.MergedPO).join(models.InternalProject).filter(
@@ -2690,7 +2836,7 @@ def get_pending_sites_for_pm(db: Session, pm_id: int):
     ).all()
 
 # 3. NEW: Process PM Decision (Approve/Reject)
-def process_assignment_review(db: Session, site_ids: List[int], action: str, pm_user: models.User):
+def process_assignment_review(db: Session, merged_po_ids: List[int], action: str, pm_user: models.User):
     """
     Handles the PM's decision.
     action: "APPROVE" or "REJECT"
@@ -2699,7 +2845,7 @@ def process_assignment_review(db: Session, site_ids: List[int], action: str, pm_
     # 1. Identify the records involved
     # We filter by site_id AND PENDING status to be safe
     query = db.query(models.MergedPO).filter(
-        models.MergedPO.site_id.in_(site_ids),
+        models.MergedPO.id.in_(merged_po_ids), 
         models.MergedPO.assignment_status == models.AssignmentStatus.PENDING_APPROVAL
     )
     
@@ -3029,9 +3175,14 @@ def check_system_state_notifications(db: Session, user: models.User):
         
         if tbd_project:
             # Simple query using the direct relationship you confirmed exists
-            tbd_count = db.query(models.MergedPO).filter(
+            tbd_po_count = db.query(models.MergedPO).filter(
                 models.MergedPO.internal_project_id == tbd_project.id
             ).count()
+            tbd_count = db.query(
+                func.count(distinct(models.MergedPO.site_id))
+            ).filter(
+                models.MergedPO.internal_project_id == tbd_project.id
+            ).scalar() 
             
             print(f"DEBUG NOTIF: TBD Project ID is {tbd_project.id}. Count found: {tbd_count}")
             
@@ -3039,12 +3190,12 @@ def check_system_state_notifications(db: Session, user: models.User):
                 virtual_todos.append({
                     "id": "virtual-1",
                     "title": "Assign TBD Sites",
-                    "desc": f"{tbd_count} sites are waiting in 'To Be Determined'.",
+                    "desc": f"{tbd_count} unique sites ({tbd_po_count} POs) are waiting in 'To Be Determined'.", # Updated message
                     "priority": "High",
                     "badgeBg": "danger",
                     "link": "/site-dispatcher",
                     "action": "Go to Dispatcher",
-                    "type": "TODO", # Add type for frontend filter
+                    "type": "TODO",
                     "is_read": False,
                     "created_at": datetime.now()
                 })
@@ -3116,3 +3267,282 @@ def import_planning_targets(db: Session, df: pd.DataFrame):
     db.commit()
     return count
 
+def validate_bc_item(db: Session, item_id: int, user: models.User, action: str, comment: str = None):
+    """
+    Handles QC or PM approval/rejection.
+    action: "APPROVE" or "REJECT"
+    """
+    item = db.query(models.BCItem).get(item_id)
+    if not item: raise ValueError("Item not found")
+
+    # 1. Determine Role
+    is_qc = user.role == UserRole.QUALITY # Adjust to your Enum
+    is_pm = user.role == UserRole.PM
+    is_pd = user.role in [UserRole.PD, UserRole.ADMIN]
+    print(f"DEBUG: User Role: {user.role}, is_qc: {is_qc}, is_pm: {is_pm}, is_pd: {is_pd}")
+        
+
+    if not (is_qc or is_pm or is_pd):
+        print(f"user.role:{user.role}")
+        raise ValueError("Unauthorized role.")
+
+
+
+    # 2. Apply Decision
+    if action == "APPROVE":
+        if is_qc: item.qc_validation_status = models.ValidationState.APPROVED
+        if is_pm: item.pm_validation_status = models.ValidationState.APPROVED
+        if item.global_status == models.ItemGlobalStatus.POSTPONED:
+             # Check if BOTH are now approved (meaning the rejector fixed their status)
+             if item.qc_validation_status == models.ValidationState.APPROVED and \
+                item.pm_validation_status == models.ValidationState.APPROVED:
+                 
+                 item.global_status = models.ItemGlobalStatus.PENDING_PD_APPROVAL
+                 item.postponed_until = None # Clear the timer
+        
+        # --- Standard Logic (If currently Pending) ---
+        elif item.global_status == models.ItemGlobalStatus.PENDING:
+             if item.qc_validation_status == models.ValidationState.APPROVED and \
+                item.pm_validation_status == models.ValidationState.APPROVED:
+                 
+                 item.global_status = models.ItemGlobalStatus.PENDING_PD_APPROVAL
+
+        # --- PD Logic ---
+        if is_pd:
+            if item.global_status != models.ItemGlobalStatus.PENDING_PD_APPROVAL:
+                 # PD tried to approve, but it wasn't ready. Skip or Log.
+                 print(f"Skipping Item {item.id}: PD tried to approve but status is {item.global_status}")
+            else:
+                item.global_status = models.ItemGlobalStatus.READY_FOR_ACT
+
+
+    elif action == "REJECT":
+        if not comment: raise ValueError("Comment is mandatory for rejection.")
+        
+        # Record History
+        history = models.ItemRejectionHistory(
+            bc_item_id=item.id,
+            rejected_by_id=user.id,
+            comment=comment
+        )
+        db.add(history)
+        
+        # Update Status
+        if is_qc: item.qc_validation_status = models.ValidationState.REJECTED
+        if is_pm: item.pm_validation_status = models.ValidationState.REJECTED
+        if is_pd:
+            item.global_status = models.ItemGlobalStatus.POSTPONED
+            item.postponed_until = datetime.now() + timedelta(weeks=3)
+
+
+        # Increment Count
+        item.rejection_count += 1
+
+    # 3. Calculate Global Status (The "Boucle" Logic)
+    
+    # Case A: Permanent Rejection
+    if item.rejection_count >= 15:
+        item.global_status = models.ItemGlobalStatus.PERMANENTLY_REJECTED
+        # TODO: Trigger Notification to Admin/All
+    
+    # Case B: Postponement (If EITHER rejected it)
+    # We only trigger postponement if BOTH have voted and at least one is REJECTED.
+    # OR, do you want immediate postponement? 
+    # Let's wait for BOTH to vote so they can both see it as requested.
+    elif item.qc_validation_status != models.ValidationState.PENDING and \
+         item.pm_validation_status != models.ValidationState.PENDING:
+         
+        if item.qc_validation_status == models.ValidationState.REJECTED or \
+           item.pm_validation_status == models.ValidationState.REJECTED:
+            
+            item.global_status = models.ItemGlobalStatus.POSTPONED
+            item.postponed_until = datetime.now() + timedelta(weeks=3)
+            
+            # Reset individual flags for next round? 
+            # Usually we keep them as record until the postponement is over.
+            
+        
+
+    if item.qc_validation_status == models.ValidationState.APPROVED and \
+       item.pm_validation_status == models.ValidationState.APPROVED and \
+       item.global_status == models.ItemGlobalStatus.PENDING: # Only move if currently pending
+        
+        item.global_status = models.ItemGlobalStatus.PENDING_PD_APPROVAL
+
+    db.commit()
+    return item
+
+def generate_act_record(db: Session, bc_id: int, creator_id: int, item_ids: List[int]):
+    # 1. Fetch the Parent BC to check its Type
+    bc = db.query(models.BonDeCommande).get(bc_id)
+    if not bc:
+        raise ValueError("BC not found.")
+
+    # 2. Fetch the Items requested for Acceptance
+    items = db.query(models.BCItem).options(
+        joinedload(models.BCItem.merged_po) # Ensure we have the category
+    ).filter(
+        models.BCItem.id.in_(item_ids),
+        models.BCItem.global_status == models.ItemGlobalStatus.READY_FOR_ACT
+    ).all()
+    
+    if not items: 
+        raise ValueError("No eligible items selected.")
+
+    # --- NEW: CURRENT TAX RATE VERIFICATION ---
+    
+    current_year = datetime.now().year
+    
+    # We will also track the tax rate to use for the final calculation
+    validated_tax_rate = None 
+
+    for item in items:
+        # A. Determine what the tax rate SHOULD be right now
+        if bc.bc_type == models.BCType.PERSONNE_PHYSIQUE:
+            current_statutory_rate = 0.0
+        else:
+            category = item.merged_po.category
+            # Re-fetch the rate from your TaxRule table based on NOW
+            current_statutory_rate = get_tax_rate(db, category=category, year=current_year)
+        
+        # B. Compare with what is stored on the BC Line
+        # Use a small epsilon for float comparison
+        if abs(item.applied_tax_rate - current_statutory_rate) > 0.001:
+            raise ValueError(
+                f"Tax Rate Mismatch for item '{item.merged_po.po_no}': "
+                f"BC has {item.applied_tax_rate*100:.0f}%, but the current valid rate for {current_year} is {current_statutory_rate*100:.0f}%. "
+                "The BC must be updated to reflect current tax laws before acceptance."
+            )
+        
+        # C. Ensure consistency within the selected batch (all items must share the rate)
+        if validated_tax_rate is None:
+            validated_tax_rate = current_statutory_rate
+        elif abs(validated_tax_rate - current_statutory_rate) > 0.001:
+             raise ValueError("Cannot generate ACT with mixed tax rates in the selected items.")
+
+    # ------------------------------------------
+
+    # 3. Create Record
+    now_str = datetime.now().strftime("%Y%m%d%H%M%S")
+    act_number = f"ACT-{now_str}" 
+
+    act = models.ServiceAcceptance(
+        act_number=act_number,
+        bc_id=bc_id,
+        creator_id=creator_id,
+        applied_tax_rate=validated_tax_rate # Store the validated rate
+    )
+    db.add(act)
+    db.flush() 
+    
+    # 4. Link Items & Calculate Total HT
+    total_ht = 0.0
+    
+    for item in items:
+        item.act_id = act.id
+        item.global_status = models.ItemGlobalStatus.ACCEPTED
+        total_ht += (item.line_amount_sbc or 0.0)
+    
+    # 5. Final Calculation (Using the validated rate)
+    total_tax = total_ht * validated_tax_rate
+    total_ttc = total_ht + total_tax
+    
+    act.total_amount_ht = total_ht
+    act.total_tax_amount = total_tax
+    act.total_amount_ttc = total_ttc
+    
+    db.commit()
+    db.refresh(act)
+    return act
+
+def check_and_unlock_postponed_items(db: Session, bc_id: int):
+    """
+    Checks if any postponed items in this BC have passed their timeout date.
+    If so, resets them to PENDING so they can be re-processed.
+    """
+    now = datetime.now()
+    
+    # Find items that are POSTPONED and the date has passed
+    items_to_unlock = db.query(models.BCItem).filter(
+        models.BCItem.bc_id == bc_id,
+        models.BCItem.global_status == models.ItemGlobalStatus.POSTPONED,
+        models.BCItem.postponed_until <= now
+    ).all()
+    
+    count = 0
+    for item in items_to_unlock:
+        # Unlock logic
+        item.global_status = models.ItemGlobalStatus.PENDING
+        item.postponed_until = None
+        # Ensure individual statuses are reset (if not done during rejection)
+        item.qc_validation_status = models.ValidationState.PENDING
+        item.pm_validation_status = models.ValidationState.PENDING
+        count += 1
+        
+    if count > 0:
+        db.commit()
+
+
+def check_rejections_and_notify(db: Session):
+    """
+    1. Finds items permanently rejected (count >= 5) -> Notifies Admin
+    2. Finds items postponed > 3 weeks -> Notifies Rejector
+    """
+    now = datetime.now()
+    
+    # --- 1. HANDLE PERMANENT REJECTION ---
+    # Find items that just hit 5 rejections and haven't been flagged/notified yet
+    # (Assuming you add a flag 'is_perm_notified' to avoid spamming, or just check status)
+    perm_rejected = db.query(models.BCItem).filter(
+        models.BCItem.rejection_count >= 15,
+        models.BCItem.global_status != models.ItemGlobalStatus.PERMANENTLY_REJECTED
+    ).all()
+    
+    for item in perm_rejected:
+        # Mark as permanently rejected
+        item.global_status = models.ItemGlobalStatus.PERMANENTLY_REJECTED
+        
+        # Notify Admins
+        admins = db.query(models.User).filter(models.User.role == "ADMIN").all()
+        for admin in admins:
+            create_notification(
+                db, recipient_id=admin.id, type=models.NotificationType.SYSTEM,
+                title="Permanent Rejection Alert",
+                message=f"Item {item.id} in BC {item.bc.bc_number} has reached 5 rejections.",
+                link=f"/acceptance/workflow/{item.bc_id}"
+            )
+            
+    # --- 2. HANDLE 3-WEEK POSTPONEMENT REMINDERS ---
+    # We want to notify if (Now > Postponed_Until) AND (Status is still POSTPONED)
+    # AND (We haven't notified them today - preventing spam requires a 'last_notified_at' column)
+    # For simplicity, let's assume this script runs once a day and notifies if date passed today.
+    
+    expired_items = db.query(models.BCItem).filter(
+        models.BCItem.global_status == models.ItemGlobalStatus.POSTPONED,
+        models.BCItem.postponed_until <= now
+    ).all()
+    
+    for item in expired_items:
+        # Unlock item
+        item.global_status = models.ItemGlobalStatus.PENDING
+        item.postponed_until = None
+        item.qc_validation_status = models.ValidationState.PENDING
+        item.pm_validation_status = models.ValidationState.PENDING
+        
+        # Get the last person who rejected it
+        last_rejection = db.query(models.ItemRejectionHistory).filter(
+            models.ItemRejectionHistory.bc_item_id == item.id
+        ).order_by(models.ItemRejectionHistory.rejected_at.desc()).first()
+        
+        if last_rejection:
+            rejector = db.query(models.User).get(last_rejection.rejected_by_id)
+            if rejector:
+                 create_notification(
+                    db, recipient_id=rejector.id, type=models.NotificationType.TODO,
+                    title="Rejection Period Ended",
+                    message=f"Item {item.id} is ready for re-inspection (3 weeks passed).",
+                    link=f"/acceptance/workflow/{item.bc_id}"
+                )
+                # Send Email Here via FastMail if desired
+    
+    db.commit()

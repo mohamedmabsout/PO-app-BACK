@@ -7,6 +7,8 @@ from reportlab.lib.units import cm, mm
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image
 from reportlab.lib.enums import TA_LEFT, TA_RIGHT, TA_CENTER
 from xml.sax.saxutils import escape
+from reportlab.pdfgen import canvas
+from reportlab.lib import colors
 
 # Assuming you import your models to check the Enum
 from .. import models 
@@ -233,5 +235,61 @@ def generate_bc_pdf(bc):
 
     # Build PDF
     doc.build(elements)
+    buffer.seek(0)
+    return buffer
+
+def generate_act_pdf(act):
+    buffer = io.BytesIO()
+    p = canvas.Canvas(buffer, pagesize=A4)
+    width, height = A4
+    
+    # --- HEADER ---
+    p.setFont("Helvetica-Bold", 16)
+    p.drawString(50, height - 50, "Service Acceptance Certificate")
+    
+    p.setFont("Helvetica", 10)
+    p.drawString(50, height - 80, f"ACT Number: {act.act_number}")
+    p.drawString(50, height - 95, f"Date: {act.created_at.strftime('%Y-%m-%d')}")
+    p.drawString(50, height - 110, f"BC Reference: {act.bc.bc_number}")
+    
+    # --- TABLE HEADER ---
+    y = height - 150
+    p.setFont("Helvetica-Bold", 9)
+    p.drawString(50, y, "Item Description")
+    p.drawString(350, y, "Qty")
+    p.drawString(400, y, "Unit Price")
+    p.drawString(480, y, "Total")
+    
+    # --- ITEMS ---
+    y -= 20
+    p.setFont("Helvetica", 9)
+    
+    total_amount = 0
+    
+    for item in act.items:
+        # Simple text wrapping logic or truncation would go here for long descriptions
+        desc = item.merged_po.item_description[:50] 
+        p.drawString(50, y, desc)
+        p.drawString(350, y, str(item.quantity_sbc))
+        p.drawString(400, y, f"{item.unit_price_sbc:,.2f}")
+        p.drawString(480, y, f"{item.line_amount_sbc:,.2f}")
+        
+        total_amount += item.line_amount_sbc
+        y -= 20
+        
+        if y < 50: # New page logic
+            p.showPage()
+            y = height - 50
+
+    # --- FOOTER ---
+    y -= 20
+    p.line(50, y+10, 550, y+10)
+    p.setFont("Helvetica-Bold", 10)
+    p.drawString(350, y, "Total Amount:")
+    p.drawString(480, y, f"{total_amount:,.2f}")
+    
+    p.showPage()
+    p.save()
+    
     buffer.seek(0)
     return buffer

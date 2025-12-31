@@ -1,9 +1,11 @@
 from fastapi import APIRouter, BackgroundTasks, Depends, UploadFile, File, Form, HTTPException
+from fastapi_mail import MessageSchema, MessageType, FastMail, ConnectionConfig
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from .. import crud, schemas, auth, models
 from ..dependencies  import get_db,require_admin
-
+from ..config import conf
+import secrets
 router = APIRouter(prefix="/api/sbcs", tags=["SBC Management"])
 
 @router.post("/", response_model=schemas.SBCResponse)
@@ -62,18 +64,54 @@ def get_all_sbcs_list(
 ):
     return crud.get_all_sbcs(db, search=search)
 
+
 @router.post("/{sbc_id}/approve")
-def approve_sbc_endpoint(
-    sbc_id: int, 
-    background_tasks: BackgroundTasks, # Add this
-    db: Session = Depends(get_db), 
-    current_user: models.User = Depends(require_admin)
+async def approve_sbc_endpoint(
+    sbc_id: int,
+    background_tasks: BackgroundTasks, # <--- Import this
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user) # Assuming Admin/PD
 ):
-    print(f"DEBUG NOTIF: User Role is: '{current_user.role}'")
+    try:
+        # Call the updated CRUD
+        sbc, new_user = crud.approve_sbc(db, sbc_id, current_user.id)
+        
+        # If a new user was created, send the Invite Email
+        if new_user and new_user.reset_token:
+            
+            reset_link = f"https://po.sib.co.ma/reset-password?token={new_user.reset_token}"
+            
+            html = f"""
+            <h3>SBC Approval Notification</h3>
+            <p>Hello {new_user.first_name},</p>
+            <p>Your Sub-Contractor account ({sbc.short_name}) has been <strong>APPROVED</strong>.</p>
+            <p>A user account has been created for you. Please click the link below to set your password and access the portal:</p>
+            <br>
+            <a href="{reset_link}" style="padding: 10px 20px; background-color: #007bff; color: white; text-decoration: none; border-radius: 5px;">Set Password</a>
+            <br><br>
+            <p>Or copy this link: {reset_link}</p>
+            """
 
-    
-    return crud.approve_sbc(db, sbc_id, current_user.id, background_tasks)
+            message = MessageSchema(
+                subject="SIB Portal - Account Approved",
+                recipients=[new_user.email],
+                body=html,
+                subtype=MessageType.html
+            )
 
+            # Send email in background
+            fm = FastMail(conf)
+            background_tasks.add_task(fm.send_message, message)
+            
+            return {"message": f"SBC Approved and Invitation Email sent to {new_user.email}"}
+        
+        return {"message": "SBC Approved (User already existed)"}
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        print(f"Error approving SBC: {e}")
+        raise HTTPException(status_code=500, detail="Internal Server Error")
 @router.post("/{sbc_id}/reject")
 def reject_sbc_endpoint(
     sbc_id: int,

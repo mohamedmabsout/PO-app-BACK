@@ -42,3 +42,19 @@ class AssignmentStatus(str, enum.Enum):
     APPROVED = "APPROVED" # Normal state
     PENDING_APPROVAL = "PENDING_APPROVAL" # Waiting for PM
     REJECTED = "REJECTED" # PM rejected the assignment
+
+
+ # Alerts (e.g., Export finished, Maintenance)
+class ValidationState(str, enum.Enum):
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+
+class ItemGlobalStatus(str, enum.Enum):
+    PENDING = "PENDING"
+    PENDING_PD_APPROVAL = "PENDING_PD_APPROVAL" # <-- NEW
+    OPEN = "OPEN"               # Validating
+    POSTPONED = "POSTPONED"     # In the 3-week penalty box
+    READY_FOR_ACT = "READY_FOR_ACT" # QC & PM both Approved
+    ACCEPTED = "ACCEPTED"       # Included in an ACT
+    PERMANENTLY_REJECTED = "PERMANENTLY_REJECTED" # > 5 rejections

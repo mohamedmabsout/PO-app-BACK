@@ -1,4 +1,5 @@
 # in app/routers/projects.py
+from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy.orm import Session, joinedload,Query
 from sqlalchemy import func
@@ -157,45 +158,61 @@ def assign_site_to_internal_project(
     # 1. Helper: We need a valid customer_project_id to satisfy the DB constraint.
     # We grab the first one associated with this site from the MergedPO table.
     # If the site is new and has no POs, we can't assign it yet (or use a placeholder).
-    sample_po = db.query(models.MergedPO).filter(
-        models.MergedPO.site_id == allocation_data.site_id
-    ).first()
-    
-    # Fallback ID if no POs exist (Use ID 1 or handle error)
-    # Ideally, you only assign sites that have data.
-    cust_proj_id = sample_po.customer_project_id if sample_po else 1 
+    target_project_id = allocation_data.internal_project_id
+    site_id = allocation_data.site_id
 
-    # 2. Update or Create the Allocation Record
+    # 1. Update/Create Site Allocation Record (Single Source of Truth)
+    # Use a placeholder customer_project_id if needed, just to satisfy constraint
+    sample_po = db.query(models.MergedPO).filter(models.MergedPO.site_id == site_id).first()
+    cust_proj_id = sample_po.customer_project_id if sample_po else 1
+
     existing_allocation = db.query(models.SiteProjectAllocation).filter(
-        models.SiteProjectAllocation.site_id == allocation_data.site_id
+        models.SiteProjectAllocation.site_id == site_id
     ).first()
 
     if existing_allocation:
-        existing_allocation.internal_project_id = allocation_data.internal_project_id
+        existing_allocation.internal_project_id = target_project_id
     else:
         new_allocation = models.SiteProjectAllocation(
-            site_id=allocation_data.site_id,
-            internal_project_id=allocation_data.internal_project_id,
-            customer_project_id=cust_proj_id # Just to satisfy the DB column
+            site_id=site_id,
+            internal_project_id=target_project_id,
+            customer_project_id=cust_proj_id
         )
         db.add(new_allocation)
     
     db.commit()
 
-    # 3. GLOBAL UPDATE: Move all POs for this site to the new Project
+    # 2. GLOBAL UPDATE: Update MergedPO records
+    # Set them to PENDING_APPROVAL so the PM sees them.
+    # Note: We update internal_project_id so the PM knows which project it's intended for.
     updated_rows = db.query(models.MergedPO).filter(
-        models.MergedPO.site_id == allocation_data.site_id
-    ).update(
-        {models.MergedPO.internal_project_id: allocation_data.internal_project_id},
-        synchronize_session=False
-    )
+        models.MergedPO.site_id == site_id
+    ).update({
+        "internal_project_id": target_project_id,
+        "assignment_status": models.AssignmentStatus.PENDING_APPROVAL,
+        "assignment_date": datetime.now()
+    }, synchronize_session=False)
     
     db.commit()
 
+    # 3. Notification Logic
+    target_project = db.query(models.InternalProject).get(target_project_id)
+    if target_project and target_project.project_manager_id:
+        crud.create_notification(
+            db, 
+            recipient_id=target_project.project_manager_id,
+            type=models.NotificationType.TODO,
+            title="Site Assignment Request",
+            message=f"Site {site_id} assigned to '{target_project.name}'. Please review.",
+            link="/projects/approvals"
+        )
+        db.commit() # Commit notification
+
     return {
-        "message": "Site globally assigned successfully", 
+        "message": "Site assigned successfully (Pending PM Approval)", 
         "records_updated": updated_rows
     }
+
 @router.post("/assign-sites-bulk")
 def assign_sites_bulk(
     payload: schemas.BulkSiteAssignment,
@@ -329,5 +346,5 @@ def review_assignments(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
-    count = crud.process_assignment_review(db, payload.site_ids, payload.action, current_user)
+    count = crud.process_assignment_review(db, payload.merged_po_ids, payload.action, current_user)
     return {"message": f"Successfully processed {count} sites."}
