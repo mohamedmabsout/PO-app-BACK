@@ -3259,6 +3259,8 @@ def check_system_state_notifications(db: Session, user: models.User):
     return virtual_todos
 
 def import_planning_targets(db: Session, df: pd.DataFrame):
+    df = df.fillna(0)
+
     count = 0
     # Expected columns matches the Export format
     # "PM Name" (We need to resolve this to User ID), "Year", "Month", etc.
