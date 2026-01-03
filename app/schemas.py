@@ -587,3 +587,18 @@ class ServiceAcceptanceList(BaseModel):
     creator: UserInfo     # Nested schema
     items: List[BCItemResponse] # Nested schema
     model_config = ConfigDict(from_attributes=True)
+class SBCKpiSummary(BaseModel):
+    total_bc_value: float
+    total_paid_amount: float
+    pending_payment: float
+    active_bc_count: int
+
+class SBCAcceptance(BaseModel):
+    po_id: str
+    item_description: str
+    accepted_ac_amount: Optional[float] = None
+    date_ac_ok: Optional[date] = None
+    accepted_pac_amount: Optional[float] = None
+    date_pac_ok: Optional[date] = None
+    
+    model_config = ConfigDict(from_attributes=True)

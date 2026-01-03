@@ -20,7 +20,7 @@ def create_new_sbc(
     rib: Optional[str] = Form(None),
     bank_name: Optional[str] = Form(None),
     tax_reg_end_date: Optional[str] = Form(None),
-    
+    sbc_type: Optional[str] = Form(None),
     # Files
     contract_file: Optional[UploadFile] = File(None),
     tax_file: Optional[UploadFile] = File(None),
@@ -31,6 +31,7 @@ def create_new_sbc(
     # Consolidate form data into a dict for CRUD
     form_data = {
         "sbc_code": sbc_code,
+        "sbc_type": sbc_type,
         "short_name": short_name,
         "name": name,
         "start_date": start_date,
@@ -64,6 +65,19 @@ def get_all_sbcs_list(
 ):
     return crud.get_all_sbcs(db, search=search)
 
+@router.get("/my-kpis", response_model=schemas.SBCKpiSummary)
+def get_my_sbc_kpis(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    return crud.get_sbc_kpis(db, user=current_user)
+
+@router.get("/my-acceptances", response_model=List[schemas.SBCAcceptance])
+def get_my_sbc_acceptances(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    return crud.get_sbc_acceptances(db, user=current_user)
 
 @router.post("/{sbc_id}/approve")
 async def approve_sbc_endpoint(

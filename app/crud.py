@@ -10,7 +10,7 @@ import sqlalchemy as sa
 from sqlalchemy import func, case, extract, and_,distinct,union_all
 from sqlalchemy.sql.functions import coalesce # More explicit import
 from sqlalchemy.orm import aliased
-from .enum import ProjectType, UserRole
+from .enum import ProjectType, UserRole, SBCStatus, BCStatus, NotificationType, BCType,AssignmentStatus, ValidationState, ItemGlobalStatus, SBCType
 import pandas as pd
 import io
 import re
@@ -23,7 +23,7 @@ from fastapi_mail import FastMail, MessageSchema, MessageType
 import secrets
 from .config import conf
 from datetime import datetime, timedelta
-from sqlalchemy import func
+from sqlalchemy import func,or_
 from .utils.pdf_generator import generate_act_pdf
 logger = logging.getLogger(__name__)
 
@@ -2281,6 +2281,15 @@ def get_tax_rate(db: Session, category: str, year: int):
 
 # --- MAIN ACTION: Create BC ---
 def create_bon_de_commande(db: Session, bc_data: schemas.BCCreate, creator_id: int):
+    
+    sbc = db.query(models.SBC).get(bc_data.sbc_id)
+    if not sbc:
+        raise ValueError("SBC not found")
+        
+    # Map SBC type to BC type
+    bc_type_to_set = BCType.PERSONNE_PHYSIQUE if sbc.sbc_type == SBCType.PP else BCType.STANDARD
+
+    
     # 1. Generate ID (Using the new Date-based format)
     bc_number = generate_bc_number(db)
     
@@ -2289,7 +2298,8 @@ def create_bon_de_commande(db: Session, bc_data: schemas.BCCreate, creator_id: i
         project_id=bc_data.internal_project_id,
         sbc_id=bc_data.sbc_id,
         status=models.BCStatus.DRAFT,
-        bc_type=bc_data.bc_type,
+        bc_type=bc_type_to_set, # Set the BC type automatically
+
         creator_id=creator_id,
         year=datetime.now().year
     )
@@ -2409,7 +2419,8 @@ def create_sbc(db: Session, form_data: dict, contract_file, tax_file, creator_id
         sbc_code=code,
         creator_id=creator_id,
         status=models.SBCStatus.UNDER_APPROVAL, # Always start here
-        
+        sbc_type=form_data.get('sbc_type'), # Get from form data
+
         # Identity
         short_name=form_data.get('short_name'),
         name=form_data.get('name'),
@@ -2463,7 +2474,9 @@ def approve_sbc(db: Session, sbc_id: int, approver_id: int):
     sbc = db.query(models.SBC).get(sbc_id)
     if not sbc:
         raise ValueError("SBC not found")
-        
+    if not sbc.email:
+        raise ValueError("Cannot approve SBC: The SBC must have an email address to create a user account.")
+    
     # 2. Update SBC Status
     sbc.status = models.SBCStatus.ACTIVE
     sbc.approver_id = approver_id
@@ -2489,8 +2502,10 @@ def approve_sbc(db: Session, sbc_id: int, approver_id: int):
             first_name=first_name,
             last_name=last_name,
             role="SBC", # <--- FORCE THE SBC ROLE HERE
-            hashed_password=auth.get_password_hash(temp_password),
+            hashed_password=auth.get_password_hash(temp_password), # Use SBC password or temp
             phone_number=sbc.phone_1,
+            sbc_id=sbc.id, # Link this new user to the SBC being approved
+            
             is_active=True,
             reset_token=reset_token # Save token for the email
         )
@@ -2573,8 +2588,18 @@ def get_all_bcs(db: Session, current_user: models.User, search: Optional[str] = 
         joinedload(models.BonDeCommande.creator) 
     )
     # Apply role-based filtering
-    # if current_user.role == models.UserRole.PM: 
-    #     query = query.filter(models.BonDeCommande.internal_project.project_manager_id == current_user.id)
+    if current_user.role == models.UserRole.PM: 
+        query = query.filter(
+            or_(
+                models.BonDeCommande.creator_id == current_user.id,
+                models.InternalProject.project_manager_id == current_user.id
+            )
+        )
+    elif current_user.role == models.UserRole.SBC:
+        # SBCs see BCs where they are the subcontractor
+        if not current_user.sbc_id:
+            return [] # This SBC user is not linked to an SBC profile, return nothing
+        query = query.filter(models.BonDeCommande.sbc_id == current_user.sbc_id)
 
     # Apply search filter
     if search:
@@ -2616,7 +2641,7 @@ def reject_bc(db: Session, bc_id: int, reason: str, rejector_id: int):
     return bc
 def get_bc_by_id(db: Session, bc_id: int):
 
-    check_and_unlock_postponed_items(db, bc_id)
+    check_rejections_and_notify(db, bc_id)
 
     return db.query(models.BonDeCommande).options(
         # 1. Load items, and for each item, load the associated MergedPO
@@ -3170,11 +3195,11 @@ def check_system_state_notifications(db: Session, user: models.User):
     These are not stored in the DB, just calculated on request.
     """
     virtual_todos = []
-    print(f"DEBUG NOTIF: User Role is: '{user.role}'")
+    # print(f"DEBUG NOTIF: User Role is: '{user.role}'")
 
     # 1. Check for TBD Sites (Only for Admins/PDs)
     role_str = str(user.role).upper() # Force uppercase for comparison
-    print(f"DEBUG NOTIF: User Role UPPER is: '{role_str}'")
+    # print(f"DEBUG NOTIF: User Role UPPER is: '{role_str}'")
 
     if "ADMIN" in role_str or "PD" in role_str :
         tbd_project = db.query(models.InternalProject).filter(models.InternalProject.name == "To Be Determined").first()
@@ -3461,69 +3486,33 @@ def generate_act_record(db: Session, bc_id: int, creator_id: int, item_ids: List
     db.refresh(act)
     return act
 
-def check_and_unlock_postponed_items(db: Session, bc_id: int):
-    """
-    Checks if any postponed items in this BC have passed their timeout date.
-    If so, resets them to PENDING so they can be re-processed.
-    """
+def check_rejections_and_notify(db: Session, background_tasks: BackgroundTasks = None):
     now = datetime.now()
     
-    # Find items that are POSTPONED and the date has passed
-    items_to_unlock = db.query(models.BCItem).filter(
-        models.BCItem.bc_id == bc_id,
-        models.BCItem.global_status == models.ItemGlobalStatus.POSTPONED,
-        models.BCItem.postponed_until <= now
-    ).all()
-    
-    count = 0
-    for item in items_to_unlock:
-        # Unlock logic
-        item.global_status = models.ItemGlobalStatus.PENDING
-        item.postponed_until = None
-        # Ensure individual statuses are reset (if not done during rejection)
-        item.qc_validation_status = models.ValidationState.PENDING
-        item.pm_validation_status = models.ValidationState.PENDING
-        count += 1
-        
-    if count > 0:
-        db.commit()
-
-
-def check_rejections_and_notify(db: Session):
-    """
-    1. Finds items permanently rejected (count >= 5) -> Notifies Admin
-    2. Finds items postponed > 3 weeks -> Notifies Rejector
-    """
-    now = datetime.now()
-    
-    # --- 1. HANDLE PERMANENT REJECTION ---
-    # Find items that just hit 5 rejections and haven't been flagged/notified yet
-    # (Assuming you add a flag 'is_perm_notified' to avoid spamming, or just check status)
+    # --- 1. HANDLE PERMANENT REJECTION (Unchanged) ---
     perm_rejected = db.query(models.BCItem).filter(
-        models.BCItem.rejection_count >= 15,
+        models.BCItem.rejection_count >= 5, # changed from 15 to 5 as per logic
         models.BCItem.global_status != models.ItemGlobalStatus.PERMANENTLY_REJECTED
     ).all()
     
     for item in perm_rejected:
-        # Mark as permanently rejected
         item.global_status = models.ItemGlobalStatus.PERMANENTLY_REJECTED
-        
-        # Notify Admins
         admins = db.query(models.User).filter(models.User.role == "ADMIN").all()
         for admin in admins:
             create_notification(
                 db, recipient_id=admin.id, type=models.NotificationType.SYSTEM,
                 title="Permanent Rejection Alert",
-                message=f"Item {item.id} in BC {item.bc.bc_number} has reached 5 rejections.",
-                link=f"/acceptance/workflow/{item.bc_id}"
+                message=f"Item {item.id} has reached 5 rejections.",
+                link=f"/configuration/acceptance/workflow/{item.bc_id}"
             )
             
     # --- 2. HANDLE 3-WEEK POSTPONEMENT REMINDERS ---
-    # We want to notify if (Now > Postponed_Until) AND (Status is still POSTPONED)
-    # AND (We haven't notified them today - preventing spam requires a 'last_notified_at' column)
-    # For simplicity, let's assume this script runs once a day and notifies if date passed today.
     
-    expired_items = db.query(models.BCItem).filter(
+    # IMPORTANT: Use joinedload to prevent errors when accessing item.bc or item.merged_po in email
+    expired_items = db.query(models.BCItem).options(
+        joinedload(models.BCItem.bc),
+        joinedload(models.BCItem.merged_po)
+    ).filter(
         models.BCItem.global_status == models.ItemGlobalStatus.POSTPONED,
         models.BCItem.postponed_until <= now
     ).all()
@@ -3532,8 +3521,6 @@ def check_rejections_and_notify(db: Session):
         # Unlock item
         item.global_status = models.ItemGlobalStatus.PENDING
         item.postponed_until = None
-        item.qc_validation_status = models.ValidationState.PENDING
-        item.pm_validation_status = models.ValidationState.PENDING
         
         # Get the last person who rejected it
         last_rejection = db.query(models.ItemRejectionHistory).filter(
@@ -3542,13 +3529,90 @@ def check_rejections_and_notify(db: Session):
         
         if last_rejection:
             rejector = db.query(models.User).get(last_rejection.rejected_by_id)
+            
+            # --- FIX: Everything below must be inside this if block ---
             if rejector:
-                 create_notification(
+                # 1. App Notification
+                create_notification(
                     db, recipient_id=rejector.id, type=models.NotificationType.TODO,
                     title="Rejection Period Ended",
                     message=f"Item {item.id} is ready for re-inspection (3 weeks passed).",
-                    link=f"/acceptance/workflow/{item.bc_id}"
+                    link=f"/configuration/acceptance/workflow/{item.bc_id}"
                 )
-                # Send Email Here via FastMail if desired
-    
+                
+                # 2. Email Notification
+                if background_tasks and rejector.email:
+                    html_body = f"""
+                    <h3>Action Required: Re-Inspection</h3>
+                    <p>Hello {rejector.first_name},</p>
+                    <p>The 3-week postponement period for the following item has ended:</p>
+                    <ul>
+                        <li><strong>BC:</strong> {item.bc.bc_number if item.bc else 'N/A'}</li>
+                        <li><strong>Item:</strong> {item.merged_po.item_description if item.merged_po else 'N/A'}</li>
+                        <li><strong>Previous Rejection:</strong> {last_rejection.comment}</li>
+                    </ul>
+                    <p>Please log in to the portal to re-validate this item.</p>
+                    """
+                    
+                    message = MessageSchema(
+                        subject="SIB Portal - Item Unlocked",
+                        recipients=[rejector.email],
+                        body=html_body,
+                        subtype=MessageType.html
+                    )
+                    fm = FastMail(conf)
+                    background_tasks.add_task(fm.send_message, message)
+
     db.commit()
+def get_sbc_kpis(db: Session, user: models.User):
+    if user.role != "SBC" or not user.sbc_id:
+        # Return empty stats if not an SBC user
+        return {"total_bc_value": 0, "total_paid_amount": 0, "pending_payment": 0, "active_bc_count": 0}
+
+    # 1. Total Value of Approved BCs
+    total_bc_value = db.query(func.sum(models.BonDeCommande.total_amount_ht)).filter(
+        models.BonDeCommande.sbc_id == user.sbc_id,
+        models.BonDeCommande.status == models.BCStatus.APPROVED
+    ).scalar() or 0.0
+
+    # 2. Count of Active BCs
+    active_bc_count = db.query(models.BonDeCommande).filter(
+        models.BonDeCommande.sbc_id == user.sbc_id,
+        models.BonDeCommande.status.in_([
+            models.BCStatus.SUBMITTED, models.BCStatus.PENDING_L2, models.BCStatus.APPROVED
+        ])
+    ).count()
+    
+    # 3. Total Amount Paid (from MergedPO)
+    # This requires finding all POs associated with this SBC's BCs
+    bc_item_pos = db.query(models.BCItem.merged_po_id).join(models.BonDeCommande).filter(
+        models.BonDeCommande.sbc_id == user.sbc_id
+    ).distinct()
+
+    total_paid_query = db.query(
+        func.sum(coalesce(models.MergedPO.accepted_ac_amount, 0) + coalesce(models.MergedPO.accepted_pac_amount, 0))
+    ).filter(models.MergedPO.id.in_(bc_item_pos))
+    
+    total_paid_amount = total_paid_query.scalar() or 0.0
+
+    return {
+        "total_bc_value": total_bc_value,
+        "total_paid_amount": total_paid_amount,
+        "pending_payment": total_bc_value - total_paid_amount,
+        "active_bc_count": active_bc_count
+    }
+
+def get_sbc_acceptances(db: Session, user: models.User):
+    if user.role != "SBC" or not user.sbc_id:
+        return []
+
+    # Find all POs associated with this SBC's BCs
+    bc_item_pos = db.query(models.BCItem.merged_po_id).join(models.BonDeCommande).filter(
+        models.BonDeCommande.sbc_id == user.sbc_id
+    ).distinct()
+
+    # Get MergedPO records for those POs that have been at least partially paid
+    return db.query(models.MergedPO).filter(
+        models.MergedPO.id.in_(bc_item_pos),
+        (models.MergedPO.accepted_ac_amount > 0) | (models.MergedPO.accepted_pac_amount > 0)
+    ).order_by(models.MergedPO.date_ac_ok.desc(), models.MergedPO.date_pac_ok.desc()).all()

@@ -32,6 +32,9 @@ class BCStatus(str, enum.Enum):
 class BCType(str, enum.Enum):
     STANDARD = "STANDARD"
     PERSONNE_PHYSIQUE = "PERSONNE_PHYSIQUE"
+class SBCType(str, enum.Enum):
+    PP = "PP"
+    ENTREPRISE = "ENTREPRISE"
 
 class NotificationType(str, enum.Enum):
     TODO = "TODO"       # Action Required (e.g., Approve BC)

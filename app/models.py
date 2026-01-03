@@ -1,7 +1,7 @@
 import datetime
 from sqlalchemy import Boolean, Column, Date, Enum, ForeignKey, Integer, String, Float, DateTime
 
-from .enum import ProjectType, UserRole, SBCStatus, BCStatus, NotificationType, BCType,AssignmentStatus, ValidationState, ItemGlobalStatus
+from .enum import ProjectType, UserRole, SBCStatus, BCStatus, NotificationType, BCType,AssignmentStatus, ValidationState, ItemGlobalStatus, SBCType
 from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, Text, Date, Enum, ForeignKey
 from .database import Base
 from sqlalchemy.orm import relationship
@@ -352,7 +352,8 @@ class SBC(Base):
     
     # "Approver L1 (PD)"
     approver_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    
+    sbc_type = Column(Enum(SBCType), nullable=False)
+
     # Relationships
     creator = relationship("User", foreign_keys=[creator_id])
     approver = relationship("User", foreign_keys=[approver_id])
@@ -500,5 +501,3 @@ class ItemRejectionHistory(Base):
     
     item = relationship("BCItem", back_populates="rejection_history")
     rejected_by = relationship("User")
-    bc_item = relationship("BCItem", back_populates="rejection_history")
-    rejected_by = relationship("User") # To get the name (e.g. "rejected_by.first_name")

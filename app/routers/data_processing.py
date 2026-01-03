@@ -5,7 +5,8 @@ import pandas as pd
 import io
 import logging
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
-from sqlalchemy.orm import Session, query
+from sqlalchemy.orm import Session, query, joinedload
+from sqlalchemy import or_
 from typing import Optional
 from fastapi import Query, status
 from ..dependencies import get_current_user, get_db
@@ -426,12 +427,17 @@ def list_bcs(
 
 @router.get("/bc/all", response_model=List[schemas.BCResponse])  # Use your schema
 def read_all_bcs(
+    background_tasks: BackgroundTasks ,  # <-- Add this parameter
     search: Optional[str] = None,
     status_filter: Optional[str] = None, 
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
-
 ):
+    try:
+        crud.check_rejections_and_notify(db, background_tasks)
+    except Exception as e:
+        print(f"Error in background check: {e}")
+
     return crud.get_all_bcs(db, current_user, search=search, status_filter=status_filter)  # <-- Pass status_filter
 
 
@@ -590,5 +596,3 @@ def validate_item(
     current_user: models.User = Depends(auth.get_current_user)
 ):
     return crud.validate_bc_item(db, item_id, current_user, payload.action, payload.comment)
-
-# Generation Endpoint
