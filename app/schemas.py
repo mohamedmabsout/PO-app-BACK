@@ -443,11 +443,11 @@ class BCItemResponse(BCItemCreate):
     line_amount_sbc: float
     applied_tax_rate: float
     merged_po: Optional[MergedPOSimple] = None 
-    qc_validation_status: str # or your Enum type if imported
-    pm_validation_status: str
-    global_status: str
-    
-    rejection_count: int
+    qc_validation_status: Optional[str] = None
+    pm_validation_status: Optional[str] = None
+    global_status: Optional[str] = None
+    rejection_count: Optional[int] = None
+
     postponed_until: Optional[datetime] = None
     act_id: Optional[int] = None
     
