@@ -1773,6 +1773,8 @@ def set_user_target(db: Session, target: schemas.UserTargetCreate):
     db.commit()
     return db_target
 
+# In crud.py
+
 def get_performance_matrix(
     db: Session, 
     year: int, 
@@ -1789,11 +1791,6 @@ def get_performance_matrix(
             models.User.role.in_(['PM', 'ADMIN', 'PD'])
         ).all()
         
-    # --- FIND THE TBD USER ID ---
-    # Find the user linked to the "To Be Determined" project
-    tbd_project = db.query(models.InternalProject).filter(models.InternalProject.name == "To Be Determined").first()
-    tbd_pm_id = tbd_project.project_manager_id if tbd_project else -1
-    
     results = []
 
     for pm in pms_to_process:
@@ -1812,10 +1809,14 @@ def get_performance_matrix(
         plan_po = plan_po or 0.0
         plan_invoice = plan_invoice or 0.0
 
-        # B. Fetch APPROVED Actuals (Standard Logic)
+        # --- B. Fetch Actuals (UPDATED LOGIC) ---
+        # Include ALL items assigned to this PM (Approved OR Pending)
+        # We filter by the PM ID on the InternalProject table.
         base_filters = [
             models.InternalProject.project_manager_id == pm.id,
-            models.MergedPO.assignment_status == models.AssignmentStatus.APPROVED # Only Approved
+            # CRITICAL CHANGE: We DO NOT filter by assignment_status here. 
+            # If it is assigned to this PM's project, it counts for them.
+            # This covers both APPROVED and PENDING_APPROVAL.
         ]
         
         # Period Filters
@@ -1841,7 +1842,8 @@ def get_performance_matrix(
         actual_po_period = summary[0] or 0.0
         actual_paid_period = (summary[1] or 0.0) + (summary[2] or 0.0)
 
-        # C. Fetch LIFETIME GAP (Standard Logic)
+        # --- C. Fetch LIFETIME GAP (UPDATED LOGIC) ---
+        # Same logic: Include everything assigned to this PM's projects.
         lifetime_summary = db.query(
             func.sum(models.MergedPO.line_amount_hw),
             func.sum(models.MergedPO.accepted_ac_amount),
@@ -1849,43 +1851,13 @@ def get_performance_matrix(
         ).join(
             models.InternalProject, models.MergedPO.internal_project_id == models.InternalProject.id
         ).filter(
-            models.InternalProject.project_manager_id == pm.id,
-            models.MergedPO.assignment_status == models.AssignmentStatus.APPROVED # Only Approved
+            models.InternalProject.project_manager_id == pm.id
+            # Again, NO status filter. Counts pending and approved.
         ).first()
         
         lifetime_po = lifetime_summary[0] or 0.0
         lifetime_paid = (lifetime_summary[1] or 0.0) + (lifetime_summary[2] or 0.0)
         total_lifetime_gap = lifetime_po - lifetime_paid
-
-        # --- D. SPECIAL LOGIC FOR TBD USER: Add Pending Amounts ---
-        if pm.id == tbd_pm_id:
-            # 1. Calculate Pending GAP (Lifetime)
-            # Find all POs that are PENDING approval. These belong to TBD financially.
-            pending_lifetime = db.query(
-                func.sum(models.MergedPO.line_amount_hw),
-                func.sum(models.MergedPO.accepted_ac_amount),
-                func.sum(models.MergedPO.accepted_pac_amount)
-            ).filter(
-                models.MergedPO.assignment_status == models.AssignmentStatus.PENDING_APPROVAL
-            ).first()
-            
-            p_gap_po = pending_lifetime[0] or 0.0
-            p_gap_paid = (pending_lifetime[1] or 0.0) + (pending_lifetime[2] or 0.0)
-            
-            total_lifetime_gap += (p_gap_po - p_gap_paid)
-
-            # 2. Calculate Pending Actuals (Period)
-            # Find Pending POs that match the current period
-            pending_po_period = db.query(func.sum(models.MergedPO.line_amount_hw)).filter(
-                models.MergedPO.assignment_status == models.AssignmentStatus.PENDING_APPROVAL,
-                extract('year', models.MergedPO.publish_date) == year,
-                # Add month filter if applicable
-                extract('month', models.MergedPO.publish_date) == month if month else True
-            ).scalar() or 0.0
-            
-            actual_po_period += pending_po_period
-            
-            # (Note: Usually we don't count pending AC/PAC in Actuals, but if you want to, add logic here)
 
         # --- E. Final Result Construction ---
         results.append({
@@ -2736,77 +2708,84 @@ def assign_site_to_internal_project_by_code(
     return updated_rows
 
 def bulk_assign_sites(db: Session, site_ids: List[int], target_project_id: int, admin_user: models.User):
-    # 1. Get the target project details (needed for the notification text)
+    # 1. Get Target Project Details
     target_project = db.query(models.InternalProject).get(target_project_id)
-    if not target_project: return {"updated": 0, "error": "Target not found"}
+    if not target_project: 
+        return {"updated": 0, "error": "Target project not found"}
 
-    # 2. Filter Valid Sites (Only TBD or Unassigned)
-    tbd_project = db.query(models.InternalProject).filter_by(name="To Be Determined").first()
-    tbd_id = tbd_project.id if tbd_project else 0
-
-    # Get current allocations to check status
-    existing_allocations = db.query(models.SiteProjectAllocation).filter(
-        models.SiteProjectAllocation.site_id.in_(site_ids)
-    ).all()
-    current_map = {a.site_id: a.internal_project_id for a in existing_allocations}
+    # 2. Simplified Validation: We assume the Admin knows what they are doing.
+    # If the site ID exists, we will update it. This matches the single-assign logic.
+    # We just filter out any IDs that aren't actually in the Sites table to be safe.
+    valid_site_ids = [
+        sid for sid in site_ids 
+        if db.query(models.Site.id).filter_by(id=sid).scalar() is not None
+    ]
     
-    valid_site_ids = []
-    skipped_count = 0
-    
-    for sid in site_ids:
-        # Allow if no allocation OR allocation is TBD
-        current_proj = current_map.get(sid)
-        if current_proj is None or current_proj == tbd_id:
-            valid_site_ids.append(sid)
-        else:
-            skipped_count += 1
-            
-    if not valid_site_ids: return {"updated": 0, "skipped": skipped_count}
+    if not valid_site_ids: 
+        return {"updated": 0, "skipped": len(site_ids)}
 
     # 3. Update Allocations (Upsert Logic)
-    # We need a sample customer_project_id for new records. Get one from DB or use 1.
-    sample_cp_id = db.query(models.CustomerProject.id).first()
-    default_cp_id = sample_cp_id[0] if sample_cp_id else 1
+    # Get a valid customer_project_id default
+    sample_cp = db.query(models.CustomerProject.id).first()
+    default_cp_id = sample_cp.id if sample_cp else 1
 
+    # Fetch existing allocations for these sites to decide between UPDATE or INSERT
+    existing_allocs = db.query(models.SiteProjectAllocation).filter(
+        models.SiteProjectAllocation.site_id.in_(valid_site_ids)
+    ).all()
+    
+    existing_site_ids = {alloc.site_id for alloc in existing_allocs}
+
+    # A. Update existing allocations
+    if existing_site_ids:
+        db.query(models.SiteProjectAllocation).filter(
+            models.SiteProjectAllocation.site_id.in_(existing_site_ids)
+        ).update(
+            {models.SiteProjectAllocation.internal_project_id: target_project_id},
+            synchronize_session=False
+        )
+
+    # B. Insert new allocations for sites that didn't have one
+    new_allocs = []
     for sid in valid_site_ids:
-        # Check if allocation exists
-        alloc = db.query(models.SiteProjectAllocation).filter_by(site_id=sid).first()
-        if alloc:
-            alloc.internal_project_id = target_project_id
-        else:
-            # Create new allocation
-            new_alloc = models.SiteProjectAllocation(
-                site_id=sid,
-                internal_project_id=target_project_id,
-                customer_project_id=default_cp_id 
-            )
-            db.add(new_alloc)
+        if sid not in existing_site_ids:
+            new_allocs.append({
+                "site_id": sid,
+                "internal_project_id": target_project_id,
+                "customer_project_id": default_cp_id
+            })
+    
+    if new_allocs:
+        db.bulk_insert_mappings(models.SiteProjectAllocation, new_allocs)
             
-    # 4. Update MergedPO Records
-    result = db.query(models.MergedPO).filter(
+    # 4. Update MergedPO Records (The most important part)
+    # This moves the POs to the new project and sets them to PENDING_APPROVAL
+    result_count = db.query(models.MergedPO).filter(
         models.MergedPO.site_id.in_(valid_site_ids)
     ).update({
         "internal_project_id": target_project_id,
         "assignment_status": models.AssignmentStatus.PENDING_APPROVAL,
-        "assignment_date": datetime.now() # <--- Set current time
- 
+        "assignment_date": datetime.now()
     }, synchronize_session=False)
     
     db.commit()
 
-    # 5. Notify PM
+    # 5. Send Notification
     if target_project.project_manager_id:
-        create_notification(
-            db, 
-            recipient_id=target_project.project_manager_id,
-            type=models.NotificationType.TODO,
-            title="Bulk Site Assignment",
-            message=f"{result} sites assigned to '{target_project.name}'. Review required.",
-            link="/projects/approvals"
-        )
-        db.commit()
+        try:
+            create_notification(
+                db, 
+                recipient_id=target_project.project_manager_id,
+                type=models.NotificationType.TODO,
+                title="Bulk Site Assignment",
+                message=f"{admin_user.first_name} has assigned {result_count} PO lines (across {len(valid_site_ids)} sites) to project '{target_project.name}'. Please review.",
+                link="/projects/approvals"
+            )
+            db.commit()
+        except Exception as e:
+            print(f"Failed to send notification: {e}")
 
-    return {"updated": result, "skipped": skipped_count}
+    return {"updated": result_count, "skipped": len(site_ids) - len(valid_site_ids)}
 
 def auto_approve_old_assignments(db: Session):
     """
@@ -2885,14 +2864,15 @@ def get_pending_sites_for_pm(db: Session, pm_id: int):
     ).all()
 
 # 3. NEW: Process PM Decision (Approve/Reject)
+# In crud.py
+
 def process_assignment_review(db: Session, merged_po_ids: List[int], action: str, pm_user: models.User):
     """
-    Handles the PM's decision.
-    action: "APPROVE" or "REJECT"
+    Handles the PM's decision (APPROVE or REJECT) and notifies Admins.
     """
     
     # 1. Identify the records involved
-    # We filter by site_id AND PENDING status to be safe
+    # Only process items that are actually PENDING for safety
     query = db.query(models.MergedPO).filter(
         models.MergedPO.id.in_(merged_po_ids), 
         models.MergedPO.assignment_status == models.AssignmentStatus.PENDING_APPROVAL
@@ -2902,45 +2882,59 @@ def process_assignment_review(db: Session, merged_po_ids: List[int], action: str
     if count == 0:
         return 0
 
-    # 2. Handle Logic
+    # 2. Apply Logic
     if action == "APPROVE":
-        # Simply change status to APPROVED. 
-        # They stay in the project they were assigned to.
+        # Change status to APPROVED. Keep project assignment.
         query.update({
             "assignment_status": models.AssignmentStatus.APPROVED
         }, synchronize_session=False)
 
     elif action == "REJECT":
-        # 1. Find TBD Project
+        # Revert to TBD project and set status to APPROVED (as TBD is auto-approved)
         tbd_project = db.query(models.InternalProject).filter_by(name="To Be Determined").first()
+        tbd_id = tbd_project.id if tbd_project else None
         
-        # 2. Revert project ID to TBD
-        # 3. Set status to APPROVED (because they are now officially TBD)
-        query.update({
-            "internal_project_id": tbd_project.id,
-            "assignment_status": models.AssignmentStatus.APPROVED
-        }, synchronize_session=False)
+        if tbd_id:
+            query.update({
+                "internal_project_id": tbd_id,
+                "assignment_status": models.AssignmentStatus.APPROVED
+            }, synchronize_session=False)
+            
+            # Also revert the Allocation table for these sites
+            # We need the site_ids from the POs first
+            site_ids = [po.site_id for po in query.all()]
+            if site_ids:
+                db.query(models.SiteProjectAllocation).filter(
+                    models.SiteProjectAllocation.site_id.in_(site_ids)
+                ).update({"internal_project_id": tbd_id}, synchronize_session=False)
 
     db.commit()
 
-    # 3. Optional: Notify Admin (The one who assigned them)
-    # Since we don't store WHO assigned them, we can notify all Admins or just log it.
-    # For now, let's notify all admins.
-    admins = db.query(models.User).filter(models.User.role == "ADMIN").all()
-    for admin in admins:
-        create_notification(
-            db,
-            recipient_id=admin.id,
-            type=models.NotificationType.APP,
-            title="Assignment Review Completed",
-            message=f"PM {pm_user.first_name} {action.lower()}ed {count} sites.",
-            link="/site-dispatcher"
-        )
-    db.commit() # Commit notifications
+    # --- 3. SEND NOTIFICATIONS TO ADMINS (FIXED) ---
+    try:
+        # Get all admins
+        admins = db.query(models.User).filter(models.User.role == "ADMIN").all()
+        
+        notif_type = models.NotificationType.APP if action == "APPROVE" else models.NotificationType.ALERT
+        action_text = "Approved" if action == "APPROVE" else "Rejected"
+        
+        for admin in admins:
+            create_notification(
+                db,
+                recipient_id=admin.id,
+                type=notif_type,
+                title=f"Site Assignment {action_text}",
+                message=f"PM {pm_user.first_name} {pm_user.last_name} has {action.lower()}ed {count} sites.",
+                link="/site-dispatcher" # Link them back to dispatcher to see results
+            )
+        
+        db.commit()
+        print(f"Notifications sent to {len(admins)} admins.")
+        
+    except Exception as e:
+        print(f"Failed to send admin notifications: {e}")
 
     return count
-
-
 def search_merged_pos_by_site_codes(
     db: Session, 
     site_codes: List[str],

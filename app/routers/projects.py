@@ -197,16 +197,23 @@ def assign_site_to_internal_project(
 
     # 3. Notification Logic
     target_project = db.query(models.InternalProject).get(target_project_id)
-    if target_project and target_project.project_manager_id:
-        crud.create_notification(
-            db, 
-            recipient_id=target_project.project_manager_id,
-            type=models.NotificationType.TODO,
-            title="Site Assignment Request",
-            message=f"Site {site_id} assigned to '{target_project.name}'. Please review.",
-            link="/projects/approvals"
-        )
-        db.commit() # Commit notification
+    if target_project.project_manager_id:
+        try:
+            # Create notification for the PM
+            crud.create_notification(
+                db, 
+                recipient_id=target_project.project_manager_id,
+                type=models.NotificationType.TODO,
+                title="New Site Assignments",
+                message=f"{current_user.first_name} has assigned {updated_rows} new sites to project '{target_project.name}'. Please review.",
+                link="/projects/approvals"
+            )
+            db.commit()
+            print(f"Notification sent to PM ID {target_project.project_manager_id}")
+        except Exception as e:
+            print(f"Failed to send notification: {e}")
+    else:
+        print(f"Warning: Project '{target_project.name}' has no PM assigned. No notification sent.")
 
     return {
         "message": "Site assigned successfully (Pending PM Approval)", 
