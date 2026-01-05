@@ -833,7 +833,7 @@ def process_acceptances_by_ids(db: Session, raw_acceptance_ids: List[int]):
         
         if po_id in merged_po_map:
             merged_po_to_update = merged_po_map[po_id]
-            updated_po_ids.append(po_id)
+            updated_po_ids.add(po_id)
             
             # 1. Get the date from the file
             raw_processed_date = acceptance_row['application_processed_date']
