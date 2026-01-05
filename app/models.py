@@ -93,7 +93,7 @@ class InternalProject(Base):
     account = relationship("Account")
     direct_customer = relationship("Customer", foreign_keys=[direct_customer_id])
     final_customer = relationship("Customer", foreign_keys=[final_customer_id])
-    project_manager = relationship("User")
+    project_manager = relationship("User", foreign_keys=[project_manager_id])
 
     # --- CRITICAL FIX: REMOVED customer_projects relationship ---
     # Since CustomerProject no longer has a foreign key to this table, 

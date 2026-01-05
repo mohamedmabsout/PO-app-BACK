@@ -1112,12 +1112,15 @@ def get_total_financial_summary(db: Session, user: models.User = None) -> dict:
         "remaining_gap": remaining_gap
     }
 def get_internal_projects_financial_summary(db: Session, user: models.User = None):
-    # 1. Fetch APPROVED data grouped by Internal Project
-    # We use the direct relationship: MergedPO.internal_project_id
+    # 1. Fetch APPROVED data grouped by Internal Project AND Project Manager
     results = db.query(
         models.InternalProject.id.label("project_id"),
         models.InternalProject.name.label("project_name"),
-        models.InternalProject.project_manager_id,
+        models.InternalProject.project_manager_id.label("project_manager_id"),
+        # --- NEW: Select PM Name Fields ---
+        models.User.first_name.label("pm_first_name"),
+        models.User.last_name.label("pm_last_name"),
+        # ----------------------------------
         func.coalesce(func.sum(models.MergedPO.line_amount_hw), 0).label("total_po_value"),
         (
             func.coalesce(func.sum(models.MergedPO.accepted_ac_amount), 0) + 
@@ -1126,10 +1129,19 @@ def get_internal_projects_financial_summary(db: Session, user: models.User = Non
     ).outerjoin(
         models.MergedPO, 
         and_(
-            models.InternalProject.id == models.MergedPO.internal_project_id, # Direct Link
-            models.MergedPO.assignment_status == models.AssignmentStatus.APPROVED # Only Approved
+            models.InternalProject.id == models.MergedPO.internal_project_id,
+            models.MergedPO.assignment_status == models.AssignmentStatus.APPROVED
         )
-    ).group_by(models.InternalProject.id, models.InternalProject.name).all()
+    ).outerjoin( # --- NEW: Join User Table to get PM details ---
+        models.User,
+        models.InternalProject.project_manager_id == models.User.id
+    ).group_by(
+        models.InternalProject.id, 
+        models.InternalProject.name,
+        # --- NEW: Group by PM fields ---
+        models.User.first_name,
+        models.User.last_name
+    ).all()
 
     # 2. Fetch "Pending Approval" data (The Limbo Money)
     pending_stats = db.query(
@@ -1140,8 +1152,8 @@ def get_internal_projects_financial_summary(db: Session, user: models.User = Non
         models.MergedPO.assignment_status == models.AssignmentStatus.PENDING_APPROVAL
     ).first()
     
-    pending_po = float(pending_stats.po_value)
-    pending_accepted = float(pending_stats.ac_value) + float(pending_stats.pac_value)
+    pending_po = float(pending_stats.po_value) if pending_stats else 0.0
+    pending_accepted = (float(pending_stats.ac_value) + float(pending_stats.pac_value)) if pending_stats else 0.0
 
     # 3. Identify TBD Project
     tbd_project = db.query(models.InternalProject).filter(models.InternalProject.name == "To Be Determined").first()
@@ -1166,9 +1178,18 @@ def get_internal_projects_financial_summary(db: Session, user: models.User = Non
         gap = po_value - accepted
         completion = (accepted / po_value * 100) if po_value > 0 else 0.0
         
+        # --- NEW: Construct PM Object ---
+        pm_info = None
+        if row.pm_first_name or row.pm_last_name:
+            pm_info = {
+                "first_name": row.pm_first_name,
+                "last_name": row.pm_last_name
+            }
+        
         summary_list.append({
             "project_id": row.project_id,
             "project_name": row.project_name,
+            "project_manager": pm_info, # Pass the object or None
             "total_po_value": po_value,
             "total_accepted": accepted,
             "remaining_gap": gap,
@@ -1176,8 +1197,6 @@ def get_internal_projects_financial_summary(db: Session, user: models.User = Non
         })
         
     return summary_list
-
-
 
 def get_customer_projects_financial_summary(db: Session):
     results = db.query(
@@ -1417,14 +1436,14 @@ def get_financial_summary_by_period(
         ac_date_filters.append(func.week(models.MergedPO.date_ac_ok, 3) == week)
         pac_date_filters.append(func.week(models.MergedPO.date_pac_ok, 3) == week)
         # Only count POs that have been formally approved for their project
-    status_filter = (models.MergedPO.assignment_status == models.AssignmentStatus.APPROVED)
+    # status_filter = (models.MergedPO.assignment_status == models.AssignmentStatus.APPROVED)
 
     # --- Perform conditional aggregation on the (potentially filtered) base_query ---
     summary = base_query.with_entities(
         # Add the status filter to every SUM condition using AND
-        func.sum(case((and_(*po_date_filters, status_filter), models.MergedPO.line_amount_hw), else_=0)).label("total_po_value"),
-        func.sum(case((and_(*ac_date_filters, status_filter), models.MergedPO.accepted_ac_amount), else_=0)).label("total_accepted_ac"),
-        func.sum(case((and_(*pac_date_filters, status_filter), models.MergedPO.accepted_pac_amount), else_=0)).label("total_accepted_pac")
+        func.sum(case((and_(*po_date_filters), models.MergedPO.line_amount_hw), else_=0)).label("total_po_value"),
+        func.sum(case((and_(*ac_date_filters), models.MergedPO.accepted_ac_amount), else_=0)).label("total_accepted_ac"),
+        func.sum(case((and_(*pac_date_filters), models.MergedPO.accepted_pac_amount), else_=0)).label("total_accepted_pac")
     ).one()
 
 
