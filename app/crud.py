@@ -3238,7 +3238,7 @@ def check_system_state_notifications(db: Session, user: models.User):
     role_str = str(user.role).upper() # Force uppercase for comparison
     # print(f"DEBUG NOTIF: User Role UPPER is: '{role_str}'")
 
-    if "ADMIN" in role_str or "PD" in role_str :
+    if "ADMIN" in role_str :
         tbd_project = db.query(models.InternalProject).filter(models.InternalProject.name == "To Be Determined").first()
         
         if tbd_project:
