@@ -165,6 +165,19 @@ def create_raw_purchase_orders_from_dataframe(db: Session, df: pd.DataFrame, use
         'Item Description': 'item_description', 'Payment Terms': 'payment_terms_raw',
         'Unit Price': 'unit_price', 'Requested Qty': 'requested_qty', 'Publish Date': 'publish_date'
     }, inplace=True, errors='ignore')
+    if 'publish_date' in df.columns:
+        # Ensure it is a datetime object
+        df['publish_date'] = pd.to_datetime(df['publish_date'], errors='coerce')
+        
+        # Define the specific date to target (Jan 1, 2026)
+        target_date = pd.Timestamp("2026-01-01")
+        
+        # Create a mask for rows that match exactly this date
+        mask = df['publish_date'].dt.date == target_date.date()
+        
+        # Shift those specific rows back by 1 day
+        df.loc[mask, 'publish_date'] = df.loc[mask, 'publish_date'] - pd.Timedelta(days=1)
+
     df['uploader_id'] = user_id
     
     # Hydrate Customers and Sites ONLY
@@ -901,6 +914,17 @@ def process_acceptance_dataframe(db: Session, acceptance_df: pd.DataFrame):
         inplace=True,
         errors="ignore",
     )  # 'ignore' prevents errors if a column is missing
+    if 'application_processed_date' in acceptance_df.columns:
+        # Ensure datetime
+        acceptance_df['application_processed_date'] = pd.to_datetime(
+            acceptance_df['application_processed_date'], errors='coerce'
+        )
+        
+        target_date = pd.Timestamp("2026-01-01") 
+        mask = acceptance_df['application_processed_date'].dt.date == target_date.date()
+        
+        # Shift back 1 day
+        acceptance_df.loc[mask, 'application_processed_date'] -= pd.Timedelta(days=1)
     unprocessed_acceptances_query = db.query(models.RawAcceptance).filter(models.RawAcceptance.is_processed == False)
     unprocessed_acceptances = unprocessed_acceptances_query.all()
     
