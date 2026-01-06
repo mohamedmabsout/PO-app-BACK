@@ -334,12 +334,14 @@ class SBC(Base):
     contract_ref = Column(String(100)) # "Contract" (Reference Number)
     has_contract_attachment = Column(Boolean, default=False) # "Attachment Contract Exist"
     contract_upload_date = Column(DateTime) # "Date upload Contract"
-    
+    contract_filename = Column(String(255), nullable=True) 
+
     # --- TAX REGULARIZATION ---
     has_tax_regularization = Column(Boolean, default=False) # "Attestation de regularisation fiscal"
     tax_reg_upload_date = Column(DateTime) # "Date upload" (for tax doc)
     tax_reg_end_date = Column(Date) # "Plan end date of Reg Fiscal"
-    
+    tax_reg_filename = Column(String(255), nullable=True)
+  
     # --- FINANCIAL INFO ---
     rib = Column(String(50)) # "RIB"
     bank_name = Column(String(100)) # "Name of the Bank"

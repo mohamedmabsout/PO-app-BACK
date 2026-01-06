@@ -11,7 +11,8 @@ from .routers import projects, users, auth, selectors,sites,data_processing,acce
 from .database import engine ,SessionLocal
 from  .dependencies import get_db
 from . import crud, models, schemas
-
+import os
+from fastapi.staticfiles import StaticFiles
 
 models.Base.metadata.create_all(bind=engine, checkfirst=True)
 
@@ -33,6 +34,11 @@ app.include_router(sbcs.router)
 app.include_router(notifications.router)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+os.makedirs("uploads/sbc_docs", exist_ok=True)
+
+app.mount("/static/sbc_docs", StaticFiles(directory="uploads/sbc_docs"), name="sbc_docs")
+
 @app.get("/")
 def read_root():
     return {"status": "API is running"}

@@ -2409,7 +2409,7 @@ def save_upload_file(upload_file, sbc_code, doc_type):
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(upload_file.file, buffer)
         
-    return file_path
+    return filename
 
 def create_sbc(db: Session, form_data: dict, contract_file, tax_file, creator_id: int):
     # 1. Handle Code
@@ -2425,9 +2425,9 @@ def create_sbc(db: Session, form_data: dict, contract_file, tax_file, creator_id
         code = generate_sbc_code(db)
         
     # 2. Handle Files
-    contract_path = save_upload_file(contract_file, code, "Contract")
-    tax_path = save_upload_file(tax_file, code, "TaxReg")
     
+    contract_fname = save_upload_file(contract_file, code, "Contract")
+    tax_fname = save_upload_file(tax_file, code, "TaxReg")
     # 3. Create Entity
     new_sbc = models.SBC(
         sbc_code=code,
@@ -2452,13 +2452,16 @@ def create_sbc(db: Session, form_data: dict, contract_file, tax_file, creator_id
         # Contract
         contract_ref=form_data.get('contract_ref'),
         # We store the DATE of upload if file exists
-        contract_upload_date=datetime.now() if contract_path else None,
-        has_contract_attachment=True if contract_path else False,
-        
+        contract_upload_date=datetime.now() if contract_fname else None,
+        has_contract_attachment=True if contract_fname else False,
+                contract_filename=contract_fname, # Save it!
+
         # Tax
-        tax_reg_upload_date=datetime.now() if tax_path else None,
-        has_tax_regularization=True if tax_path else False,
-        tax_reg_end_date=form_data.get('tax_reg_end_date')
+        tax_reg_upload_date=datetime.now() if tax_fname else None,
+        has_tax_regularization=True if tax_fname else False,
+        tax_reg_end_date=form_data.get('tax_reg_end_date'),
+                tax_reg_filename=tax_fname # Save it!
+
     )
     
     db.add(new_sbc)

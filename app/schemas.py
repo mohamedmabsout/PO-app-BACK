@@ -414,7 +414,13 @@ class SBCResponse(BaseModel):
     phone_number: Optional[str] = None
     address: Optional[str] = None
     created_at: datetime
-
+    created_by: Optional[UserInfo] = None
+    has_contract_attachment: bool
+    contract_upload_date: Optional[datetime] = None
+    has_tax_regularization: bool
+    tax_reg_upload_date: Optional[datetime] = None
+    tax_reg_end_date: Optional[date] = None
+    model_config = ConfigDict(from_attributes=True)
 class MergedPOSimple(BaseModel):
     id: int
 
