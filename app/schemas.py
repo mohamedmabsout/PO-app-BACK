@@ -602,3 +602,28 @@ class SBCAcceptance(BaseModel):
     date_pac_ok: Optional[date] = None
     
     model_config = ConfigDict(from_attributes=True)
+
+
+
+class UserMini(BaseModel):
+    id: int
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class BCResponse(BaseModel):
+    id: int
+    bc_number: str
+    status: str
+
+    approved_l1_by: Optional[UserMini] = None
+    approved_l1_at: Optional[datetime] = None
+
+    approved_l2_by: Optional[UserMini] = None
+    approved_l2_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True

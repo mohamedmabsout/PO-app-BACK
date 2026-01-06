@@ -1,3 +1,4 @@
+from datetime import date
 from fastapi import APIRouter, BackgroundTasks, Depends, UploadFile, File, Form, HTTPException
 from fastapi_mail import MessageSchema, MessageType, FastMail, ConnectionConfig
 from sqlalchemy.orm import Session
@@ -7,28 +8,26 @@ from ..dependencies  import get_db,require_admin
 from ..config import conf
 import secrets
 router = APIRouter(prefix="/api/sbcs", tags=["SBC Management"])
-
 @router.post("/", response_model=schemas.SBCResponse)
 def create_new_sbc(
-    # Use Form(...) for text fields because we are uploading files
     sbc_code: Optional[str] = Form(None),
+    sbc_type: Optional[str] = Form(None),
     short_name: str = Form(...),
     name: str = Form(...),
-    start_date: Optional[str] = Form(None),
+    start_date: Optional[date] = Form(None),
     ceo_name: Optional[str] = Form(None),
     email: Optional[str] = Form(None),
     rib: Optional[str] = Form(None),
     bank_name: Optional[str] = Form(None),
-    tax_reg_end_date: Optional[str] = Form(None),
-    sbc_type: Optional[str] = Form(None),
-    # Files
+    tax_reg_end_date: Optional[date] = Form(None),
+
     contract_file: Optional[UploadFile] = File(None),
     tax_file: Optional[UploadFile] = File(None),
-    
+
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user)
+    current_user: models.User = Depends(auth.get_current_user),
 ):
-    # Consolidate form data into a dict for CRUD
+    
     form_data = {
         "sbc_code": sbc_code,
         "sbc_type": sbc_type,
@@ -39,10 +38,17 @@ def create_new_sbc(
         "email": email,
         "rib": rib,
         "bank_name": bank_name,
-        "tax_reg_end_date": tax_reg_end_date
+        "tax_reg_end_date": tax_reg_end_date,
     }
-    
-    return crud.create_sbc(db, form_data, contract_file, tax_file, current_user.id)
+
+    # 👉 ici: save files + CRUD create
+    return crud.sbc.create(
+        db=db,
+        data=form_data,
+        contract_file=contract_file,
+        tax_file=tax_file,
+        created_by=current_user.id,
+    )
 
 @router.get("/pending", response_model=List[schemas.SBCResponse])
 def get_pending_sbcs_list(
