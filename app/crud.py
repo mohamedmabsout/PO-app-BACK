@@ -2604,6 +2604,8 @@ def get_all_bcs(db: Session, current_user: models.User, search: Optional[str] = 
         joinedload(models.BonDeCommande.internal_project),
         joinedload(models.BonDeCommande.creator) 
     )
+    query = query.join(models.InternalProject)
+
     # Apply role-based filtering
     if current_user.role == models.UserRole.PM: 
         query = query.filter(
