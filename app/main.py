@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 os.makedirs("uploads/sbc_docs", exist_ok=True)
 
-app.mount("/static/sbc_docs", StaticFiles(directory="uploads/sbc_docs"), name="sbc_docs")
+app.mount("/static", StaticFiles(directory="uploads"), name="static")
 
 @app.get("/")
 def read_root():
