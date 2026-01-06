@@ -3293,7 +3293,7 @@ def check_system_state_notifications(db: Session, user: models.User):
                 "desc": f"Targets for {datetime.now().strftime('%B')} are missing.",
                 "priority": "Medium",
                 "badgeBg": "warning",
-                "link": "/planning",
+                "link": "/users/targets",
                 "action": "Set Targets"
             })
 
