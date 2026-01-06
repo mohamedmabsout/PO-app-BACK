@@ -295,33 +295,44 @@ class SBC(Base):
     __tablename__ = "sbcs"
 
     id = Column(Integer, primary_key=True, index=True)
+    
+    # --- IDENTITY & ACCESS ---
+    sbc_code = Column(String(50), unique=True, index=True, nullable=False) # "ID SBC"
+    password_hash = Column(String(255)) # "Password" (Stored securely)
+    short_name = Column(String(50), nullable=False) # "SBC Short Name"
+    name = Column(String(255), nullable=False) # "SBC Name (Complete Name)"
+    
+    start_date = Column(Date) # "Date Start"
+    
+    # "Status SBC (Active; Blacklisted; under approval)"
+    status = Column(Enum(SBCStatus), default=SBCStatus.UNDER_APPROVAL) 
+    
+    # --- CONTACT INFO ---
+    ceo_name = Column(String(255)) # "CEO Subcontractor"
+    phone_1 = Column(String(50), unique = True) # "Phone 1"
+    phone_2 = Column(String(50)) # "Phone 2"
+    email = Column(String(255), unique = True, index=True) # "Mail"
+    
+    # --- CONTRACTUAL INFO ---
+    contract_ref = Column(String(100)) # "Contract" (Reference Number)
+    has_contract_attachment = Column(Boolean, default=False) # "Attachment Contract Exist"
+    contract_upload_date = Column(DateTime) # "Date upload Contract"
+    contract_filename = Column(String(255), nullable=True) 
 
-    sbc_code = Column(String(50), unique=True, index=True, nullable=False)
-    password_hash = Column(String(255))
-    short_name = Column(String(50), nullable=False)
-    name = Column(String(255), nullable=False)
-
-    start_date = Column(Date)
-    status = Column(Enum(SBCStatus), default=SBCStatus.UNDER_APPROVAL)
-
-    ceo_name = Column(String(255))
-    phone_1 = Column(String(50), unique=True, nullable=True)
-    phone_2 = Column(String(50), nullable=True)
-    email = Column(String(255), unique=True, index=True, nullable=True)
-
-    contract_ref = Column(String(100))
-    has_contract_attachment = Column(Boolean, default=False)
-    contract_upload_date = Column(DateTime, nullable=True)
-
-    has_tax_regularization = Column(Boolean, default=False)
-    tax_reg_upload_date = Column(DateTime, nullable=True)
-    tax_reg_end_date = Column(Date, nullable=True)
-
-    rib = Column(String(50), nullable=True)
-    bank_name = Column(String(100), nullable=True)
-
-    created_at = Column(DateTime, server_default=func.now())
-
+    # --- TAX REGULARIZATION ---
+    has_tax_regularization = Column(Boolean, default=False) # "Attestation de regularisation fiscal"
+    tax_reg_upload_date = Column(DateTime) # "Date upload" (for tax doc)
+    tax_reg_end_date = Column(Date) # "Plan end date of Reg Fiscal"
+    tax_reg_filename = Column(String(255), nullable=True)
+  
+    # --- FINANCIAL INFO ---
+    rib = Column(String(50)) # "RIB"
+    bank_name = Column(String(100)) # "Name of the Bank"
+    
+    # --- METADATA & APPROVALS ---
+    created_at = Column(DateTime, default=datetime.datetime.utcnow) # "Date creation"
+    
+    # "Creator of the SBC (RAF)"
     creator_id = Column(Integer, ForeignKey("users.id"))
     approver_id = Column(Integer, ForeignKey("users.id"), nullable=True)
 

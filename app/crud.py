@@ -821,51 +821,50 @@ def process_acceptances_by_ids(db: Session, raw_acceptance_ids: List[int]):
         if po_id in merged_po_map:
             merged_po_to_update = merged_po_map[po_id]
             updated_po_ids.add(po_id)
-            updated_count += 1
             
+            # 1. Get the date from the file
+            raw_processed_date = acceptance_row['application_processed_date']
+            
+            # --- 🚨 TIMEZONE FIX: 2026-01-01 -> 2025-12-31 🚨 ---
+            # If the date is valid and is exactly Jan 1, 2026, shift it back.
+            final_processed_date = None
+            if pd.notna(raw_processed_date):
+                date_obj = raw_processed_date.date()
+                if date_obj == date(2026, 1, 1):
+                    final_processed_date = date(2025, 12, 31)
+                else:
+                    final_processed_date = date_obj
+            # ----------------------------------------------------
+
             unit_price = merged_po_to_update.unit_price or 0
             req_qty = merged_po_to_update.requested_qty or 0
-            
-            # --- Logic: Handle Aggregated Qty and Date ---
             agg_acceptance_qty = acceptance_row['acceptance_qty']
-            
-            # Date Logic: Use date if valid AND qty > 0, else None
-            proc_date_val = acceptance_row['application_processed_date']
-            if pd.notna(proc_date_val) and agg_acceptance_qty > 0:
-                latest_processed_date = proc_date_val.date()
-            else:
-                latest_processed_date = None
-
-            payment_term = merged_po_to_update.payment_term
             shipment_no = acceptance_row['shipment_no']
 
-            # --- Logic: Deduce Category ---
-            # Using the helper function you defined earlier
-            if merged_po_to_update.item_description:
-                merged_po_to_update.category = deduce_category(merged_po_to_update.item_description)
+            merged_po_to_update.category = deduce_category(merged_po_to_update.item_description)
+            payment_term = merged_po_to_update.payment_term
 
-            # --- Logic: AC/PAC Calculation ---
+            # --- Apply the CORRECTED date to AC/PAC fields ---
 
-            # Case 1: Shipment 1
             if shipment_no == 1:
-                # Always calculate AC for Shipment 1
                 merged_po_to_update.total_ac_amount = unit_price * req_qty * 0.80
                 merged_po_to_update.accepted_ac_amount = unit_price * agg_acceptance_qty * 0.80
-                merged_po_to_update.date_ac_ok = latest_processed_date
+                # Use the fixed date here
+                merged_po_to_update.date_ac_ok = final_processed_date 
                 
-                # IF term is "AC PAC 100%", calculate PAC too
                 if payment_term == "AC PAC 100%":
                     merged_po_to_update.total_pac_amount = unit_price * req_qty * 0.20
                     merged_po_to_update.accepted_pac_amount = unit_price * agg_acceptance_qty * 0.20
-                    merged_po_to_update.date_pac_ok = latest_processed_date
+                    # Use the fixed date here
+                    merged_po_to_update.date_pac_ok = final_processed_date 
 
-            # Case 2: Shipment 2
             elif shipment_no == 2:
-                # ONLY calculate PAC if term is "AC1 80 | PAC 20"
                 if payment_term == "AC1 80 | PAC 20":
                     merged_po_to_update.total_pac_amount = unit_price * req_qty * 0.20
                     merged_po_to_update.accepted_pac_amount = unit_price * agg_acceptance_qty * 0.20
-                    merged_po_to_update.date_pac_ok = latest_processed_date
+                    # Use the fixed date here
+                    merged_po_to_update.date_pac_ok = final_processed_date
+
 
             # --- Logic: Update Total Acceptance Qty (Optional - remove if column doesn't exist) ---
             # Since you got an error here, I am removing this block to respect your current DB schema.
@@ -2385,7 +2384,7 @@ def save_upload_file(upload_file, sbc_code, doc_type):
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(upload_file.file, buffer)
         
-    return file_path
+    return filename
 
 def create_sbc(db: Session, form_data: dict, contract_file, tax_file, creator_id: int):
     # 1. Handle Code
@@ -2401,9 +2400,9 @@ def create_sbc(db: Session, form_data: dict, contract_file, tax_file, creator_id
         code = generate_sbc_code(db)
         
     # 2. Handle Files
-    contract_path = save_upload_file(contract_file, code, "Contract")
-    tax_path = save_upload_file(tax_file, code, "TaxReg")
     
+    contract_fname = save_upload_file(contract_file, code, "Contract")
+    tax_fname = save_upload_file(tax_file, code, "TaxReg")
     # 3. Create Entity
     new_sbc = models.SBC(
         sbc_code=code,
@@ -2427,13 +2426,16 @@ def create_sbc(db: Session, form_data: dict, contract_file, tax_file, creator_id
         # Contract
         contract_ref=form_data.get('contract_ref'),
         # We store the DATE of upload if file exists
-        contract_upload_date=datetime.now() if contract_path else None,
-        has_contract_attachment=True if contract_path else False,
-        
+        contract_upload_date=datetime.now() if contract_fname else None,
+        has_contract_attachment=True if contract_fname else False,
+                contract_filename=contract_fname, # Save it!
+
         # Tax
-        tax_reg_upload_date=datetime.now() if tax_path else None,
-        has_tax_regularization=True if tax_path else False,
-        tax_reg_end_date=form_data.get('tax_reg_end_date')
+        tax_reg_upload_date=datetime.now() if tax_fname else None,
+        has_tax_regularization=True if tax_fname else False,
+        tax_reg_end_date=form_data.get('tax_reg_end_date'),
+                tax_reg_filename=tax_fname # Save it!
+
     )
     
     db.add(new_sbc)
@@ -3176,7 +3178,7 @@ def check_system_state_notifications(db: Session, user: models.User):
     role_str = str(user.role).upper() # Force uppercase for comparison
     print(f"DEBUG NOTIF: User Role UPPER is: '{role_str}'")
 
-    if "ADMIN" in role_str or "PD" in role_str :
+    if "ADMIN" in role_str :
         tbd_project = db.query(models.InternalProject).filter(models.InternalProject.name == "To Be Determined").first()
         
         if tbd_project:

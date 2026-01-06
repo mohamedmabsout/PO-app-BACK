@@ -13,6 +13,9 @@ services:
     depends_on:
       db: # <-- MODIFIED SECTION
         condition: service_healthy
+    volumes:
+      # ADD THIS LINE: Maps local 'uploads' folder to container's 'uploads' folder
+      - ./uploads:/app/uploads
 
   db:
     image: mysql:8.0
