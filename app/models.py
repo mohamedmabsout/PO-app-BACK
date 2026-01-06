@@ -345,7 +345,8 @@ class SBC(Base):
     # --- FINANCIAL INFO ---
     rib = Column(String(50)) # "RIB"
     bank_name = Column(String(100)) # "Name of the Bank"
-    
+    ice = Column(String(50), nullable=True) # Identifiant Commun de l'Entreprise
+    rc = Column(String(50), nullable=True)  
     # --- METADATA & APPROVALS ---
     created_at = Column(DateTime, default=datetime.datetime.utcnow) # "Date creation"
     

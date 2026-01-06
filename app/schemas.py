@@ -395,7 +395,8 @@ class SBCCreate(BaseModel):
     activity_sector: Optional[str] = None
     phone_number: Optional[str] = None
     address: Optional[str] = None
-
+    ice: Optional[str] = None
+    rc: Optional[str] = None
 
 class SBCResponse(BaseModel):
     id: int
@@ -408,6 +409,8 @@ class SBCResponse(BaseModel):
     rib: Optional[str] = None
     bank_name: Optional[str] = None
     bank_address: Optional[str] = None
+    ice: Optional[str] = None
+    rc: Optional[str] = None
     cnss: Optional[str] = None
     tax_id: Optional[str] = None
     activity_sector: Optional[str] = None

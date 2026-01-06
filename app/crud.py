@@ -2448,7 +2448,8 @@ def create_sbc(db: Session, form_data: dict, contract_file, tax_file, creator_id
         # Financial
         rib=form_data.get('rib'),
         bank_name=form_data.get('bank_name'),
-        
+        ice=form_data.get('ice'),
+        rc=form_data.get('rc'),
         # Contract
         contract_ref=form_data.get('contract_ref'),
         # We store the DATE of upload if file exists

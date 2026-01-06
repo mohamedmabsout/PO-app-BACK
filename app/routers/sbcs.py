@@ -19,6 +19,8 @@ def create_new_sbc(
     email: Optional[str] = Form(None),
     rib: Optional[str] = Form(None),
     bank_name: Optional[str] = Form(None),
+    ice: Optional[str] = Form(None),
+    rc: Optional[str] = Form(None),
     tax_reg_end_date: Optional[str] = Form(None),
     sbc_type: Optional[str] = Form(None),
     # Files
@@ -39,6 +41,8 @@ def create_new_sbc(
         "email": email,
         "rib": rib,
         "bank_name": bank_name,
+        "ice": ice,
+        "rc": rc,
         "tax_reg_end_date": tax_reg_end_date
     }
     
