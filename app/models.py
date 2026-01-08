@@ -318,7 +318,9 @@ class SBC(Base):
     password_hash = Column(String(255)) # "Password" (Stored securely)
     short_name = Column(String(50), nullable=False) # "SBC Short Name"
     name = Column(String(255), nullable=False) # "SBC Name (Complete Name)"
-    
+    address = Column(String(255), nullable=True) # New
+    city = Column(String(100), nullable=True)    # New
+
     start_date = Column(Date) # "Date Start"
     
     # "Status SBC (Active; Blacklisted; under approval)"
