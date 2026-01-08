@@ -1,7 +1,7 @@
 import datetime
 from sqlalchemy import Boolean, Column, Date, Enum, ForeignKey, Integer, String, Float, DateTime
 
-from .enum import ProjectType, UserRole, SBCStatus, BCStatus, NotificationType, BCType,AssignmentStatus, ValidationState, ItemGlobalStatus, SBCType
+from .enum import ProjectType, UserRole, SBCStatus, BCStatus, NotificationType, BCType,AssignmentStatus, ValidationState, ItemGlobalStatus, SBCType,FundRequestStatus,TransactionType
 from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, Text, Date, Enum, ForeignKey
 from .database import Base
 from sqlalchemy.orm import relationship
@@ -504,3 +504,75 @@ class ItemRejectionHistory(Base):
     
     item = relationship("BCItem", back_populates="rejection_history")
     rejected_by = relationship("User")
+# 1. The Wallet (One per User)
+class Caisse(Base):
+    __tablename__ = "caisses"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), unique=True, nullable=False)
+    balance = Column(Float, default=0.0)
+    
+    # Relationships
+    user = relationship("User", backref="caisse")
+    transactions = relationship("Transaction", back_populates="caisse")
+
+
+# 2. The Parent Request (Created by PD)
+class FundRequest(Base):
+    __tablename__ = "fund_requests"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    request_number = Column(String(50), unique=True, index=True) # e.g. REQ-2025-001
+    
+    requester_id = Column(Integer, ForeignKey("users.id")) # The PD
+    approver_id = Column(Integer, ForeignKey("users.id"), nullable=True) # The Admin
+    
+    status = Column(Enum(FundRequestStatus), default=FundRequestStatus.PENDING_APPROVAL)
+    
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    approved_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    
+    # Relationships
+    requester = relationship("User", foreign_keys=[requester_id])
+    approver = relationship("User", foreign_keys=[approver_id])
+    items = relationship("FundRequestItem", back_populates="request")
+
+
+# 3. The Items inside a Request (Amount per PM)
+class FundRequestItem(Base):
+    __tablename__ = "fund_request_items"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    request_id = Column(Integer, ForeignKey("fund_requests.id"), nullable=False)
+    
+    target_pm_id = Column(Integer, ForeignKey("users.id"), nullable=False) # Who gets the money?
+    
+    requested_amount = Column(Float, nullable=False) # Amount asked by PD
+    approved_amount = Column(Float, nullable=True)   # Amount approved by Admin (can be different)
+    
+    # Relationships
+    request = relationship("FundRequest", back_populates="items")
+    target_pm = relationship("User", foreign_keys=[target_pm_id])
+
+
+# 4. The Ledger (History of movements)
+class Transaction(Base):
+    __tablename__ = "transactions"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    caisse_id = Column(Integer, ForeignKey("caisses.id"), nullable=False)
+    
+    type = Column(Enum(TransactionType), nullable=False) # CREDIT or DEBIT
+    amount = Column(Float, nullable=False)
+    description = Column(String(255))
+    
+    # Optional links for traceability
+    related_request_id = Column(Integer, ForeignKey("fund_requests.id"), nullable=True)
+    
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    created_by_id = Column(Integer, ForeignKey("users.id")) # Who performed the action
+    
+    # Relationships
+    caisse = relationship("Caisse", back_populates="transactions")
+    created_by = relationship("User", foreign_keys=[created_by_id])

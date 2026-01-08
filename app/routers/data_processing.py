@@ -596,3 +596,122 @@ def validate_item(
     current_user: models.User = Depends(auth.get_current_user)
 ):
     return crud.validate_bc_item(db, item_id, current_user, payload.action, payload.comment)
+
+
+
+@router.get("/stats")
+def get_stats(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """Returns the 3 cards data: Balance, Pending, Spent"""
+    return crud.get_caisse_stats(db, current_user)
+
+
+@router.get("/transactions")
+def list_transactions(
+    page: int = 1,
+    limit: int = 20,
+    type: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    search: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """Returns the history table data"""
+    return crud.get_transactions(
+        db, current_user, page, limit, type, start_date, end_date, search
+    )
+
+
+@router.get("/requests/pending")
+def list_pending_requests(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """Returns the list of requests for the dashboard table (Admin/PD only)"""
+    # Optional: Enforce security
+    if current_user.role not in [models.UserRole.ADMIN, models.UserRole.PD]:
+        return []
+        
+    return crud.get_pending_requests(db)
+@router.post("/request")
+def create_fund_request(
+    payload: schemas.FundRequestCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    return crud.create_fund_request(db, current_user.id, payload.items) 
+
+
+@router.post("/request/{req_id}/review")
+def review_fund_request(
+    req_id: int, 
+    payload: schemas.FundRequestReview,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    if current_user.role not in [models.UserRole.ADMIN]:
+        raise HTTPException(403, "Only Admins can review requests")
+
+    if payload.action == "REJECT":
+        # Handle rejection (simple status update)
+        req = db.query(models.FundRequest).get(req_id)
+        req.status = models.FundRequestStatus.REJECTED
+        db.commit()
+        return {"message": "Request Rejected"}
+    
+    # Handle Approval
+    # Convert list to dict for easier lookup {item_id: amount}
+    approved_map = {str(i.item_id): i.approved_amount for i in payload.items}
+    
+    crud.approve_fund_request(db, req_id, current_user.id, approved_map)
+    return {"message": "Request Approved"}
+
+@router.get("/request/{req_id}", response_model=schemas.FundRequestDetail) # <--- USE THE NEW SCHEMA
+def get_fund_request_details(
+    req_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    return crud.get_request_by_id(db, req_id)
+@router.post("/request/{req_id}/confirm")
+def confirm_fund_reception_endpoint(
+    req_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """
+    PD confirms receipt of funds. This triggers the wallet updates and transaction creation.
+    """
+    # Security: Only PD can confirm
+    if current_user.role != models.UserRole.PD:
+         # Or allow ADMIN too if needed for testing
+         raise HTTPException(403, "Only Project Directors can confirm receipt.")
+
+    try:
+        crud.confirm_fund_reception(db, req_id, current_user.id)
+        return {"message": "Funds confirmed and wallets updated."}
+    except ValueError as e:
+        raise HTTPException(400, detail=str(e))
+
+@router.post("/expense")
+def declare_expense(
+    payload: schemas.ExpenseCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    try:
+        crud.create_expense(db, current_user, payload.amount, payload.description)
+        return {"message": "Expense declared successfully."}
+    except ValueError as e:
+        raise HTTPException(400, detail=str(e))
+@router.get("/wallets-summary")
+def get_wallets_summary(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    if current_user.role not in [models.UserRole.ADMIN, models.UserRole.PD]:
+        raise HTTPException(403, "Access denied")
+    return crud.get_all_wallets_summary(db)

@@ -61,3 +61,12 @@ class ItemGlobalStatus(str, enum.Enum):
     READY_FOR_ACT = "READY_FOR_ACT" # QC & PM both Approved
     ACCEPTED = "ACCEPTED"       # Included in an ACT
     PERMANENTLY_REJECTED = "PERMANENTLY_REJECTED" # > 5 rejections
+class FundRequestStatus(str, enum.Enum):
+    PENDING_APPROVAL = "PENDING_APPROVAL"     # PD asked, Admin hasn't seen it
+    APPROVED_WAITING_FUNDS = "APPROVED_WAITING_FUNDS" # Admin approved, money on the way
+    COMPLETED = "COMPLETED"                   # PD received money, added to wallets
+    REJECTED = "REJECTED"
+
+class TransactionType(str, enum.Enum):
+    CREDIT = "CREDIT"   # Money IN (Refill)
+    DEBIT = "DEBIT"     # Money OUT (Expense)

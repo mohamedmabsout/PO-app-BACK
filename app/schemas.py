@@ -611,3 +611,43 @@ class SBCAcceptance(BaseModel):
     date_pac_ok: Optional[date] = None
     
     model_config = ConfigDict(from_attributes=True)
+class FundRequestItemCreate(BaseModel):
+    pm_id: int
+    amount: float
+
+class FundRequestCreate(BaseModel):
+    items: List[FundRequestItemCreate]
+class FundRequestItemReview(BaseModel):
+    item_id: int
+    approved_amount: float
+
+class FundRequestReview(BaseModel):
+    action: str # "APPROVE" or "REJECT"
+    items: List[FundRequestItemReview]
+class FundRequestItemDetail(BaseModel):
+    id: int
+    target_pm_id: int
+    target_pm_name: str
+    requested_amount: float
+    approved_amount: Optional[float] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+# Schema for the Request Details Response
+class FundRequestDetail(BaseModel):
+    id: int
+    request_number: str
+    created_at: datetime
+    status: str
+    requester_id: int
+    requester_name: str
+    approver_id: Optional[int] = None
+    approver_name: Optional[str] = None
+    approved_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    items: List[FundRequestItemDetail] # List of items
+
+    model_config = ConfigDict(from_attributes=True)
+class ExpenseCreate(BaseModel):
+    amount: float
+    description: str
