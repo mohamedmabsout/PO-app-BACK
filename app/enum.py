@@ -62,11 +62,21 @@ class ItemGlobalStatus(str, enum.Enum):
     ACCEPTED = "ACCEPTED"       # Included in an ACT
     PERMANENTLY_REJECTED = "PERMANENTLY_REJECTED" # > 5 rejections
 class FundRequestStatus(str, enum.Enum):
-    PENDING_APPROVAL = "PENDING_APPROVAL"     # PD asked, Admin hasn't seen it
-    APPROVED_WAITING_FUNDS = "APPROVED_WAITING_FUNDS" # Admin approved, money on the way
-    COMPLETED = "COMPLETED"                   # PD received money, added to wallets
+    PENDING_APPROVAL = "PENDING_APPROVAL"
+    APPROVED_WAITING_FUNDS = "APPROVED_WAITING_FUNDS"
+    COMPLETED = "COMPLETED"
     REJECTED = "REJECTED"
+    # --- NEW STATUSES ---
+    PARTIALLY_PAID = "PARTIALLY_PAID"
+    CLOSED_PARTIAL = "CLOSED_PARTIAL" 
 
 class TransactionType(str, enum.Enum):
     CREDIT = "CREDIT"   # Money IN (Refill)
     DEBIT = "DEBIT"     # Money OUT (Expense)
+class RefillRequestStatus(str, enum.Enum):
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"       # Fully paid
+    REJECTED = "REJECTED"
+    PARTIALLY_PAID = "PARTIALLY_PAID" # New: Still open, but some money given
+    CLOSED_PARTIAL = "CLOSED_PARTIAL" # New: Closed, but not fully paid (e.g. 500/1000 given and closed)
+

@@ -715,3 +715,18 @@ def get_wallets_summary(
     if current_user.role not in [models.UserRole.ADMIN, models.UserRole.PD]:
         raise HTTPException(403, "Access denied")
     return crud.get_all_wallets_summary(db)
+@router.post("/request/{req_id}/process")
+def process_request_endpoint(
+    req_id: int, 
+    payload: schemas.FundRequestReviewAction,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    if current_user.role != models.UserRole.ADMIN:
+        raise HTTPException(403, "Admins only")
+        
+    try:
+        crud.process_fund_request(db, req_id, payload, current_user.id)
+        return {"message": "Request processed"}
+    except ValueError as e:
+        raise HTTPException(400, str(e))

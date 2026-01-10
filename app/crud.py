@@ -3646,20 +3646,38 @@ def get_sbc_kpis(db: Session, user: models.User):
         "active_bc_count": active_bc_count
     }
 
+# backend/app/crud.py
+
 def get_sbc_acceptances(db: Session, user: models.User):
+    """
+    Fetches the specific BC Items assigned to this SBC that are approved for payment.
+    """
     if user.role != "SBC" or not user.sbc_id:
         return []
 
-    # Find all POs associated with this SBC's BCs
-    bc_item_pos = db.query(models.BCItem.merged_po_id).join(models.BonDeCommande).filter(
-        models.BonDeCommande.sbc_id == user.sbc_id
-    ).distinct()
+    # Query the BCItem directly. 
+    # Join BonDeCommande to check ownership (sbc_id).
+    # Join MergedPO to get the description/site/po_no for display.
+    items = db.query(models.BCItem).join(
+        models.BonDeCommande
+    ).join(
+        models.MergedPO
+    ).options(
+        joinedload(models.BCItem.merged_po), # Load details for display
+        joinedload(models.BCItem.act),       # Load ACT info if generated
+        joinedload(models.BCItem.bc)         # Load BC number
+    ).filter(
+        models.BonDeCommande.sbc_id == user.sbc_id,
+        
+        # FILTER: Only show items that have passed all internal validation steps.
+        # i.e., "READY_FOR_ACT" (Approved by PD, waiting for paper) or "ACCEPTED" (Paper generated)
+        models.BCItem.global_status.in_([
+            models.ItemGlobalStatus.READY_FOR_ACT, 
+            models.ItemGlobalStatus.ACCEPTED
+        ])
+    ).order_by(models.BCItem.id.desc()).all()
 
-    # Get MergedPO records for those POs that have been at least partially paid
-    return db.query(models.MergedPO).filter(
-        models.MergedPO.id.in_(bc_item_pos),
-        (models.MergedPO.accepted_ac_amount > 0) | (models.MergedPO.accepted_pac_amount > 0)
-    ).order_by(models.MergedPO.date_ac_ok.desc(), models.MergedPO.date_pac_ok.desc()).all()
+    return items
 def create_fund_request(db: Session, pd_user: int, items: list):
     # Generate ID
     count = db.query(models.FundRequest).count() + 1
@@ -3678,7 +3696,8 @@ def create_fund_request(db: Session, pd_user: int, items: list):
             request_id=new_req.id,
             target_pm_id=item.pm_id,
             requested_amount=item.amount,
-            approved_amount=item.amount # Default to requested
+            approved_amount=0.0, 
+            remarque=item.remarque # <--- Save the remark
         )
         db.add(db_item)
         
@@ -3740,7 +3759,7 @@ def get_caisse_stats(db: Session, user: models.User):
     """
     Calculates the 3 key metrics for the Dashboard cards.
     """
-    if user.role == models.UserRole.ADMIN:
+    if user.role in [UserRole.PD, UserRole.ADMIN]:
         # 1. Total Balance (Sum of all wallets)
         total_balance = db.query(func.sum(models.Caisse.balance)).scalar() or 0.0
 
@@ -3898,7 +3917,9 @@ def get_pending_requests(db: Session):
     query = db.query(models.FundRequest).filter(
         models.FundRequest.status.in_([
             models.FundRequestStatus.PENDING_APPROVAL,
-            models.FundRequestStatus.APPROVED_WAITING_FUNDS
+            models.FundRequestStatus.APPROVED_WAITING_FUNDS,
+            models.FundRequestStatus.PARTIALLY_PAID 
+
         ])
     ).order_by(models.FundRequest.created_at.desc())
     
@@ -3932,9 +3953,16 @@ def get_request_by_id(db: Session, req_id: int):
             "target_pm_id": i.target_pm_id,
             "target_pm_name": f"{i.target_pm.first_name} {i.target_pm.last_name}",
             "requested_amount": i.requested_amount,
-            "approved_amount": i.approved_amount
+            "approved_amount": i.approved_amount or 0.0,
+            
+            # --- NEW FIELD ---
+            "remarque": i.remarque, # Pass the remark to the frontend
+            "admin_note": i.admin_note or ""
         })
     
+    # Calculate total requested (for safety/display)
+    total_requested = sum(item['requested_amount'] for item in items)
+
     return {
         "id": req.id,
         "request_number": req.request_number,
@@ -3946,6 +3974,12 @@ def get_request_by_id(db: Session, req_id: int):
         "approver_name": f"{req.approver.first_name} {req.approver.last_name}" if req.approver else "",
         "approved_at": req.approved_at,
         "completed_at": req.completed_at,
+        
+        # --- NEW FIELDS ---
+        "total_amount": total_requested, # Or req.total_amount if you stored it on the parent
+        "paid_amount": req.paid_amount or 0.0,
+        "admin_comment": req.admin_comment,
+        
         "items": items
     }
 
@@ -3983,7 +4017,7 @@ def get_all_wallets_summary(db: Session):
     Used for Admin/PD detailed view.
     """
     # 1. Get all PMs
-    pms = db.query(models.User).filter(models.User.role.in_([models.UserRole.PM])).all()
+    pms = db.query(models.User).filter(models.User.role.in_([models.UserRole.PM, models.UserRole.PD, models.UserRole.ADMIN])).all()
     
     results = []
     for pm in pms:
@@ -4001,13 +4035,100 @@ def get_all_wallets_summary(db: Session):
             models.FundRequestItem.target_pm_id == pm.id,
             models.FundRequest.status == models.FundRequestStatus.APPROVED_WAITING_FUNDS
         ).scalar() or 0.0
-        
+        partial_paid = db.query(func.sum(models.FundRequestItem.approved_amount)).join(models.FundRequest).filter(
+            models.FundRequestItem.target_pm_id == pm.id,
+            models.FundRequest.status == models.FundRequestStatus.PARTIALLY_PAID
+        ).scalar() or 0.0
         results.append({
             "user_id": pm.id,
             "user_name": f"{pm.first_name} {pm.last_name}",
             "balance": balance,
-            "pending_in": pending_reqs + waiting_funds
+            "pending_in": pending_reqs + waiting_funds + partial_paid
         })
         
     # Sort by balance descending
     return sorted(results, key=lambda x: x['balance'], reverse=True)
+def process_fund_request(
+    db: Session, 
+    req_id: int, 
+    payload: schemas.FundRequestReviewAction, 
+    admin_id: int
+):
+    req = db.query(models.FundRequest).get(req_id)
+    if not req: raise ValueError("Request not found")
+
+    if payload.action == "REJECT":
+        if not payload.comment: raise ValueError("Comment required for rejection")
+        req.status = models.FundRequestStatus.REJECTED
+        req.admin_comment = payload.comment
+        req.approver_id = admin_id
+        req.approved_at = datetime.now()
+
+    elif payload.action == "APPROVE":
+        if not payload.items:
+            raise ValueError("Approval requires item details.")
+            
+        total_paid_now = 0.0
+
+        for item_review in payload.items:
+            # 1. Find the DB item
+            db_item = next((i for i in req.items if i.id == item_review.item_id), None)
+            if not db_item: continue
+            if item_review.admin_note:
+                db_item.admin_note = item_review.admin_note
+
+            
+            amount = item_review.amount_to_pay
+            if amount <= 0: continue # Skip zero payments
+
+            # 2. Update Item Approved Amount (Cumulative)
+            # We add to the existing approved amount to track total approved over time
+            current_approved = db_item.approved_amount or 0.0
+            db_item.approved_amount = current_approved + amount
+            
+            total_paid_now += amount
+
+            # 3. CREDIT THE SPECIFIC PM WALLET
+            pm_id = db_item.target_pm_id
+            wallet = db.query(models.Caisse).filter(models.Caisse.user_id == pm_id).first()
+            if not wallet:
+                wallet = models.Caisse(user_id=pm_id, balance=0.0)
+                db.add(wallet)
+                db.flush()
+            
+            wallet.balance += amount
+            
+            # 4. Create Transaction
+            trx = models.Transaction(
+                caisse_id=wallet.id,
+                type=models.TransactionType.CREDIT,
+                amount=amount,
+                description=f"Refill #{req.request_number} (Item #{db_item.id})",
+                related_request_id=req.id,
+                created_by_id=admin_id
+            )
+            db.add(trx)
+
+        # 5. Update Global Request State
+        current_req_paid = req.paid_amount or 0.0
+        req.paid_amount = current_req_paid + total_paid_now
+        
+        req.approver_id = admin_id
+        req.approved_at = datetime.now()
+        req.admin_comment = payload.comment
+
+        # 6. Determine Status
+        total_requested = sum(i.requested_amount for i in req.items)
+        # Note: We compare Total Paid vs Total Requested
+        remaining = total_requested - req.paid_amount
+        
+        if remaining <= 0.01:
+            req.status = models.FundRequestStatus.COMPLETED
+        else:
+            if payload.close_request:
+                req.status = models.FundRequestStatus.CLOSED_PARTIAL
+            else:
+                req.status = models.FundRequestStatus.PARTIALLY_PAID
+
+    db.commit()
+    return req

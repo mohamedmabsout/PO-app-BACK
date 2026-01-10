@@ -529,8 +529,10 @@ class FundRequest(Base):
     requester_id = Column(Integer, ForeignKey("users.id")) # The PD
     approver_id = Column(Integer, ForeignKey("users.id"), nullable=True) # The Admin
     
-    status = Column(Enum(FundRequestStatus), default=FundRequestStatus.PENDING_APPROVAL)
-    
+    status = Column(String(50), default=FundRequestStatus.PENDING_APPROVAL)
+    paid_amount = Column(Float, default=0.0) 
+    admin_comment = Column(Text, nullable=True) # For rejection or partial notes
+
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     approved_at = Column(DateTime, nullable=True)
     completed_at = Column(DateTime, nullable=True)
@@ -552,7 +554,8 @@ class FundRequestItem(Base):
     
     requested_amount = Column(Float, nullable=False) # Amount asked by PD
     approved_amount = Column(Float, nullable=True)   # Amount approved by Admin (can be different)
-    
+    remarque = Column(String(255), nullable=True) # Description for this line item
+    admin_note = Column(String(255), nullable=True) 
     # Relationships
     request = relationship("FundRequest", back_populates="items")
     target_pm = relationship("User", foreign_keys=[target_pm_id])

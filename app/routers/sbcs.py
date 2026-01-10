@@ -76,12 +76,29 @@ def get_my_sbc_kpis(
 ):
     return crud.get_sbc_kpis(db, user=current_user)
 
-@router.get("/my-acceptances", response_model=List[schemas.SBCAcceptance])
-def get_my_sbc_acceptances(
+@router.get("/my-acceptances")
+def read_sbc_acceptances(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
-    return crud.get_sbc_acceptances(db, user=current_user)
+    items = crud.get_sbc_acceptances(db, current_user)
+    
+    # Transform to a clean list for the frontend
+    result = []
+    for item in items:
+        result.append({
+            "id": item.id,
+            "bc_number": item.bc.bc_number,
+            "po_no": item.merged_po.po_no,
+            "site_code": item.merged_po.site_code,
+            "description": item.merged_po.item_description,
+            "quantity": item.quantity_sbc,
+            "unit_price": item.unit_price_sbc, # SBC Price
+            "total_price": item.line_amount_sbc, # SBC Total (100%)
+            "status": item.global_status,
+            "act_number": item.act.act_number if item.act else "Pending Generation"
+        })
+    return result
 
 @router.post("/{sbc_id}/approve")
 async def approve_sbc_endpoint(
