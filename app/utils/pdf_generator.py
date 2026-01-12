@@ -238,6 +238,10 @@ def generate_bc_pdf(bc):
     buffer.seek(0)
     return buffer
 
+def format_currency(value):
+    """Helper to format currency with 'MAD' suffix"""
+    return f"{value:,.2f} MAD"
+
 def generate_act_pdf(act):
     buffer = io.BytesIO()
     p = canvas.Canvas(buffer, pagesize=A4)
@@ -253,40 +257,60 @@ def generate_act_pdf(act):
     p.drawString(50, height - 110, f"BC Reference: {act.bc.bc_number}")
     
     # --- TABLE HEADER ---
-    y = height - 150
+    y = height - 160
+    p.setFillColorRGB(0.9, 0.9, 0.9) # Light gray background
+    p.rect(40, y-5, 515, 20, fill=1, stroke=0)
+    p.setFillColorRGB(0, 0, 0) # Back to black text
+
     p.setFont("Helvetica-Bold", 9)
     p.drawString(50, y, "Item Description")
-    p.drawString(350, y, "Qty")
-    p.drawString(400, y, "Unit Price")
-    p.drawString(480, y, "Total")
+    p.drawRightString(380, y, "Qty")       # Right-aligned
+    p.drawRightString(460, y, "Unit Price") # Right-aligned
+    p.drawRightString(540, y, "Total")      # Right-aligned
     
     # --- ITEMS ---
-    y -= 20
+    y -= 25
     p.setFont("Helvetica", 9)
     
-    total_amount = 0
-    
     for item in act.items:
-        # Simple text wrapping logic or truncation would go here for long descriptions
-        desc = item.merged_po.item_description[:50] 
+        # Simple text truncation
+        desc = item.merged_po.item_description
+        if len(desc) > 60: desc = desc[:57] + "..."
+            
         p.drawString(50, y, desc)
-        p.drawString(350, y, str(item.quantity_sbc))
-        p.drawString(400, y, f"{item.unit_price_sbc:,.2f}")
-        p.drawString(480, y, f"{item.line_amount_sbc:,.2f}")
+        p.drawRightString(380, y, f"{item.quantity_sbc:.2f}")
+        p.drawRightString(460, y, format_currency(item.unit_price_sbc))
+        p.drawRightString(540, y, format_currency(item.line_amount_sbc))
         
-        total_amount += item.line_amount_sbc
         y -= 20
         
-        if y < 50: # New page logic
+        if y < 100: # New page logic
             p.showPage()
             y = height - 50
 
-    # --- FOOTER ---
+    # --- FOOTER (TOTALS) ---
     y -= 20
-    p.line(50, y+10, 550, y+10)
+    p.setLineWidth(1)
+    p.line(40, y+10, 555, y+10)
+    
     p.setFont("Helvetica-Bold", 10)
-    p.drawString(350, y, "Total Amount:")
-    p.drawString(480, y, f"{total_amount:,.2f}")
+    
+    # Total HT
+    y -= 20
+    p.drawString(380, y, "Total HT:")
+    p.drawRightString(540, y, format_currency(act.total_amount_ht))
+    
+    # Tax
+    y -= 20
+    tax_percent = (act.applied_tax_rate or 0.0) * 100
+    p.drawString(380, y, f"Tax ({tax_percent:.0f}%):")
+    p.drawRightString(540, y, format_currency(act.total_tax_amount))
+    
+    # Total TTC
+    y -= 25
+    p.setFont("Helvetica-Bold", 12)
+    p.drawString(380, y, "Total TTC:")
+    p.drawRightString(540, y, format_currency(act.total_amount_ttc))
     
     p.showPage()
     p.save()

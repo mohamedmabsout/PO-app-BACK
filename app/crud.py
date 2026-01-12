@@ -3610,42 +3610,43 @@ def check_rejections_and_notify(db: Session, background_tasks: BackgroundTasks =
     db.commit()
 def get_sbc_kpis(db: Session, user: models.User):
     if user.role != "SBC" or not user.sbc_id:
-        # Return empty stats if not an SBC user
         return {"total_bc_value": 0, "total_paid_amount": 0, "pending_payment": 0, "active_bc_count": 0}
 
-    # 1. Total Value of Approved BCs
+    # 1. Total Value of Approved BCs (Contract Value)
+    # This is the total potential revenue for the SBC from approved contracts.
     total_bc_value = db.query(func.sum(models.BonDeCommande.total_amount_ht)).filter(
         models.BonDeCommande.sbc_id == user.sbc_id,
         models.BonDeCommande.status == models.BCStatus.APPROVED
     ).scalar() or 0.0
 
-    # 2. Count of Active BCs
+    # 2. Count of Active BCs (in any active state)
     active_bc_count = db.query(models.BonDeCommande).filter(
         models.BonDeCommande.sbc_id == user.sbc_id,
         models.BonDeCommande.status.in_([
             models.BCStatus.SUBMITTED, models.BCStatus.PENDING_L2, models.BCStatus.APPROVED
         ])
     ).count()
-    
-    # 3. Total Amount Paid (from MergedPO)
-    # This requires finding all POs associated with this SBC's BCs
-    bc_item_pos = db.query(models.BCItem.merged_po_id).join(models.BonDeCommande).filter(
-        models.BonDeCommande.sbc_id == user.sbc_id
-    ).distinct()
 
-    total_paid_query = db.query(
-        func.sum(coalesce(models.MergedPO.accepted_ac_amount, 0) + coalesce(models.MergedPO.accepted_pac_amount, 0))
-    ).filter(models.MergedPO.id.in_(bc_item_pos))
-    
-    total_paid_amount = total_paid_query.scalar() or 0.0
+    # 3. Total Amount Paid (Actual Work Done & Accepted)
+    # We sum the SBC's specific line amounts, but ONLY for items that are 'ACCEPTED' (Work Done).
+    # This represents money they have "earned" and likely invoiced.
+    total_paid_amount = db.query(func.sum(models.BCItem.line_amount_sbc)).join(
+        models.BonDeCommande
+    ).filter(
+        models.BonDeCommande.sbc_id == user.sbc_id,
+        models.BCItem.global_status == models.ItemGlobalStatus.ACCEPTED
+    ).scalar() or 0.0
+
+    # 4. Pending Payment (Backlog)
+    # This is the value of work assigned to them (in Approved BCs) but not yet accepted.
+    pending_payment = total_bc_value - total_paid_amount
 
     return {
         "total_bc_value": total_bc_value,
         "total_paid_amount": total_paid_amount,
-        "pending_payment": total_bc_value - total_paid_amount,
+        "pending_payment": max(0, pending_payment), # Ensure no negative numbers
         "active_bc_count": active_bc_count
     }
-
 # backend/app/crud.py
 
 def get_sbc_acceptances(db: Session, user: models.User):
