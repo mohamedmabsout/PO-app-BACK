@@ -328,7 +328,8 @@ class SBC(Base):
     # --- FINANCIAL INFO ---
     rib = Column(String(50)) # "RIB"
     bank_name = Column(String(100)) # "Name of the Bank"
-    
+    ice = Column(String(50), nullable=True) # Identifiant Commun de l'Entreprise
+    rc = Column(String(50), nullable=True)  
     # --- METADATA & APPROVALS ---
     created_at = Column(DateTime, default=datetime.datetime.utcnow) # "Date creation"
     
@@ -503,3 +504,12 @@ class UserPerformanceTarget(Base):
     user = relationship("User")
 
     __table_args__ = (sa.UniqueConstraint("user_id", "year", "month", name="uix_user_year_month"),)
+
+class BusinessCase(Base):
+    __tablename__ = "business_cases"
+
+    id = Column(Integer, primary_key=True)
+    status = Column(String(50), nullable=False, default="DRAFT") 
+
+    sbc_confirmed_at = Column(DateTime, nullable=True)
+    sbc_confirmed_by = Column(Integer, ForeignKey("users.id"), nullable=True)

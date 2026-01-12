@@ -160,33 +160,34 @@ def download_bc_acceptance_status(
 @router.post("/validate-items")
 def validate_items_bulk(
     payload: BulkValidationPayload,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    """
-    Validates multiple items at once using the existing logic.
-    """
     success_count = 0
     errors = []
 
     for item_id in payload.item_ids:
         try:
-            # Reuse your existing, correct logic
-            crud.validate_bc_item(db, item_id, current_user, payload.action, payload.comment)
+            crud.validate_bc_item(
+                db=db,
+                item_id=item_id,
+                current_user=current_user,
+                action=payload.action,
+                comment=payload.comment,
+                background_tasks=background_tasks,   # ✅
+            )
             success_count += 1
         except ValueError as e:
             errors.append(f"Item {item_id}: {str(e)}")
-        except Exception as e:
+        except Exception:
             errors.append(f"Item {item_id}: Unexpected error")
 
     if not success_count and errors:
-         # If everything failed, return error
-         raise HTTPException(status_code=400, detail=errors[0])
-    
-    return {
-        "message": f"Successfully processed {success_count} items.",
-        "errors": errors
-    }
+        raise HTTPException(status_code=400, detail=errors[0])
+
+    return {"message": f"Successfully processed {success_count} items.", "errors": errors}
+
 @router.post("/bc/{bc_id}/generate-act")
 def generate_act_endpoint(
     bc_id: int,

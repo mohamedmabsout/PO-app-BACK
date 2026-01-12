@@ -19,8 +19,8 @@ def create_new_sbc(
     email: Optional[str] = Form(None),
     rib: Optional[str] = Form(None),
     bank_name: Optional[str] = Form(None),
-    tax_reg_end_date: Optional[date] = Form(None),
-
+    tax_reg_end_date: Optional[str] = Form(None),
+    # Files
     contract_file: Optional[UploadFile] = File(None),
     tax_file: Optional[UploadFile] = File(None),
 
@@ -38,7 +38,7 @@ def create_new_sbc(
         "email": email,
         "rib": rib,
         "bank_name": bank_name,
-        "tax_reg_end_date": tax_reg_end_date,
+        "tax_reg_end_date": tax_reg_end_date
     }
 
     # 👉 ici: save files + CRUD create
@@ -150,7 +150,10 @@ def get_sbc_by_id(
 
     if not sbc:
         raise HTTPException(status_code=404, detail="SBC not found")
-
+     # ✅ Log pour vérifier
+    print(f"🔍 SBC ICE: {sbc.ice}")
+    print(f"🔍 SBC RC: {sbc.rc}")
+    
     return sbc
 
 @router.put("/{sbc_id}", response_model=schemas.SBCResponse)
@@ -162,6 +165,8 @@ def update_sbc(
     email: Optional[str] = Form(None),
     rib: Optional[str] = Form(None),
     bank_name: Optional[str] = Form(None),
+    ice: Optional[str] = Form(None),          # ✅ add
+    rc: Optional[str] = Form(None),  
     tax_reg_end_date: Optional[str] = Form(None),
     contract_file: Optional[UploadFile] = File(None),
     tax_file: Optional[UploadFile] = File(None),
@@ -177,6 +182,8 @@ def update_sbc(
             "email": email,
             "rib": rib,
             "bank_name": bank_name,
+            "ice": ice,   # ✅ add
+            "rc": rc,
             "tax_reg_end_date": tax_reg_end_date,
         },
         contract_file,

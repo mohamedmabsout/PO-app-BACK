@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from typing import List
 
 from .. import crud, schemas, models, auth
+from ..auth import get_current_user
 from ..dependencies import get_db , require_management,require_admin
 from ..config import conf
 import secrets
@@ -135,3 +136,35 @@ def admin_reset_password(
     db.commit()
     
     return {"message": f"Password for {user.username} has been manually updated."}
+
+# routers/users.py
+@router.put("/me/phone")
+def update_my_phone(
+    phone: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """Mettre à jour son numéro de téléphone"""
+    from app.services.notify import normalize_phone_ma
+    
+    normalized = normalize_phone_ma(phone)
+    if not normalized:
+        raise HTTPException(status_code=400, detail="Invalid phone number format")
+    
+    current_user.phone = normalized
+    current_user.phone_verified = False  # À revérifier
+    db.commit()
+    
+    return {"message": "Phone updated", "phone": normalized}
+
+
+@router.post("/me/toggle-sms")
+def toggle_sms_notifications(
+    enabled: bool,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """Activer/désactiver les notifications SMS"""
+    current_user.sms_notifications_enabled = enabled
+    db.commit()
+    return {"sms_enabled": enabled}

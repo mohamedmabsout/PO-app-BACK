@@ -1,6 +1,6 @@
 from typing import List, Optional
 from datetime import date, datetime
-from pydantic import ConfigDict
+from pydantic import ConfigDict, Field
 
 from .custom_types import FormattedDate
 
@@ -49,7 +49,7 @@ class UserUpdate(BaseModel):
     phone_number: Optional[str] = None
     email: Optional[EmailStr] = None
     role: Optional[str] = None
-
+    sms_notifications_enabled: Optional[bool] = None
     model_config = ConfigDict(from_attributes=True)
 class UserInfo(BaseModel):
     id: int
@@ -395,7 +395,8 @@ class SBCCreate(BaseModel):
     activity_sector: Optional[str] = None
     phone_number: Optional[str] = None
     address: Optional[str] = None
-
+    ice: Optional[str] = None
+    rc: Optional[str] = None
 
 class SBCResponse(BaseModel):
     id: int
@@ -408,6 +409,8 @@ class SBCResponse(BaseModel):
     rib: Optional[str] = None
     bank_name: Optional[str] = None
     bank_address: Optional[str] = None
+    ice: Optional[str] = None
+    rc: Optional[str] = None
     cnss: Optional[str] = None
     tax_id: Optional[str] = None
     activity_sector: Optional[str] = None
@@ -438,11 +441,11 @@ class MergedPOSimple(BaseModel):
     customer_project_name: Optional[str] = None
     item_description: str | None = None
 
-    line_amount_hw: float
-    publish_date: Optional[datetime] = None 
+line_amount_hw: float
+publish_date: Optional[datetime] = None
 
-    class Config:
-        orm_mode = True
+model_config = ConfigDict(from_attributes=True)
+
 class BCItemResponse(BCItemCreate):
     id: int
     unit_price_sbc: float
@@ -633,3 +636,19 @@ class BCResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class SendOtpIn(BaseModel):
+    phone: str = Field(..., example="+212651012998")
+
+class SendOtpOut(BaseModel):
+    success: bool
+    ttl_seconds: int
+
+class VerifyOtpIn(BaseModel):
+    phone: str
+    code: str
+
+class VerifyOtpOut(BaseModel):
+    verified: bool
+    

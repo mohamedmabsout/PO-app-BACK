@@ -11,7 +11,8 @@ from typing import Optional
 from fastapi import Query, status
 from ..dependencies import get_current_user, get_db
 from .. import crud, models, auth, schemas
-from datetime import datetime, date
+from ..auth import require_role
+from datetime import datetime, date, timezone
 from xlsxwriter.utility import xl_col_to_name
 from ..utils.pdf_generator import generate_bc_pdf  # Import the function
 from fastapi.responses import FileResponse
@@ -22,8 +23,12 @@ import os
 from ..utils import pdf_generator
 import traceback
 
+
 router = APIRouter(prefix="/api/data", tags=["data_processing"])
 logger = logging.getLogger(__name__)
+
+# Define statuses that can be confirmed by SBC
+CONFIRMABLE_STATUSES = ["PENDING_SBC", "L2_APPROVED", "APPROVED"]
 
 
 @router.post("/import/purchase-orders")
@@ -596,3 +601,27 @@ def validate_item(
     current_user: models.User = Depends(auth.get_current_user)
 ):
     return crud.validate_bc_item(db, item_id, current_user, payload.action, payload.comment)
+ # adapte selon ton workflow
+
+@router.post("/{bc_id}/confirm-sbc")
+def confirm_sbc(
+    bc_id: int,
+    db: Session = Depends(get_db),
+    user=Depends(require_role(["SBC"])),  # ✅ seulement SBC
+):
+    bc = crud.get_bc_by_id(db, bc_id)
+    if not bc:
+        raise HTTPException(status_code=404, detail="BC not found")
+
+    # Exemple de règle (à adapter à tes status)
+    if bc.status != "BC_CONFIRMED":
+        raise HTTPException(status_code=400, detail="BC is not ready for SBC confirmation")
+
+    # update status
+    bc.status = "SBC_CONFIRMED"
+    bc.sbc_confirmed_by = getattr(user, "id", None)
+    db.add(bc)
+    db.commit()
+    db.refresh(bc)
+
+    return {"message": "SBC confirmed", "id": bc.id, "status": bc.status}

@@ -1,59 +1,37 @@
+# app/auth.py
+from typing import List
 import datetime
-from fastapi.security import OAuth2PasswordBearer
-from passlib.context import CryptContext
-from pytz import timezone
-from .config import settings
 from jose import JWTError, jwt
+from passlib.context import CryptContext
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
-from jose import JWTError
 from sqlalchemy.orm import Session
+from collections.abc import Callable
+
+from .config import settings
 from .dependencies import get_db
-from . import crud, models, schemas, config
-# This tells passlib which hashing algorithm to use
+from . import crud, schemas
+
 pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
-def verify_password(plain_password, hashed_password):
+def verify_password(plain_password: str, hashed_password: str) -> bool:
     return pwd_context.verify(plain_password, hashed_password)
 
-def get_password_hash(password):
+def get_password_hash(password: str) -> str:
     return pwd_context.hash(password)
-def create_access_token(data: dict, expires_delta: datetime.timedelta | None = None):
+
+def create_access_token(data: dict, expires_delta: datetime.timedelta | None = None) -> str:
     to_encode = data.copy()
-    if expires_delta:
-        expire = datetime.datetime.now(datetime.timezone.utc) + expires_delta
-    else:
-        # Default to 7 days
-        expire = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=7)
-    
-    to_encode.update({"exp": expire})
-    
-    encoded_jwt = jwt.encode(
-        to_encode, 
-        settings.SECRET_KEY, 
-        algorithm=settings.ALGORITHM
+    expire = datetime.datetime.now(datetime.timezone.utc) + (
+        expires_delta if expires_delta else datetime.timedelta(days=settings.ACCESS_TOKEN_EXPIRE_DAYS)
     )
-    return encoded_jwt
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
-
-def verify_token(token: str, credentials_exception):
-    try:
-        payload = jwt.decode(
-            token, 
-            settings.SECRET_KEY, 
-            algorithms=[settings.ALGORITHM]
-        )
-        username: str = payload.get("sub")
-        if username is None:
-            raise credentials_exception
-        # We could add more token data validation here if needed
-    except JWTError:
-        raise credentials_exception
-    return username
 def get_current_user(
-    token: str = Depends(oauth2_scheme), 
-    db: Session = Depends(get_db) # Assuming get_db is in schemas for now, adjust if needed
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db),
 ):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -61,19 +39,40 @@ def get_current_user(
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
-        payload = jwt.decode(
-            token, 
-            config.settings.SECRET_KEY, 
-            algorithms=[config.settings.ALGORITHM]
-        )
-        username: str = payload.get("sub")
-        if username is None:
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        username: str | None = payload.get("sub")
+        if not username:
             raise credentials_exception
-        token_data = schemas.TokenData(username=username)
+        _ = schemas.TokenData(username=username)
     except JWTError:
         raise credentials_exception
-    
-    user = crud.get_user_by_username(db, username=token_data.username)
+
+    user = crud.get_user_by_username(db, username=username)
     if user is None:
         raise credentials_exception
     return user
+
+
+def require_role(roles: List[str]):
+    """
+    Usage:
+      user = Depends(require_role(["SBC"]))
+      user = Depends(require_role(["ADMIN", "PD"]))
+    """
+    def _dep(user=Depends(get_current_user)):
+        user_role = getattr(user, "role", None) or getattr(user, "user_role", None)
+        if not user_role:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="User role missing",
+            )
+
+        allowed = [r.upper() for r in roles]
+        if str(user_role).upper() not in allowed:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Forbidden (requires one of: {roles})",
+            )
+        return user
+
+    return _dep

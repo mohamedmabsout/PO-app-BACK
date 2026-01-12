@@ -1,5 +1,5 @@
 from datetime import datetime,date, timedelta
-from fastapi import BackgroundTasks
+from fastapi import BackgroundTasks, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from . import auth
@@ -26,7 +26,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import func
 from .utils.pdf_generator import generate_act_pdf
 logger = logging.getLogger(__name__)
-
+from app import models
 
 UPLOAD_DIR = "uploads/sbc_docs"
 
@@ -2422,7 +2422,8 @@ def create_sbc(db: Session, form_data: dict, contract_file, tax_file, creator_id
         # Financial
         rib=form_data.get('rib'),
         bank_name=form_data.get('bank_name'),
-        
+        ice=form_data.get('ice'),
+        rc=form_data.get('rc'),
         # Contract
         contract_ref=form_data.get('contract_ref'),
         # We store the DATE of upload if file exists
@@ -2574,6 +2575,8 @@ def get_all_bcs(db: Session, current_user: models.User, search: Optional[str] = 
         joinedload(models.BonDeCommande.internal_project),
         joinedload(models.BonDeCommande.creator) 
     )
+    query = query.join(models.InternalProject)
+
     # Apply role-based filtering
     # if current_user.role == models.UserRole.PM: 
     #     query = query.filter(models.BonDeCommande.internal_project.project_manager_id == current_user.id)
@@ -3229,7 +3232,7 @@ def check_system_state_notifications(db: Session, user: models.User):
                 "desc": f"Targets for {datetime.now().strftime('%B')} are missing.",
                 "priority": "Medium",
                 "badgeBg": "warning",
-                "link": "/planning",
+                "link": "/users/targets",
                 "action": "Set Targets"
             })
 
@@ -3275,109 +3278,241 @@ def import_planning_targets(db: Session, df: pd.DataFrame):
     db.commit()
     return count
 
-def validate_bc_item(db: Session, item_id: int, user: models.User, action: str, comment: str = None):
+def notify_user_db_and_sms(
+    db: Session,
+    user: models.User,
+    title: str,
+    message: str,
+    link: str = None,
+    notif_type: models.NotificationType = models.NotificationType.APP,
+    send_sms_flag: bool = False
+):
     """
-    Handles QC or PM approval/rejection.
-    action: "APPROVE" or "REJECT"
+    Sends a notification to a user via database and optionally via SMS.
     """
-    item = db.query(models.BCItem).get(item_id)
-    if not item: raise ValueError("Item not found")
+    # 1. Create database notification
+    notif = models.Notification(
+        recipient_id=user.id,
+        type=notif_type,
+        title=title,
+        message=message,
+        link=link
+    )
+    db.add(notif)
+    db.flush()
+    
+    # 2. Send SMS if requested and phone number exists
+    if send_sms_flag and user.phone_number:
+        try:
+            # TODO: Integrate with your SMS provider (Twilio, etc.)
+            # For now, just log it
+            logger.info(f"SMS to {user.phone_number}: {title} - {message}")
+            # Example Twilio integration:
+            # from twilio.rest import Client
+            # client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+            # client.messages.create(to=user.phone_number, from_=TWILIO_PHONE, body=message)
+        except Exception as e:
+            logger.error(f"Failed to send SMS to {user.phone_number}: {e}")
+    
+    return notif
 
-    # 1. Determine Role
-    is_qc = user.role == UserRole.QUALITY # Adjust to your Enum
+
+def validate_bc_item(
+    db: Session,
+    item_id: int,
+    user: models.User,
+    action: str,
+    comment: str = None
+):
+    """
+    Validation QC/PM/PD avec notifications automatiques
+    """
+    
+    item = db.query(models.BCItem).get(item_id)
+    if not item:
+        raise ValueError("Item not found")
+
+    # Récupérer le BC et les acteurs
+    bc = item.bc if hasattr(item, 'bc') else db.query(models.BonDeCommande).get(item.bc_id)
+    
+    # Récupérer PM et SBC
+    pm_user = None
+    sbc_user = None
+    
+    if bc:
+        # Adapter selon ton modèle
+        if hasattr(bc, 'pm_id') and bc.pm_id:
+            pm_user = db.query(models.User).get(bc.pm_id)
+        
+        if hasattr(bc, 'sbc_id') and bc.sbc_id:
+            sbc_user = db.query(models.User).get(bc.sbc_id)
+
+    # Déterminer le rôle
+    is_qc = user.role == UserRole.QUALITY
     is_pm = user.role == UserRole.PM
     is_pd = user.role in [UserRole.PD, UserRole.ADMIN]
-    print(f"DEBUG: User Role: {user.role}, is_qc: {is_qc}, is_pm: {is_pm}, is_pd: {is_pd}")
-        
+
 
     if not (is_qc or is_pm or is_pd):
-        print(f"user.role:{user.role}")
         raise ValueError("Unauthorized role.")
 
 
+    bc_number = getattr(bc, 'bc_number', 'BC')
+    link = f"/bc/{getattr(bc, 'id', '')}"
 
-    # 2. Apply Decision
+    # ========================================
+    # TRAITEMENT DE L'ACTION
+    # ========================================
+    
     if action == "APPROVE":
-        if is_qc: item.qc_validation_status = models.ValidationState.APPROVED
-        if is_pm: item.pm_validation_status = models.ValidationState.APPROVED
-        if item.global_status == models.ItemGlobalStatus.POSTPONED:
-             # Check if BOTH are now approved (meaning the rejector fixed their status)
-             if item.qc_validation_status == models.ValidationState.APPROVED and \
-                item.pm_validation_status == models.ValidationState.APPROVED:
-                 
-                 item.global_status = models.ItemGlobalStatus.PENDING_PD_APPROVAL
-                 item.postponed_until = None # Clear the timer
+        if is_qc:
+            item.qc_validation_status = models.ValidationState.APPROVED
+            
+            # 📱 Notifier PM : QC a validé
+            if pm_user:
+                notify_user_db_and_sms(
+                    db, pm_user,
+                    title=f"✅ QC Validation - BC {bc_number}",
+                    message=f"Item {item.id} validé par QC ({user.username})",
+                    link=link,
+                    notif_type=models.NotificationType.TODO,
+                    send_sms_flag=True
+                )
         
-        # --- Standard Logic (If currently Pending) ---
-        elif item.global_status == models.ItemGlobalStatus.PENDING:
-             if item.qc_validation_status == models.ValidationState.APPROVED and \
-                item.pm_validation_status == models.ValidationState.APPROVED:
-                 
-                 item.global_status = models.ItemGlobalStatus.PENDING_PD_APPROVAL
+        if is_pm:
+            item.pm_validation_status = models.ValidationState.APPROVED
+            
+            # 📱 Notifier SBC : PM a validé
+            if sbc_user:
+                notify_user_db_and_sms(
+                    db, sbc_user,
+                    title=f"✅ PM Validation - BC {bc_number}",
+                    message=f"Item {item.id} validé par PM ({user.username})",
+                    link=link,
+                    notif_type=models.NotificationType.ALERT,
+                    send_sms_flag=True
+                )
 
-        # --- PD Logic ---
+        # PD approuve => READY_FOR_ACT
         if is_pd:
-            if item.global_status != models.ItemGlobalStatus.PENDING_PD_APPROVAL:
-                 # PD tried to approve, but it wasn't ready. Skip or Log.
-                 print(f"Skipping Item {item.id}: PD tried to approve but status is {item.global_status}")
-            else:
+            if item.global_status == models.ItemGlobalStatus.PENDING_PD_APPROVAL:
                 item.global_status = models.ItemGlobalStatus.READY_FOR_ACT
-
+                
+                # 📱 Notifier PM + SBC : prêt pour ACT
+                recipients = [u for u in [pm_user, sbc_user] if u]
+                for recipient in recipients:
+                    notify_user_db_and_sms(
+                        db, recipient,
+                        title=f"🎉 Ready for ACT - BC {bc_number}",
+                        message=f"Item {item.id} prêt pour génération d'acte",
+                        link=link,
+                        notif_type=models.NotificationType.ALERT,
+                        send_sms_flag=True
+                    )
 
     elif action == "REJECT":
-        if not comment: raise ValueError("Comment is mandatory for rejection.")
-        
-        # Record History
+        if not comment:
+            raise ValueError("Comment is mandatory for rejection.")
+
+        # Historique
         history = models.ItemRejectionHistory(
             bc_item_id=item.id,
             rejected_by_id=user.id,
             comment=comment
         )
         db.add(history)
-        
-        # Update Status
-        if is_qc: item.qc_validation_status = models.ValidationState.REJECTED
-        if is_pm: item.pm_validation_status = models.ValidationState.REJECTED
+
+        if is_qc:
+            item.qc_validation_status = models.ValidationState.REJECTED
+        if is_pm:
+            item.pm_validation_status = models.ValidationState.REJECTED
         if is_pd:
             item.global_status = models.ItemGlobalStatus.POSTPONED
             item.postponed_until = datetime.now() + timedelta(weeks=3)
 
 
-        # Increment Count
+
         item.rejection_count += 1
 
-    # 3. Calculate Global Status (The "Boucle" Logic)
+        # 📱 Notifier PM + SBC : rejet
+        recipients = [u for u in [pm_user, sbc_user] if u]
+        for recipient in recipients:
+            notify_user_db_and_sms(
+                db, recipient,
+                title=f"❌ Item Rejected - BC {bc_number}",
+                message=f"Item {item.id} rejeté par {user.role}. Raison: {comment[:50]}",
+                link=link,
+                notif_type=models.NotificationType.TODO,
+                send_sms_flag=True
+            )
+
+    # ========================================
+    # LOGIQUE GLOBALE
+    # ========================================
     
-    # Case A: Permanent Rejection
+    # Rejet permanent (15 rejets)
     if item.rejection_count >= 15:
         item.global_status = models.ItemGlobalStatus.PERMANENTLY_REJECTED
-        # TODO: Trigger Notification to Admin/All
-    
-    # Case B: Postponement (If EITHER rejected it)
-    # We only trigger postponement if BOTH have voted and at least one is REJECTED.
-    # OR, do you want immediate postponement? 
-    # Let's wait for BOTH to vote so they can both see it as requested.
-    elif item.qc_validation_status != models.ValidationState.PENDING and \
-         item.pm_validation_status != models.ValidationState.PENDING:
-         
-        if item.qc_validation_status == models.ValidationState.REJECTED or \
-           item.pm_validation_status == models.ValidationState.REJECTED:
+        
+        # 📱 Notifier tous les acteurs
+        recipients = [u for u in [pm_user, sbc_user] if u]
+        for recipient in recipients:
+            notify_user_db_and_sms(
+                db, recipient,
+                title=f"🚫 Permanent Rejection - BC {bc_number}",
+                message=f"Item {item.id} définitivement rejeté ({item.rejection_count} rejets)",
+                link=link,
+                notif_type=models.NotificationType.ALERT,
+                send_sms_flag=True
+            )
+
+    # Postponement (report 3 semaines)
+    elif (item.qc_validation_status != models.ValidationState.PENDING and
+          item.pm_validation_status != models.ValidationState.PENDING):
+        
+        if (item.qc_validation_status == models.ValidationState.REJECTED or
+            item.pm_validation_status == models.ValidationState.REJECTED):
             
             item.global_status = models.ItemGlobalStatus.POSTPONED
             item.postponed_until = datetime.now() + timedelta(weeks=3)
             
-            # Reset individual flags for next round? 
-            # Usually we keep them as record until the postponement is over.
-            
-        
+            # 📱 Notifier PM + SBC
+            recipients = [u for u in [pm_user, sbc_user] if u]
+            for recipient in recipients:
+                notify_user_db_and_sms(
+                    db, recipient,
+                    title=f"⏸️ Item Postponed - BC {bc_number}",
+                    message=f"Item {item.id} reporté au {item.postponed_until.strftime('%d/%m/%Y')}",
+                    link=link,
+                    notif_type=models.NotificationType.ALERT,
+                    send_sms_flag=True
+                )
 
-    if item.qc_validation_status == models.ValidationState.APPROVED and \
-       item.pm_validation_status == models.ValidationState.APPROVED and \
-       item.global_status == models.ItemGlobalStatus.PENDING: # Only move if currently pending
+    # QC + PM validés => en attente PD
+    if (item.qc_validation_status == models.ValidationState.APPROVED and
+        item.pm_validation_status == models.ValidationState.APPROVED and
+        item.global_status == models.ItemGlobalStatus.PENDING):
         
         item.global_status = models.ItemGlobalStatus.PENDING_PD_APPROVAL
+        
+        # 📱 Notifier les PD/Admins
+        pds = db.query(models.User).filter(
+            models.User.role.in_([UserRole.PD, UserRole.ADMIN]),
+            models.User.is_active == True
+        ).all()
+        
+        for pd in pds:
+            notify_user_db_and_sms(
+                db, pd,
+                title=f"⚠️ Pending PD Approval - BC {bc_number}",
+                message=f"Item {item.id} validé QC+PM, en attente validation PD",
+                link=link,
+                notif_type=models.NotificationType.TODO,
+                send_sms_flag=True
+            )
 
     db.commit()
+    db.refresh(item)
     return item
 
 def generate_act_record(db: Session, bc_id: int, creator_id: int, item_ids: List[int]):
@@ -3554,3 +3689,96 @@ def check_rejections_and_notify(db: Session):
                 # Send Email Here via FastMail if desired
     
     db.commit()
+
+SBC_DOCS_DIR = os.path.join("static", "sbc_docs")
+
+
+def _ensure_dir(path: str) -> None:
+    os.makedirs(path, exist_ok=True)
+
+
+def _parse_date(value: Optional[str]) -> Optional[date]:
+    """
+    Accepte 'YYYY-MM-DD' (ou vide).
+    """
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value).date()
+    except Exception:
+        # si ton front envoie autre format, adapte ici
+        raise HTTPException(status_code=422, detail=f"Invalid date format: {value}")
+
+
+def _save_upload(file: UploadFile, filename: str) -> str:
+    _ensure_dir(SBC_DOCS_DIR)
+    path = os.path.join(SBC_DOCS_DIR, filename)
+
+    with open(path, "wb") as f:
+        f.write(file.file.read())
+
+    return filename
+
+def update_sbc(
+    db: Session,
+    sbc_id: int,
+    data: dict[str, any],
+    contract_file: Optional[UploadFile],
+    tax_file: Optional[UploadFile],
+    user_id: int,
+):
+    sbc = db.query(models.SBC).filter(models.SBC.id == sbc_id).first()
+    if not sbc:
+        raise HTTPException(status_code=404, detail="SBC not found")
+
+    # 1) Update champs simples (Form)
+    allowed_fields = {
+        "short_name",
+        "name",
+        "ceo_name",
+        "email",
+        "rib",
+        "bank_name",
+        "tax_reg_end_date",
+        "ice",  
+        "rc",   
+    }
+
+    for k, v in (data or {}).items():
+        if k not in allowed_fields:
+            continue
+        if v is None:
+            continue
+
+        if k == "tax_reg_end_date":
+            setattr(sbc, k, _parse_date(v))
+        else:
+            setattr(sbc, k, v)
+
+    # 2) Fichiers (UploadFile)
+    # Exemple de naming: {sbc_code}_Contract.pdf et {sbc_code}_TaxReg.pdf
+    sbc_code = getattr(sbc, "sbc_code", None) or str(sbc.id)
+
+    if contract_file is not None:
+        filename = f"{sbc_code}_Contract.pdf"
+        saved = _save_upload(contract_file, filename)
+        sbc.has_contract_attachment = True
+        sbc.contract_filename = saved
+        sbc.contract_upload_date = datetime.utcnow()
+
+    if tax_file is not None:
+        filename = f"{sbc_code}_TaxReg.pdf"
+        saved = _save_upload(tax_file, filename)
+        sbc.has_tax_regularization = True
+        sbc.tax_reg_filename = saved
+        sbc.tax_reg_upload_date = datetime.utcnow()
+
+    # 3) Audit
+    # (optionnel) si tu veux garder trace de qui a modifié/approuvé
+    if hasattr(sbc, "approver_id"):
+        sbc.approver_id = user_id
+
+    db.add(sbc)
+    db.commit()
+    db.refresh(sbc)
+    return sbc
