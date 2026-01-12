@@ -83,9 +83,14 @@ def read_sbc_acceptances(
 ):
     items = crud.get_sbc_acceptances(db, current_user)
     
-    # Transform to a clean list for the frontend
     result = []
     for item in items:
+        # Calculate Tax
+        ht_amount = item.line_amount_sbc or 0.0
+        tax_rate = item.applied_tax_rate or 0.0
+        tax_amount = ht_amount * tax_rate
+        ttc_amount = ht_amount + tax_amount
+
         result.append({
             "id": item.id,
             "bc_number": item.bc.bc_number,
@@ -93,8 +98,15 @@ def read_sbc_acceptances(
             "site_code": item.merged_po.site_code,
             "description": item.merged_po.item_description,
             "quantity": item.quantity_sbc,
-            "unit_price": item.unit_price_sbc, # SBC Price
-            "total_price": item.line_amount_sbc, # SBC Total (100%)
+            "unit_price": item.unit_price_sbc,
+            
+            # --- NEW TAX FIELDS ---
+            "total_ht": ht_amount,
+            "tax_rate": tax_rate, # e.g. 0.20
+            "tax_amount": tax_amount,
+            "total_ttc": ttc_amount,
+            # ----------------------
+
             "status": item.global_status,
             "act_number": item.act.act_number if item.act else "Pending Generation"
         })
