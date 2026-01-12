@@ -3,7 +3,7 @@ from datetime import date, datetime
 from pydantic import ConfigDict, Field
 
 from .custom_types import FormattedDate
-
+from .models import BCItem
 from .enum import ProjectType, UserRole, ItemGlobalStatus, ValidationState
 from pydantic import BaseModel, EmailStr
 # --- 1. UserBase: Defines all the fields a user CAN have. ---
@@ -602,53 +602,80 @@ class SBCKpiSummary(BaseModel):
     pending_payment: float
     active_bc_count: int
 
-class SBCAcceptance(BaseModel):
-    po_id: str
-    item_description: str
-    accepted_ac_amount: Optional[float] = None
-    date_ac_ok: Optional[date] = None
-    accepted_pac_amount: Optional[float] = None
-    date_pac_ok: Optional[date] = None
+class SbcAcceptanceItem(BaseModel):
+    id: int
     
+    # Details from the Parent BC/PO
+    bc_number: str
+    po_no: str
+    site_code: str | None = None
+    item_description: str | None = None
+    
+    # Financials (SBC Specific)
+    quantity: float
+    unit_price: float
+    total_amount: float
+    
+    # Status
+    status: str # READY_FOR_ACT or ACCEPTED
+    act_number: Optional[str] = None # If ACT exists
+    
+    # Helper to flatten the data from the ORM object
+    @classmethod
+    def from_orm_custom(cls, item: BCItem):
+        return cls(
+            id=item.id,
+            bc_number=item.bc.bc_number,
+            po_no=item.merged_po.po_no,
+            site_code=item.merged_po.site_code,
+            item_description=item.merged_po.item_description,
+            
+            quantity=item.quantity_sbc,
+            unit_price=item.unit_price_sbc, # The SBC's price
+            total_amount=item.line_amount_sbc, # The SBC's total
+            
+            status=item.global_status,
+            act_number=item.act.act_number if item.act else None
+        )
+
+class FundRequestItemReview(BaseModel):
+    item_id: int
+    amount_to_pay: float # Use this name!
+    admin_note: Optional[str] = None # <-- ADD THIS
+
+class FundRequestReview(BaseModel):
+    action: str # "APPROVE" or "REJECT"
+    items: List[FundRequestItemReview]
+class FundRequestItemDetail(BaseModel):
+    id: int
+    target_pm_id: int
+    target_pm_name: str
+    requested_amount: float
+    approved_amount: Optional[float] = 0.0
+    remarque: Optional[str] = None # Include remark in response
+    admin_note: Optional[str] = None # <-- ADD THIS
+
     model_config = ConfigDict(from_attributes=True)
 
 
-
-class UserMini(BaseModel):
+# Schema for the Request Details Response
+class FundRequestDetail(BaseModel):
     id: int
-    first_name: Optional[str] = None
-    last_name: Optional[str] = None
-
-    class Config:
-        from_attributes = True
-
-
-class BCResponse(BaseModel):
-    id: int
-    bc_number: str
+    request_number: str
     status: str
-
-    approved_l1_by: Optional[UserMini] = None
-    approved_l1_at: Optional[datetime] = None
-
-    approved_l2_by: Optional[UserMini] = None
-    approved_l2_at: Optional[datetime] = None
-
-    class Config:
-        from_attributes = True
-
-
-class SendOtpIn(BaseModel):
-    phone: str = Field(..., example="+212651012998")
-
-class SendOtpOut(BaseModel):
-    success: bool
-    ttl_seconds: int
-
-class VerifyOtpIn(BaseModel):
-    phone: str
-    code: str
-
-class VerifyOtpOut(BaseModel):
-    verified: bool
+    requester_id: int
+    requester_name: str
+    approver_id: Optional[int] = None
+    approver_name: Optional[str] = None
     
+    created_at: datetime
+    approved_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    
+    total_amount: float # Calculated field
+    paid_amount: float # New field: How much has been paid so far
+    admin_comment: Optional[str] = None # New field: Admin's note
+    
+    items: List[FundRequestItemDetail]
+
+    model_config = ConfigDict(from_attributes=True)

@@ -3626,7 +3626,7 @@ def check_and_unlock_postponed_items(db: Session, bc_id: int):
         db.commit()
 
 
-def check_rejections_and_notify(db: Session):
+def check_rejections_and_notify(db: Session, background_tasks: BackgroundTasks = None):
     """
     1. Finds items permanently rejected (count >= 5) -> Notifies Admin
     2. Finds items postponed > 3 weeks -> Notifies Rejector
@@ -3680,105 +3680,86 @@ def check_rejections_and_notify(db: Session):
         if last_rejection:
             rejector = db.query(models.User).get(last_rejection.rejected_by_id)
             if rejector:
-                 create_notification(
+                create_notification(
                     db, recipient_id=rejector.id, type=models.NotificationType.TODO,
                     title="Rejection Period Ended",
                     message=f"Item {item.id} is ready for re-inspection (3 weeks passed).",
                     link=f"/acceptance/workflow/{item.bc_id}"
                 )
-                # Send Email Here via FastMail if desired
-    
+                
+                # 2. Email Notification
+                if background_tasks and rejector.email:
+                    html_body = f"""
+                    <h3>Action Required: Re-Inspection</h3>
+                    <p>Hello {rejector.first_name},</p>
+                    <p>The 3-week postponement period for the following item has ended:</p>
+                    <ul>
+                        <li><strong>BC:</strong> {item.bc.bc_number if item.bc else 'N/A'}</li>
+                        <li><strong>Item:</strong> {item.merged_po.item_description if item.merged_po else 'N/A'}</li>
+                        <li><strong>Previous Rejection:</strong> {last_rejection.comment}</li>
+                    </ul>
+                    <p>Please log in to the portal to re-validate this item.</p>
+                    """
+                    
+                    message = MessageSchema(
+                        subject="SIB Portal - Item Unlocked",
+                        recipients=[rejector.email],
+                        body=html_body,
+                        subtype=MessageType.html
+                    )
+                    fm = FastMail(conf)
+                    background_tasks.add_task(fm.send_message, message)
+
     db.commit()
+def get_sbc_kpis(db: Session, user: models.User):
+    if user.role != "SBC" or not user.sbc_id:
+        # Return empty stats if not an SBC user
+        return {"total_bc_value": 0, "total_paid_amount": 0, "pending_payment": 0, "active_bc_count": 0}
 
-SBC_DOCS_DIR = os.path.join("static", "sbc_docs")
+    # 1. Total Value of Approved BCs
+    total_bc_value = db.query(func.sum(models.BonDeCommande.total_amount_ht)).filter(
+        models.BonDeCommande.sbc_id == user.sbc_id,
+        models.BonDeCommande.status == models.BCStatus.APPROVED
+    ).scalar() or 0.0
 
+    # 2. Count of Active BCs
+    active_bc_count = db.query(models.BonDeCommande).filter(
+        models.BonDeCommande.sbc_id == user.sbc_id,
+        models.BonDeCommande.status.in_([
+            models.BCStatus.SUBMITTED, models.BCStatus.PENDING_L2, models.BCStatus.APPROVED
+        ])
+    ).count()
+    
+    # 3. Total Amount Paid (from MergedPO)
+    # This requires finding all POs associated with this SBC's BCs
+    bc_item_pos = db.query(models.BCItem.merged_po_id).join(models.BonDeCommande).filter(
+        models.BonDeCommande.sbc_id == user.sbc_id
+    ).distinct()
 
-def _ensure_dir(path: str) -> None:
-    os.makedirs(path, exist_ok=True)
+    total_paid_query = db.query(
+        func.sum(coalesce(models.MergedPO.accepted_ac_amount, 0) + coalesce(models.MergedPO.accepted_pac_amount, 0))
+    ).filter(models.MergedPO.id.in_(bc_item_pos))
+    
+    total_paid_amount = total_paid_query.scalar() or 0.0
 
-
-def _parse_date(value: Optional[str]) -> Optional[date]:
-    """
-    Accepte 'YYYY-MM-DD' (ou vide).
-    """
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(value).date()
-    except Exception:
-        # si ton front envoie autre format, adapte ici
-        raise HTTPException(status_code=422, detail=f"Invalid date format: {value}")
-
-
-def _save_upload(file: UploadFile, filename: str) -> str:
-    _ensure_dir(SBC_DOCS_DIR)
-    path = os.path.join(SBC_DOCS_DIR, filename)
-
-    with open(path, "wb") as f:
-        f.write(file.file.read())
-
-    return filename
-
-def update_sbc(
-    db: Session,
-    sbc_id: int,
-    data: dict[str, any],
-    contract_file: Optional[UploadFile],
-    tax_file: Optional[UploadFile],
-    user_id: int,
-):
-    sbc = db.query(models.SBC).filter(models.SBC.id == sbc_id).first()
-    if not sbc:
-        raise HTTPException(status_code=404, detail="SBC not found")
-
-    # 1) Update champs simples (Form)
-    allowed_fields = {
-        "short_name",
-        "name",
-        "ceo_name",
-        "email",
-        "rib",
-        "bank_name",
-        "tax_reg_end_date",
-        "ice",  
-        "rc",   
+    return {
+        "total_bc_value": total_bc_value,
+        "total_paid_amount": total_paid_amount,
+        "pending_payment": total_bc_value - total_paid_amount,
+        "active_bc_count": active_bc_count
     }
 
-    for k, v in (data or {}).items():
-        if k not in allowed_fields:
-            continue
-        if v is None:
-            continue
+def get_sbc_acceptances(db: Session, user: models.User):
+    if user.role != "SBC" or not user.sbc_id:
+        return []
 
-        if k == "tax_reg_end_date":
-            setattr(sbc, k, _parse_date(v))
-        else:
-            setattr(sbc, k, v)
+    # Find all POs associated with this SBC's BCs
+    bc_item_pos = db.query(models.BCItem.merged_po_id).join(models.BonDeCommande).filter(
+        models.BonDeCommande.sbc_id == user.sbc_id
+    ).distinct()
 
-    # 2) Fichiers (UploadFile)
-    # Exemple de naming: {sbc_code}_Contract.pdf et {sbc_code}_TaxReg.pdf
-    sbc_code = getattr(sbc, "sbc_code", None) or str(sbc.id)
-
-    if contract_file is not None:
-        filename = f"{sbc_code}_Contract.pdf"
-        saved = _save_upload(contract_file, filename)
-        sbc.has_contract_attachment = True
-        sbc.contract_filename = saved
-        sbc.contract_upload_date = datetime.utcnow()
-
-    if tax_file is not None:
-        filename = f"{sbc_code}_TaxReg.pdf"
-        saved = _save_upload(tax_file, filename)
-        sbc.has_tax_regularization = True
-        sbc.tax_reg_filename = saved
-        sbc.tax_reg_upload_date = datetime.utcnow()
-
-    # 3) Audit
-    # (optionnel) si tu veux garder trace de qui a modifié/approuvé
-    if hasattr(sbc, "approver_id"):
-        sbc.approver_id = user_id
-
-    db.add(sbc)
-    db.commit()
-    db.refresh(sbc)
-    return sbc
+    # Get MergedPO records for those POs that have been at least partially paid
+    return db.query(models.MergedPO).filter(
+        models.MergedPO.id.in_(bc_item_pos),
+        (models.MergedPO.accepted_ac_amount > 0) | (models.MergedPO.accepted_pac_amount > 0)
+    ).order_by(models.MergedPO.date_ac_ok.desc(), models.MergedPO.date_pac_ok.desc()).all()

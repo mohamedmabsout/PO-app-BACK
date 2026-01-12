@@ -78,12 +78,41 @@ def get_my_sbc_kpis(
 ):
     return crud.get_sbc_kpis(db, user=current_user)
 
-@router.get("/my-acceptances", response_model=List[schemas.SBCAcceptance])
-def get_my_sbc_acceptances(
+@router.get("/my-acceptances")
+def read_sbc_acceptances(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
-    return crud.get_sbc_acceptances(db, user=current_user)
+    items = crud.get_sbc_acceptances(db, current_user)
+    
+    result = []
+    for item in items:
+        # Calculate Tax
+        ht_amount = item.line_amount_sbc or 0.0
+        tax_rate = item.applied_tax_rate or 0.0
+        tax_amount = ht_amount * tax_rate
+        ttc_amount = ht_amount + tax_amount
+
+        result.append({
+            "id": item.id,
+            "bc_number": item.bc.bc_number,
+            "po_no": item.merged_po.po_no,
+            "site_code": item.merged_po.site_code,
+            "description": item.merged_po.item_description,
+            "quantity": item.quantity_sbc,
+            "unit_price": item.unit_price_sbc,
+            
+            # --- NEW TAX FIELDS ---
+            "total_ht": ht_amount,
+            "tax_rate": tax_rate, # e.g. 0.20
+            "tax_amount": tax_amount,
+            "total_ttc": ttc_amount,
+            # ----------------------
+
+            "status": item.global_status,
+            "act_number": item.act.act_number if item.act else "Pending Generation"
+        })
+    return result
 
 @router.post("/{sbc_id}/approve")
 async def approve_sbc_endpoint(
