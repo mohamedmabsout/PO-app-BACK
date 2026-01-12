@@ -551,3 +551,30 @@ class Transaction(Base):
     # Relationships
     caisse = relationship("Caisse", back_populates="transactions")
     created_by = relationship("User", foreign_keys=[created_by_id])
+    
+class UserPerformanceTarget(Base):
+    __tablename__ = "user_performance_targets"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    year = Column(Integer, nullable=False)
+    month = Column(Integer, nullable=False)
+
+    # --- PO RECEIVE ---
+    # The target set at the start of the year
+    po_master_plan = Column(Float, default=0.0) 
+    # The adjusted target set at the start of the month
+    po_monthly_update = Column(Float, default=0.0) 
+    
+    # --- ACCEPTANCE ---
+    # The target set at the start of the year
+    acceptance_master_plan = Column(Float, default=0.0) 
+    # The adjusted target set at the start of the month
+    acceptance_monthly_update = Column(Float, default=0.0)
+
+    user = relationship("User")
+
+    # Add a unique constraint to prevent duplicate rows for same user/year/month
+    __table_args__ = (
+        sa.UniqueConstraint('user_id', 'year', 'month', name='uix_user_year_month'),
+    )

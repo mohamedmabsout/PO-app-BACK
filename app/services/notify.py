@@ -2,7 +2,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from app import models
-from app.services.infobip_sms import send_sms
+
 
 def _normalize_phone_ma(phone: str) -> str:
     p = (phone or "").strip().replace(" ", "").replace("-", "")
@@ -40,6 +40,6 @@ def notify_user(
     if send_sms_flag and getattr(recipient, "phone", None):
         phone = _normalize_phone_ma(recipient.phone)
         sms_text = f"{title}\n{message}"
-        send_sms(phone, sms_text)
+       
 
     return n

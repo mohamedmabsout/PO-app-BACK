@@ -3,7 +3,7 @@ import time, random, datetime
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from app.config import settings
-from app.services.infobip_sms import send_sms
+# from app.services.infobip_sms import send_sms
 from app.auth import create_access_token
 import app.config as cfg
 
@@ -43,7 +43,7 @@ def send_otp(payload: SendOtpIn):
 
     OTP_STORE[phone] = {"code": code, "expires_at": expires_at}
 
-    send_sms(phone, f"Your OTP is {code}")
+  
     return {"success": True, "ttl_seconds": settings.OTP_TTL_SECONDS}
 
 @router.post("/verify-otp")
