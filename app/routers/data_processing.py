@@ -696,17 +696,6 @@ def confirm_fund_reception_endpoint(
     except ValueError as e:
         raise HTTPException(400, detail=str(e))
 
-@router.post("/expense")
-def declare_expense(
-    payload: schemas.ExpenseCreate,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user)
-):
-    try:
-        crud.create_expense(db, current_user, payload.amount, payload.description)
-        return {"message": "Expense declared successfully."}
-    except ValueError as e:
-        raise HTTPException(400, detail=str(e))
 @router.get("/wallets-summary")
 def get_wallets_summary(
     db: Session = Depends(get_db),
@@ -730,3 +719,14 @@ def process_request_endpoint(
         return {"message": "Request processed"}
     except ValueError as e:
         raise HTTPException(400, str(e))
+@router.post("/expense")
+def declare_expense(
+    payload: schemas.ExpenseCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    try:
+        crud.create_expense(db, current_user, payload.amount, payload.description)
+        return {"message": "Expense declared successfully."}
+    except ValueError as e:
+        raise HTTPException(400, detail=str(e))
