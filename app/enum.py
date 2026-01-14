@@ -5,10 +5,11 @@ class UserRole(str, enum.Enum):
     SBC = "SBC"
     QUALITY = "Quality"
     RAF = "RAF"
-    PM = "Project Manager"
-    PD = "Project Director"
-    ADMIN = "Admin"
-
+    PM = "PM"  # Changez de "Project Manager" à "PM"
+    PD = "PD"  # Changez de "Project Director" à "PD"
+    ADMIN = "ADMIN"  # Changez de "Admin" à "ADMIN"
+    COORDINATEUR = "coordinateur"
+    CEO = "ceo"
 class ProjectType(str, enum.Enum):
     FIXED_PRICE = "Fixed Price"
     TIME_MATERIAL = "Time & Material"
@@ -80,3 +81,13 @@ class RefillRequestStatus(str, enum.Enum):
     PARTIALLY_PAID = "PARTIALLY_PAID" # New: Still open, but some money given
     CLOSED_PARTIAL = "CLOSED_PARTIAL" # New: Closed, but not fully paid (e.g. 500/1000 given and closed)
 
+class ExpenseStatus(str, enum.Enum):
+    DRAFT = "DRAFT"
+    SUBMITTED = "SUBMITTED" # Après check balance OK
+    PENDING_L1 = "PENDING_L1"
+    APPROVED_L1 = "APPROVED_L1"
+    PENDING_L2 = "PENDING_L2"
+    APPROVED_L2 = "APPROVED_L2"
+    PAID = "PAID"           # Confirm Payment OK (Attachment Mandatory)
+    RECEIVED = "RECEIVED"   # Confirm Reception (Final)
+    REJECTED = "REJECTED"

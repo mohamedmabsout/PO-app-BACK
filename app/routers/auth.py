@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from ..config import conf
 
 from .. import crud, auth, schemas, config, models
-from ..dependencies import get_db,require_admin
+from ..dependencies import get_current_user, get_db,require_admin
 
 router = APIRouter(
     prefix="/api/auth",  # Let's prefix all auth routes with /api/auth
@@ -151,3 +151,20 @@ def change_password(
     db.commit()
     
     return {"message": "Password changed successfully"}
+
+def require_roles(*roles: str):
+    def _dep(current_user: models.User = Depends(get_current_user)):
+        user_role = getattr(current_user, "role", None)
+        if user_role not in roles:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not enough permissions",
+            )
+        return current_user
+    return _dep
+
+# helpers prêts à utiliser
+is_pm = require_roles("Project Manager", "PM")
+is_pd = require_roles("Project Director", "PD")
+is_admin = require_roles("Admin", "ADMIN")
+is_pd_or_admin = require_roles("Project Director", "PD", "Admin", "ADMIN")

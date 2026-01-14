@@ -1,5 +1,8 @@
-from datetime import datetime,date, timedelta
+from datetime import datetime, date, timedelta, timezone as dt_timezone # Renommé pour éviter le conflit
+
+from select import select
 from fastapi import BackgroundTasks
+from pytz import timezone
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from . import auth
@@ -3757,82 +3760,54 @@ def confirm_fund_reception(db: Session, req_id: int, pd_user: int):
     return req
 
 def get_caisse_stats(db: Session, user: models.User):
-    """
-    Calculates the 3 key metrics for the Dashboard cards.
-    """
-    if user.role in [UserRole.PD, UserRole.ADMIN]:
-        # 1. Total Balance (Sum of all wallets)
-        total_balance = db.query(func.sum(models.Caisse.balance)).scalar() or 0.0
-
-        # 2. Total Pending Incoming (Global)
-        pending_reqs = db.query(func.sum(models.FundRequestItem.requested_amount)).join(models.FundRequest).filter(
-            models.FundRequest.status == models.FundRequestStatus.PENDING_APPROVAL
-        ).scalar() or 0.0
-        
-        waiting_funds = db.query(func.sum(models.FundRequestItem.approved_amount)).join(models.FundRequest).filter(
-            models.FundRequest.status == models.FundRequestStatus.APPROVED_WAITING_FUNDS
-        ).scalar() or 0.0
-        
-        # 3. Total Spent This Month (Global)
-        today = datetime.now()
-        month_start = today.replace(day=1, hour=0, minute=0, second=0)
-        spent_month = db.query(func.sum(models.Transaction.amount)).filter(
-            models.Transaction.type == models.TransactionType.DEBIT,
-            models.Transaction.created_at >= month_start
-        ).scalar() or 0.0
-
-        return {
-            "balance": total_balance,
-            "pending_in": pending_reqs + waiting_funds,
-            "spent_month": spent_month
-        }
-
-
-    # 1. Get Wallet
+   
+    
+    # 1. Récupérer ou Créer la caisse (Lazy Init)
     wallet = db.query(models.Caisse).filter(models.Caisse.user_id == user.id).first()
     
-    # Lazy Init: If user has no wallet, create it now with 0 balance
     if not wallet:
         wallet = models.Caisse(user_id=user.id, balance=0.0)
         db.add(wallet)
         db.commit()
         db.refresh(wallet)
-    
-    # 2. Calculate Pending Incoming Funds
-    # Logic: Sum of (requested_amount) where status is PENDING
-    #    OR  Sum of (approved_amount) where status is APPROVED_WAITING
-    # This gives the user visibility on money that is "in the pipe".
-    
-    pending_total = 0.0
-    
-    # A. Pending Approval (Use requested_amount)
-    pending_reqs = db.query(func.sum(models.FundRequestItem.requested_amount)).join(models.FundRequest).filter(
-        models.FundRequestItem.target_pm_id == user.id,
-        models.FundRequest.status == models.FundRequestStatus.PENDING_APPROVAL
-    ).scalar() or 0.0
-    
-    # B. Approved but not yet Confirmed (Use approved_amount)
-    waiting_funds = db.query(func.sum(models.FundRequestItem.approved_amount)).join(models.FundRequest).filter(
-        models.FundRequestItem.target_pm_id == user.id,
-        models.FundRequest.status == models.FundRequestStatus.APPROVED_WAITING_FUNDS
-    ).scalar() or 0.0
-    
-    pending_total = pending_reqs + waiting_funds
 
-    # 3. Calculate Total Spent (This Month)
+    # 2. Calculer les fonds entrants en attente (Pending Incoming Funds)
+    # Somme des montants demandés (PENDING) + approuvés mais non reçus (WAITING_FUNDS)
+    
+    # A. Demandes en attente d'approbation (on prend le montant demandé)
+    pending_reqs = db.query(func.sum(models.FundRequestItem.requested_amount))\
+        .join(models.FundRequest)\
+        .filter(
+            models.FundRequestItem.target_pm_id == user.id,
+            models.FundRequest.status == models.FundRequestStatus.PENDING_APPROVAL
+        ).scalar() or 0.0
+    
+    # B. Demandes approuvées en attente de cash (on prend le montant approuvé)
+    waiting_funds = db.query(func.sum(models.FundRequestItem.approved_amount))\
+        .join(models.FundRequest)\
+        .filter(
+            models.FundRequestItem.target_pm_id == user.id,
+            models.FundRequest.status == models.FundRequestStatus.APPROVED_WAITING_FUNDS
+        ).scalar() or 0.0
+    
+    pending_total = float(pending_reqs) + float(waiting_funds)
+
+    # 3. Calculer le total dépensé ce mois-ci
     today = datetime.now()
-    month_start = today.replace(day=1, hour=0, minute=0, second=0)
+    month_start = today.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     
-    spent_month = db.query(func.sum(models.Transaction.amount)).filter(
-        models.Transaction.caisse_id == wallet.id,
-        models.Transaction.type == models.TransactionType.DEBIT,
-        models.Transaction.created_at >= month_start
-    ).scalar() or 0.0
+    spent_month = db.query(func.sum(models.Transaction.amount))\
+        .filter(
+            models.Transaction.caisse_id == wallet.id,
+            models.Transaction.type == models.TransactionType.DEBIT,
+            models.Transaction.created_at >= month_start
+        ).scalar() or 0.0
 
+    # 4. Retourner le dictionnaire final
     return {
-        "balance": wallet.balance,
-        "pending_in": pending_total,
-        "spent_month": spent_month
+        "balance": float(wallet.balance),
+        "pending_in": float(pending_total),
+        "spent_month": float(spent_month)
     }
 
 def get_transactions(
@@ -3984,152 +3959,238 @@ def get_request_by_id(db: Session, req_id: int):
         "items": items
     }
 
-def create_expense(db: Session, user: models.User, amount: float, description: str):
-    # 1. Get Wallet
-    wallet = db.query(models.Caisse).filter(models.Caisse.user_id == user.id).first()
-    if not wallet:
-        raise ValueError("You do not have a Caisse wallet yet.")
-        
-    if amount <= 0:
-        raise ValueError("Amount must be positive.")
-        
-    # Optional: Check for sufficient funds? 
-    # For now, let's allow negative balance (petty cash debt), or uncomment below to block it.
-    if wallet.balance < amount:
-       raise ValueError("Insufficient funds.")
+# ==================== EXPENSES CRUD ====================
 
-    # 2. Deduct Balance
-    wallet.balance -= amount
+def create_expense(db: Session, current_user: models.User, payload: schemas.ExpenseCreate):
+    """Crée une nouvelle dépense en statut DRAFT"""
+    expense = models.Expense(
+        project_id=payload.project_id,
+        creator_id=current_user.id,
+        exp_type=payload.exp_type,
+        beneficiary=payload.beneficiary,
+        remark=payload.remark,
+        amount=payload.amount,
+        attachment=payload.attachment,
+        status="DRAFT"
+    )
+    db.add(expense)
+    db.commit()
+    db.refresh(expense)
+    return expense
+
+
+def list_my_requests(db: Session, current_user: models.User):
+    query = db.query(models.Expense).options(
+        joinedload(models.Expense.project),
+        joinedload(models.Expense.requester)
+    )
     
-    # 3. Create DEBIT Transaction
-    trx = models.Transaction(
-        caisse_id=wallet.id,
+    role_str = str(current_user.role).upper()
+    if "ADMIN" not in role_str and "PD" not in role_str and "CEO" not in role_str:
+        # Correction ici : requester_id au lieu de creator_id
+        query = query.filter(models.Expense.requester_id == current_user.id)
+    
+    return query.order_by(models.Expense.created_at.desc()).all()
+
+
+def list_pending_l1(db: Session):
+    """Liste toutes les dépenses en attente de validation L1 (PD)"""
+    return db.query(models.Expense).filter(
+        models.Expense.status == "PENDING_L1"
+    ).order_by(models.Expense.created_at.desc()).all()
+
+
+def list_pending_l2(db: Session):
+    """Liste toutes les dépenses en attente de paiement L2 (Admin/CEO)"""
+    return db.query(models.Expense).filter(
+        models.Expense.status == "PENDING_L2"
+    ).order_by(models.Expense.created_at.desc()).all()
+
+
+def submit_expense(db: Session, expense_id: int):
+    """Soumet une dépense pour validation L1"""
+    expense = db.query(models.Expense).filter(models.Expense.id == expense_id).first()
+    if not expense:
+        raise ValueError("Dépense introuvable")
+    
+    if expense.status != "DRAFT":
+        raise ValueError("Seules les dépenses en brouillon peuvent être soumises")
+    
+    # Vérifier le solde de la caisse
+    caisse = db.query(models.Caisse).filter(
+        models.Caisse.user_id == expense.creator_id
+    ).first()
+    
+    if not caisse or caisse.balance < expense.amount:
+        raise ValueError("Solde caisse insuffisant")
+    
+    expense.status = "PENDING_L1"
+    db.commit()
+    db.refresh(expense)
+    return expense
+
+
+def approve_expense_l1(db: Session, expense_id: int, approver_id: int):
+    expense = db.query(models.Expense).get(expense_id)
+    if not expense:
+        return None
+    
+    expense.status = "PENDING_L2"
+    # Utilisation correcte avec l'import de datetime
+    expense.approved_l1_at = datetime.now(dt_timezone.utc)
+    expense.approved_l1_by = approver_id
+    
+    db.commit()
+    db.refresh(expense)
+    return expense
+
+
+def approve_l2(db: Session, expense_id: int, current_user: models.User):
+    """Validation L2 et paiement par Admin/CEO"""
+    expense = db.query(models.Expense).filter(models.Expense.id == expense_id).first()
+    if not expense:
+        return None
+    
+    if expense.status != "PENDING_L2":
+        raise ValueError("Cette dépense n'est pas en attente de paiement")
+    
+    # Vérifier et débiter la caisse
+    caisse = db.query(models.Caisse).filter(
+        models.Caisse.user_id == expense.creator_id
+    ).first()
+    
+    if not caisse or caisse.balance < expense.amount:
+        raise ValueError("Insufficient balance in caisse")
+    
+    # Débiter
+    caisse.balance -= expense.amount
+    
+    # Créer une transaction
+    transaction = models.Transaction(
+        caisse_id=caisse.id,
+        type=models.TransactionType.DEBIT,
+        amount=expense.amount,
+        description=f"Expense payment: {expense.exp_type}",
+        created_by_id=current_user.id
+    )
+    db.add(transaction)
+    
+    # Marquer comme payé
+    expense.status = "PAID"
+    expense.approved_l2_by = current_user.id
+    expense.approved_l2_at = datetime.now(timezone.utc)
+    
+    db.commit()
+    db.refresh(expense)
+    return expense
+
+
+def reject_expense(db: Session, expense_id: int, current_user: models.User, reason: str):
+    """Rejette une dépense"""
+    expense = db.query(models.Expense).filter(models.Expense.id == expense_id).first()
+    if not expense:
+        return None
+    
+    expense.status = "REJECTED"
+    expense.rejected_by = current_user.id
+    expense.approved_l1_at = datetime.now
+    expense.rejection_reason = reason
+    
+    db.commit()
+    db.refresh(expense)
+    return expense
+
+
+def get_caisse_stats(db: Session, current_user: models.User):
+    """Retourne les stats de la caisse de l'utilisateur"""
+    caisse = db.query(models.Caisse).filter(
+        models.Caisse.user_id == current_user.id
+    ).first()
+    
+    if not caisse:
+        # Créer une caisse si elle n'existe pas
+        caisse = models.Caisse(user_id=current_user.id, balance=0.0)
+        db.add(caisse)
+        db.commit()
+        db.refresh(caisse)
+    
+    return {
+        "balance": caisse.balance,
+        "user_id": current_user.id
+    }
+
+
+def get_payable_acts(db: Session, project_id: int):
+    """Retourne les ACT validés mais non payés pour un projet"""
+    # Récupère tous les ACT du projet qui sont APPROVED_L2
+    acts = db.query(models.ServiceAcceptance).join(
+        models.BonDeCommande
+    ).filter(
+        models.BonDeCommande.project_id == project_id,
+        models.BonDeCommande.status == models.BCStatus.APPROVED_L2
+    ).all()
+    
+    result = []
+    for act in acts:
+        # Vérifier si une expense existe déjà pour cet ACT
+        existing = db.query(models.Expense).filter(
+            models.Expense.act_id == act.id,
+            models.Expense.status.in_(["PENDING_L1", "PENDING_L2", "PAID"])
+        ).first()
+        
+        if not existing:
+            result.append({
+                "id": act.id,
+                "act_number": act.act_number,
+                "total_amount_ht": act.total_amount_ht
+            })
+    
+    return result
+
+
+def deduct_from_caisse(db: Session, user_id: int, amount: float, description: str):
+    """Débite la caisse d'un utilisateur"""
+    caisse = db.query(models.Caisse).filter(models.Caisse.user_id == user_id).first()
+    
+    if not caisse:
+        raise ValueError("Caisse introuvable pour cet utilisateur")
+    
+    if caisse.balance < amount:
+        raise ValueError("Solde insuffisant")
+    
+    caisse.balance -= amount
+    
+    # Créer une transaction
+    transaction = models.Transaction(
+        caisse_id=caisse.id,
         type=models.TransactionType.DEBIT,
         amount=amount,
-        description=description,
-        created_by_id=user.id
+        description=description
     )
-    db.add(trx)
+    db.add(transaction)
     db.commit()
-    return trx
-def get_all_wallets_summary(db: Session):
-    """
-    Returns a list of all PM wallets with their balance and pending incoming amount.
-    Used for Admin/PD detailed view.
-    """
-    # 1. Get all PMs
-    pms = db.query(models.User).filter(models.User.role.in_([models.UserRole.PM, models.UserRole.PD, models.UserRole.ADMIN])).all()
-    
-    results = []
-    for pm in pms:
-        # A. Get Wallet Balance
-        wallet = db.query(models.Caisse).filter(models.Caisse.user_id == pm.id).first()
-        balance = wallet.balance if wallet else 0.0
-        
-        # B. Get Pending Incoming (Same logic as get_caisse_stats)
-        pending_reqs = db.query(func.sum(models.FundRequestItem.requested_amount)).join(models.FundRequest).filter(
-            models.FundRequestItem.target_pm_id == pm.id,
-            models.FundRequest.status == models.FundRequestStatus.PENDING_APPROVAL
-        ).scalar() or 0.0
-        
-        waiting_funds = db.query(func.sum(models.FundRequestItem.approved_amount)).join(models.FundRequest).filter(
-            models.FundRequestItem.target_pm_id == pm.id,
-            models.FundRequest.status == models.FundRequestStatus.APPROVED_WAITING_FUNDS
-        ).scalar() or 0.0
-        partial_paid = db.query(func.sum(models.FundRequestItem.approved_amount)).join(models.FundRequest).filter(
-            models.FundRequestItem.target_pm_id == pm.id,
-            models.FundRequest.status == models.FundRequestStatus.PARTIALLY_PAID
-        ).scalar() or 0.0
-        results.append({
-            "user_id": pm.id,
-            "user_name": f"{pm.first_name} {pm.last_name}",
-            "balance": balance,
-            "pending_in": pending_reqs + waiting_funds + partial_paid
+def get_expenses_export_dataframe(db: Session):
+    # Requête avec toutes les jointures nécessaires
+    query = db.query(models.Expense).options(
+        joinedload(models.Expense.project),
+        joinedload(models.Expense.requester),
+        joinedload(models.Expense.act)
+    ).all()
+
+    data = []
+    for exp in query:
+        data.append({
+            "ID Dépense": exp.id,
+            "Date Création": exp.created_at.strftime("%d/%m/%Y") if exp.created_at else "",
+            "Projet": exp.project.name if exp.project else "N/A",
+            "Demandeur (PM)": f"{exp.requester.first_name} {exp.requester.last_name}" if exp.requester else "N/A",
+            "Type": exp.exp_type,
+            "Bénéficiaire": exp.beneficiary,
+            "Montant (MAD)": exp.amount,
+            "Statut": exp.status,
+            "Référence ACT": exp.act.act_number if exp.act else "N/A",
+            "Remarque": exp.remark,
+            "Motif de Rejet": exp.rejection_reason if exp.rejection_reason else ""
         })
-        
-    # Sort by balance descending
-    return sorted(results, key=lambda x: x['balance'], reverse=True)
-def process_fund_request(
-    db: Session, 
-    req_id: int, 
-    payload: schemas.FundRequestReviewAction, 
-    admin_id: int
-):
-    req = db.query(models.FundRequest).get(req_id)
-    if not req: raise ValueError("Request not found")
 
-    if payload.action == "REJECT":
-        if not payload.comment: raise ValueError("Comment required for rejection")
-        req.status = models.FundRequestStatus.REJECTED
-        req.admin_comment = payload.comment
-        req.approver_id = admin_id
-        req.approved_at = datetime.now()
-
-    elif payload.action == "APPROVE":
-        if not payload.items:
-            raise ValueError("Approval requires item details.")
-            
-        total_paid_now = 0.0
-
-        for item_review in payload.items:
-            # 1. Find the DB item
-            db_item = next((i for i in req.items if i.id == item_review.item_id), None)
-            if not db_item: continue
-            if item_review.admin_note:
-                db_item.admin_note = item_review.admin_note
-
-            
-            amount = item_review.amount_to_pay
-            if amount <= 0: continue # Skip zero payments
-
-            # 2. Update Item Approved Amount (Cumulative)
-            # We add to the existing approved amount to track total approved over time
-            current_approved = db_item.approved_amount or 0.0
-            db_item.approved_amount = current_approved + amount
-            
-            total_paid_now += amount
-
-            # 3. CREDIT THE SPECIFIC PM WALLET
-            pm_id = db_item.target_pm_id
-            wallet = db.query(models.Caisse).filter(models.Caisse.user_id == pm_id).first()
-            if not wallet:
-                wallet = models.Caisse(user_id=pm_id, balance=0.0)
-                db.add(wallet)
-                db.flush()
-            
-            wallet.balance += amount
-            
-            # 4. Create Transaction
-            trx = models.Transaction(
-                caisse_id=wallet.id,
-                type=models.TransactionType.CREDIT,
-                amount=amount,
-                description=f"Refill #{req.request_number} (Item #{db_item.id})",
-                related_request_id=req.id,
-                created_by_id=admin_id
-            )
-            db.add(trx)
-
-        # 5. Update Global Request State
-        current_req_paid = req.paid_amount or 0.0
-        req.paid_amount = current_req_paid + total_paid_now
-        
-        req.approver_id = admin_id
-        req.approved_at = datetime.now()
-        req.admin_comment = payload.comment
-
-        # 6. Determine Status
-        total_requested = sum(i.requested_amount for i in req.items)
-        # Note: We compare Total Paid vs Total Requested
-        remaining = total_requested - req.paid_amount
-        
-        if remaining <= 0.01:
-            req.status = models.FundRequestStatus.COMPLETED
-        else:
-            if payload.close_request:
-                req.status = models.FundRequestStatus.CLOSED_PARTIAL
-            else:
-                req.status = models.FundRequestStatus.PARTIALLY_PAID
-
-    db.commit()
-    return req
+    return pd.DataFrame(data)

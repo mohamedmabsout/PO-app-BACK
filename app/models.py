@@ -1,12 +1,16 @@
-import datetime
-from sqlalchemy import Boolean, Column, Date, Enum, ForeignKey, Integer, String, Float, DateTime
-
-from .enum import ProjectType, UserRole, SBCStatus, BCStatus, NotificationType, BCType,AssignmentStatus, ValidationState, ItemGlobalStatus, SBCType,FundRequestStatus,TransactionType
-from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, Text, Date, Enum, ForeignKey
-from .database import Base
+from datetime import datetime, timezone, date
+from sqlalchemy import Boolean, Column, Date, Enum, ForeignKey, Integer, String, Float, DateTime, Text
 from sqlalchemy.orm import relationship
-import sqlalchemy as sa 
-from sqlalchemy.sql import func # <--- AJOUTER CET IMPORT
+from sqlalchemy.sql import func
+import sqlalchemy as sa
+
+from .enum import (
+    ProjectType, UserRole, SBCStatus, BCStatus, NotificationType, BCType,
+    AssignmentStatus, ValidationState, ItemGlobalStatus, SBCType,
+    FundRequestStatus, TransactionType
+)
+from .database import Base
+ # <--- AJOUTER CET IMPORT
 class User(Base):
     __tablename__ = "users"
 
@@ -94,7 +98,9 @@ class InternalProject(Base):
     direct_customer = relationship("Customer", foreign_keys=[direct_customer_id])
     final_customer = relationship("Customer", foreign_keys=[final_customer_id])
     project_manager = relationship("User", foreign_keys=[project_manager_id])
-
+  # CORRECT : une seule définition pointant vers 'project' (qui existe dans Expense)
+    expenses = relationship("Expense", back_populates="project")
+   
     # --- CRITICAL FIX: REMOVED customer_projects relationship ---
     # Since CustomerProject no longer has a foreign key to this table, 
     # this relationship cannot exist.
@@ -197,7 +203,7 @@ class RawAcceptance(Base):
     application_processed_date = Column(DateTime)
     
     is_processed = Column(Boolean, default=False, index=True)
-    uploaded_at = Column(DateTime, default=datetime.datetime.now(datetime.timezone.utc))
+    uploaded_at = Column(DateTime, server_default=func.now())
     
     uploader_id = Column(Integer, ForeignKey("users.id"))
     uploader = relationship("User")
@@ -255,7 +261,7 @@ class UploadHistory(Base):
     
     # What & When
     original_filename = Column(String(255), nullable=False)
-    uploaded_at = Column(DateTime, default=datetime.datetime.now(datetime.timezone.utc))
+    uploaded_at = Column(DateTime, server_default=func.now())
     
     # Outcome
     status = Column(String(50), nullable=False) # e.g., "SUCCESS", "FAILURE"
@@ -350,7 +356,7 @@ class SBC(Base):
     ice = Column(String(50), nullable=True) # Identifiant Commun de l'Entreprise
     rc = Column(String(50), nullable=True)  
     # --- METADATA & APPROVALS ---
-    created_at = Column(DateTime, default=datetime.datetime.utcnow) # "Date creation"
+    created_at = Column(DateTime, server_default=func.now()) # "Date creation"
     
     # "Creator of the SBC (RAF)"
     creator_id = Column(Integer, ForeignKey("users.id"))
@@ -382,7 +388,7 @@ class BonDeCommande(Base):
     status = Column(Enum(BCStatus), default=BCStatus.DRAFT)
     bc_type = Column(Enum(BCType), default=BCType.STANDARD, nullable=False)
 
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    created_at = Column(DateTime, server_default=func.now())
     rejection_reason = Column(String(500), nullable=True)
 
     creator_id = Column(Integer, ForeignKey("users.id"))
@@ -470,7 +476,7 @@ class Notification(Base):
     link = Column(String(500), nullable=True) 
     
     is_read = Column(Boolean, default=False)
-    created_at = Column(DateTime, default=datetime.datetime.now)
+    created_at = Column(DateTime, server_default=func.now())
 
     recipient = relationship("User", back_populates="notifications")
 class ServiceAcceptance(Base):
@@ -481,7 +487,7 @@ class ServiceAcceptance(Base):
     act_number = Column(String(50), unique=True, nullable=False)
     bc_id = Column(Integer, ForeignKey("bon_de_commandes.id"))
     
-    created_at = Column(DateTime, default=datetime.datetime.now)
+    created_at = Column(DateTime, server_default=func.now())
     creator_id = Column(Integer, ForeignKey("users.id")) # The PD
     
     items = relationship("BCItem", back_populates="act")
@@ -502,8 +508,7 @@ class ItemRejectionHistory(Base):
     rejected_by_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     
     comment = Column(Text, nullable=False)
-    rejected_at = Column(DateTime, default=datetime.datetime.now)
-    
+    rejected_at = Column(DateTime, server_default=func.now())
     item = relationship("BCItem", back_populates="rejection_history")
     rejected_by = relationship("User")
 # 1. The Wallet (One per User)
@@ -533,7 +538,7 @@ class FundRequest(Base):
     paid_amount = Column(Float, default=0.0) 
     admin_comment = Column(Text, nullable=True) # For rejection or partial notes
 
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    created_at = Column(DateTime, server_default=func.now())
     approved_at = Column(DateTime, nullable=True)
     completed_at = Column(DateTime, nullable=True)
     
@@ -575,9 +580,38 @@ class Transaction(Base):
     # Optional links for traceability
     related_request_id = Column(Integer, ForeignKey("fund_requests.id"), nullable=True)
     
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    created_at = Column(DateTime, server_default=func.now())
     created_by_id = Column(Integer, ForeignKey("users.id")) # Who performed the action
     
     # Relationships
     caisse = relationship("Caisse", back_populates="transactions")
     created_by = relationship("User", foreign_keys=[created_by_id])
+
+class Expense(Base):
+    __tablename__ = "expenses"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    project_id = Column(Integer, ForeignKey("internal_projects.id"), nullable=False)
+    act_id = Column(Integer, ForeignKey("service_acceptances.id"), nullable=True) # Pour SBC pp
+    
+    exp_type = Column(String(50), nullable=False) # Transport, SBC pp, Achat, etc.
+    beneficiary = Column(String(255), nullable=False)
+    amount = Column(Float, nullable=False)
+    remark = Column(Text, nullable=True)
+    attachment = Column(String(500), nullable=True) # Reçu de paiement (Obligatoire pour PAID)
+    rejection_reason = Column(String(500), nullable=True)
+    
+    # Workflow Status
+    status = Column(String(50), default="DRAFT", nullable=False) 
+    # DRAFT, PENDING_L1, PENDING_L2, PAID, RECEIVED, REJECTED
+
+    requester_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    
+    # Timestamps
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+    
+    # Relationships
+    project = relationship("InternalProject", back_populates="expenses")
+    requester = relationship("User", foreign_keys=[requester_id])
+    act = relationship("ServiceAcceptance")

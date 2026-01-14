@@ -1,5 +1,6 @@
 # in app/routers/data_processing.py
 from typing import List
+from django import db
 from fastapi.responses import StreamingResponse
 import pandas as pd
 import io
@@ -9,6 +10,9 @@ from sqlalchemy.orm import Session, query, joinedload
 from sqlalchemy import or_
 from typing import Optional
 from fastapi import Query, status
+
+from app import database
+from app.core.security import is_admin, is_pd, is_pd_or_admin, is_pm
 from ..dependencies import get_current_user, get_db
 from .. import crud, models, auth, schemas
 from datetime import datetime, date
@@ -704,6 +708,7 @@ def get_wallets_summary(
     if current_user.role not in [models.UserRole.ADMIN, models.UserRole.PD]:
         raise HTTPException(403, "Access denied")
     return crud.get_all_wallets_summary(db)
+
 @router.post("/request/{req_id}/process")
 def process_request_endpoint(
     req_id: int, 
@@ -719,14 +724,4 @@ def process_request_endpoint(
         return {"message": "Request processed"}
     except ValueError as e:
         raise HTTPException(400, str(e))
-@router.post("/expense")
-def declare_expense(
-    payload: schemas.ExpenseCreate,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user)
-):
-    try:
-        crud.create_expense(db, current_user, payload.amount, payload.description)
-        return {"message": "Expense declared successfully."}
-    except ValueError as e:
-        raise HTTPException(400, detail=str(e))
+    
