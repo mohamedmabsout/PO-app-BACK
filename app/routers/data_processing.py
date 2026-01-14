@@ -1,6 +1,5 @@
 # in app/routers/data_processing.py
 from typing import List
-from django import db
 from fastapi.responses import StreamingResponse
 import pandas as pd
 import io
