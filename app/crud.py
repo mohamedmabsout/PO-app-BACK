@@ -764,32 +764,65 @@ def get_merged_po_data_as_dataframe(
     
     return df
 
+import re
+
 def deduce_category(description: str) -> str:
-    """Deduces the category based on keywords in the item description."""
-    if not isinstance(description, str):
+    """
+    Robustly deduces the category based on keywords in the item description.
+    Priority is given to specific keywords like 'Transportation', 'Survey', etc.
+    """
+    if not isinstance(description, str) or not description.strip():
         return "TBD"
 
-    description_lower = description.lower()
+    desc_lower = description.lower()
 
-    # Using simple 'in' checks for broad matching
-    if "transport" in description_lower:
+    # --- CATEGORY RULES ---
+    # The order matters! Put more specific categories first.
+    
+    # 1. Transportation
+    # Keywords: transportation, transport, km<distance, vehicle, tractor, driver
+    if any(k in desc_lower for k in ["transport", "distance<=", "vehicle", "tractor", "driver", "per time"]):
         return "Transportation"
-    if "survey" in description_lower:
-        return "Survey"
-    if "site engineer" in description_lower or "fsc" in description_lower:
+
+    # 2. Site Engineer / FSC
+    # Keywords: fsc, site engineer, work order, rigger
+    if any(k in desc_lower for k in ["fsc", "site engineer", "work order", "rigger"]):
         return "Site Engineer"
 
-    # If it's none of the specific keywords above, default to "Service"
-    # This covers the vast majority of your examples.
-    # Add more specific checks above this line if needed.
-    if (
-        "service" in description_lower
-        or "install" in description_lower
-        or "zone" in description_lower
-    ):
+    # 3. Survey
+    # Keywords: survey, report(level
+    if any(k in desc_lower for k in ["survey", "tssr", "level a", "level b"]):
+        return "Survey"
+        
+    # 4. Civil Work (New Category recommended based on your data)
+    # Keywords: civil work, foundation, excavation, concrete, painting, wall opening
+    if any(k in desc_lower for k in ["civil work", "foundation", "excavation", "concrete", "paint", "wall opening", "soil"]):
+        return "Civil Work"
+
+    # 5. Hardware / Material (New Category recommended)
+    # Keywords: supply, cable, antenna, rack, battery, cabinet, pvc, rod, connector
+    # But ONLY if it doesn't say "installation" explicitly (which implies service)
+    # This is tricky. Often "Supply and Install" is Service. 
+    # Pure material: "Connector-Item...", "RF coaxial connector"
+    if any(k in desc_lower for k in ["connector", "jumper", "packaging", "box", "screw", "bolt"]):
+        if "install" not in desc_lower:
+             return "Material"
+
+    # 6. Service (Catch-all for installation/swap/expansion)
+    # Keywords: install, swap, expansion, dismantling, commissioning, integration, upgrade, replacement
+    service_keywords = [
+        "service", "install", "swap", "expansion", "dismantling", 
+        "commissioning", "integration", "upgrade", "replacement", 
+        "zone", "configuration", "acceptance", "testing"
+    ]
+    if any(k in desc_lower for k in service_keywords):
         return "Service"
 
-    return "TBD"  # Default if no keywords match
+    # 7. Fallback for specific equipment mentions that usually imply service
+    if any(k in desc_lower for k in ["rru", "bbu", "aau", "bts", "msan", "olt", "wdm", "microwave"]):
+        return "Service"
+
+    return "TBD"
 
 def process_acceptances_by_ids(db: Session, raw_acceptance_ids: List[int]):
     """
