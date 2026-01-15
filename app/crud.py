@@ -1111,6 +1111,11 @@ def get_total_financial_summary(db: Session, user: models.User = None) -> dict:
         func.sum(models.MergedPO.accepted_ac_amount).label("total_accepted_ac"),
         func.sum(models.MergedPO.accepted_pac_amount).label("total_accepted_pac")
     )
+    canceled_query = db.query(
+        func.sum(models.MergedPO.line_amount_hw).label("total_canceled")
+    ).filter(models.MergedPO.internal_control == 0)
+
+
     # --- THIS IS THE FIX ---
     # If a user is provided and their role is PM, filter the data
     if user and user.role in [UserRole.PM]:
@@ -1130,13 +1135,16 @@ def get_total_financial_summary(db: Session, user: models.User = None) -> dict:
     total_po_value = result.total_po_value or 0.0
     total_accepted_ac = result.total_accepted_ac or 0.0
     total_accepted_pac = result.total_accepted_pac or 0.0
+    total_canceled = canceled_query.scalar() or 0.0
 
 
     return {
         "total_po_value": total_po_value,
         "total_accepted_ac": total_accepted_ac,
         "total_accepted_pac": total_accepted_pac,
-        "remaining_gap": remaining_gap
+        "remaining_gap": remaining_gap,
+        "total_canceled": total_canceled 
+
     }
 def get_internal_projects_financial_summary(db: Session, user: models.User = None):
     # 1. Fetch APPROVED data grouped by Internal Project AND Project Manager
@@ -4195,3 +4203,35 @@ def get_expenses_export_dataframe(db: Session):
         })
 
     return pd.DataFrame(data)
+
+def bulk_update_internal_control(db: Session, identifiers: List[str], new_value: int):
+    # Clean input
+    clean_ids = [s.strip() for s in identifiers if s.strip()]
+    if not clean_ids: return 0
+    
+    # Update Query
+    # Matches either PO ID or Site Code
+    query = db.query(models.MergedPO).filter(
+        sa.or_(
+            models.MergedPO.po_id.in_(clean_ids),
+            models.MergedPO.site_code.in_(clean_ids)
+        )
+    )
+    
+    updated_count = query.update(
+        {models.MergedPO.internal_control: new_value},
+        synchronize_session=False
+    )
+    db.commit()
+    return updated_count
+
+def search_pos_for_control(db: Session, identifiers: List[str]):
+    clean_ids = [s.strip() for s in identifiers if s.strip()]
+    if not clean_ids: return []
+    
+    return db.query(models.MergedPO).filter(
+        sa.or_(
+            models.MergedPO.po_id.in_(clean_ids),
+            models.MergedPO.site_code.in_(clean_ids)
+        )
+    ).limit(1000).all()

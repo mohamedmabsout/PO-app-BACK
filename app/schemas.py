@@ -302,6 +302,8 @@ class FinancialSummary(BaseModel):
     total_accepted_ac: float
     total_accepted_pac: float
     remaining_gap: float
+    total_canceled: Optional[float] = 0.0 
+
    
 class ProjectManagerInfo(BaseModel):
     first_name: Optional[str] = None
@@ -736,3 +738,7 @@ class ExpenseReject(BaseModel):
     reason: str
     
     model_config = ConfigDict(from_attributes=True)
+
+class InternalControlUpdate(BaseModel):
+    identifiers: List[str] # List of PO IDs or Site Codes
+    set_to_value: int # 0 or 1
