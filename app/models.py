@@ -500,7 +500,7 @@ class ServiceAcceptance(Base):
     total_tax_amount = Column(Float, default=0.0) 
     total_amount_ttc = Column(Float, default=0.0)
     applied_tax_rate = Column(Float, default=0.0) # Store the rate used (e.g. 0.20)
-    expenses = relationship("Expense", back_populates="service_acceptance")
+    expenses = relationship("Expense", back_populates="act")
 class ItemRejectionHistory(Base):
     __tablename__ = "item_rejection_history"
     id = Column(Integer, primary_key=True)
@@ -609,4 +609,4 @@ class Expense(Base):
     act = relationship("ServiceAcceptance") 
     project = relationship("InternalProject", back_populates="expenses")
     requester = relationship("User", back_populates="expenses")
-    service_acceptance = relationship("ServiceAcceptance", back_populates="expenses")
+    
