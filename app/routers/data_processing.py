@@ -198,6 +198,7 @@ def export_merged_pos_report(
             "Accepted PAC Amount",
             "Date PAC OK",
             "Remaining Amount",
+            "Real Backlog"
         ]
 
         # Reorder the dataframe to match the desired output
@@ -237,10 +238,11 @@ def export_merged_pos_report(
             fmt_header_ac = workbook.add_format({**header_base, "fg_color": "#93c47d"})
             fmt_header_pac = workbook.add_format({**header_base, "fg_color": "#6d9eeb"})
             fmt_header_red = workbook.add_format({**header_base, "fg_color": "#e06666"})
+            fmt_header_violet = workbook.add_format({**header_base, "fg_color": "#a64d79"})
             fmt_bg_ac = workbook.add_format({"bg_color": "#D9EAD3"})
             fmt_bg_pac = workbook.add_format({"bg_color": "#CFE2F3"})
             fmt_bg_red = workbook.add_format({"bg_color": "#F4CCCC"})
-
+            fmt_bg_violet = workbook.add_format({"bg_color": "#CE8AE5"})
             headers = export_df.columns.tolist()
 
             # --- APPLY COLUMN WIDTHS AND FORMATTING ---
@@ -255,6 +257,9 @@ def export_merged_pos_report(
                     worksheet.set_column(col_idx, col_idx, col_width, fmt_bg_pac)
                 elif "Remaining Amount" in col_name:
                     worksheet.set_column(col_idx, col_idx, col_width, fmt_bg_red)
+                elif "Real Backlog" in col_name:
+                    # Maybe color it differently? Or same as Remaining?
+                    worksheet.set_column(col_idx, col_idx, col_width, fmt_bg_violet)
                 else:
                     worksheet.set_column(col_idx, col_idx, col_width)
 
@@ -266,6 +271,8 @@ def export_merged_pos_report(
                     style = fmt_header_pac
                 elif "Remaining Amount" in col_name:
                     style = fmt_header_red
+                elif "Real Backlog" in col_name:
+                    style = fmt_header_violet   
                 else:
                     style = fmt_header_std
 

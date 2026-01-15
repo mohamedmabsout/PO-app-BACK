@@ -1561,7 +1561,11 @@ def get_export_dataframe(
     
     CustProj = aliased(models.CustomerProject)
     IntProj = aliased(models.InternalProject)
-    
+    remaining_expr = (models.MergedPO.line_amount_hw - (
+        func.coalesce(models.MergedPO.accepted_ac_amount, 0) + 
+        func.coalesce(models.MergedPO.accepted_pac_amount, 0)
+    ))
+
     # --- CORRECTED & COMPLETE SELECT STATEMENT ---
     query = db.query(
         # 1. Start with the required new fields, PO ID first
@@ -1590,10 +1594,10 @@ def get_export_dataframe(
         models.MergedPO.total_pac_amount.label("Total PAC (20%)"),
         models.MergedPO.accepted_pac_amount.label("Accepted PAC Amount"),
         models.MergedPO.date_pac_ok.label("Date PAC OK"),
-        (models.MergedPO.line_amount_hw - (
-            func.coalesce(models.MergedPO.accepted_ac_amount, 0) + 
-            func.coalesce(models.MergedPO.accepted_pac_amount, 0)
-        )).label("Remaining Amount")
+        remaining_expr.label("Remaining Amount"),
+        (remaining_expr * models.MergedPO.internal_control).label("Real Backlog")
+
+
     ).select_from(models.MergedPO)
 
     # --- JOINS ---
@@ -1629,7 +1633,10 @@ def get_export_dataframe(
     if "Remaining Amount" in df.columns:
         df["Remaining Amount"] = df["Remaining Amount"].round(5)
         df.loc[df["Remaining Amount"].abs() < 1, "Remaining Amount"] = 0
-        
+    if "Real Backlog" in df.columns:
+        df["Real Backlog"] = df["Real Backlog"].round(5)
+        df.loc[df["Real Backlog"].abs() < 1, "Real Backlog"] = 0
+       
     return df
 
 
