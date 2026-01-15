@@ -47,9 +47,10 @@ class User(Base):
     )
     sbc_id = Column(Integer, ForeignKey("sbcs.id"), nullable=True)
     
+    
     # Relationship
     sbc = relationship("SBC", back_populates="users",foreign_keys=[sbc_id])
-
+    expenses = relationship("Expense", back_populates="requester") 
     notifications = relationship("Notification", back_populates="recipient") 
 
 class Account(Base):
@@ -499,7 +500,7 @@ class ServiceAcceptance(Base):
     total_tax_amount = Column(Float, default=0.0) 
     total_amount_ttc = Column(Float, default=0.0)
     applied_tax_rate = Column(Float, default=0.0) # Store the rate used (e.g. 0.20)
-
+    expenses = relationship("Expense", back_populates="service_acceptance")
 class ItemRejectionHistory(Base):
     __tablename__ = "item_rejection_history"
     id = Column(Integer, primary_key=True)
@@ -591,27 +592,21 @@ class Expense(Base):
     __tablename__ = "expenses"
     
     id = Column(Integer, primary_key=True, index=True)
-    project_id = Column(Integer, ForeignKey("internal_projects.id"), nullable=False)
-    act_id = Column(Integer, ForeignKey("service_acceptances.id"), nullable=True) # Pour SBC pp
-    
-    exp_type = Column(String(50), nullable=False) # Transport, SBC pp, Achat, etc.
-    beneficiary = Column(String(255), nullable=False)
-    amount = Column(Float, nullable=False)
-    remark = Column(Text, nullable=True)
-    attachment = Column(String(500), nullable=True) # Reçu de paiement (Obligatoire pour PAID)
+    project_id = Column(Integer, ForeignKey("internal_projects.id"))  # Changez "projects.id" en "internal_projects.id"
+    exp_type = Column(String(50))
+    beneficiary = Column(String(255))
+    amount = Column(Float)
+    remark = Column(Text)
+    attachment = Column(String(500))
+    act_id = Column(Integer, ForeignKey("service_acceptances.id"), nullable=True)   
+    status = Column(String(50))
+    requester_id = Column(Integer, ForeignKey("users.id"))
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     rejection_reason = Column(String(500), nullable=True)
-    
-    # Workflow Status
-    status = Column(String(50), default="DRAFT", nullable=False) 
-    # DRAFT, PENDING_L1, PENDING_L2, PAID, RECEIVED, REJECTED
-
-    requester_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    
-    # Timestamps
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
-    
-    # Relationships
+    # Relations
+       # C'est elle qui permet de faire "exp.act.act_number"
+    act = relationship("ServiceAcceptance") 
     project = relationship("InternalProject", back_populates="expenses")
-    requester = relationship("User", foreign_keys=[requester_id])
-    act = relationship("ServiceAcceptance")
+    requester = relationship("User", back_populates="expenses")
+    service_acceptance = relationship("ServiceAcceptance", back_populates="expenses")

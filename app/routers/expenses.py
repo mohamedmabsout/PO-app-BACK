@@ -1,11 +1,12 @@
 # app/routers/expenses.py
+import datetime
 import io
 from fastapi import APIRouter, Depends, HTTPException
 import pandas as pd
 from sqlalchemy.orm import Session
 from typing import List
 from .. import crud, models, schemas, auth
-from ..dependencies import get_db
+from ..dependencies import get_current_user, get_db
 from fastapi.responses import StreamingResponse
 router = APIRouter(prefix="/api/expenses", tags=["expenses"])
 
@@ -123,25 +124,33 @@ def post_reject(
     if not exp:
         raise HTTPException(404, "Expense not found")
     return exp
-@router.post("/{id}/confirm-payment")
-def confirm_payment(
-    id: int, 
-    attachment: str, # Reçu de paiement obligatoire
-    db: Session = Depends(get_db)
-):
-    expense = db.query(models.Expense).get(id)
-    if not attachment:
-        raise HTTPException(400, "L'attachement est obligatoire pour confirmer le paiement.")
+# @router.post("/{id}/confirm-payment")
+# def confirm_payment(
+    # id: int,
+    # payload: schemas.ConfirmPaymentRequest,  # Corps de la requête
+   #  db: Session = Depends(get_db),
+   #  current_user: models.User = Depends(get_current_user)
+# ):
+   #  expense = db.query(models.Expense).filter(models.Expense.id == id).first()
     
-    # 1. Mise à jour du statut
-    expense.status = "PAID"
-    expense.attachment = attachment
+   #  if not expense:
+       #  raise HTTPException(404, "Dépense non trouvée.")
     
-    # 2. Débit de la caisse (La transaction réelle se fait ici)
-    crud.deduct_from_caisse(db, expense.requester_id, expense.amount, f"Paiement dépense #{expense.id}")
+    # if not payload.attachment:
+        # raise HTTPException(400, "L'attachement est obligatoire pour confirmer le paiement.")
     
-    db.commit()
-    return {"message": "Paiement confirmé"}
+    # Mise à jour du statut
+   #  expense.status = "PAID"
+    # expense.attachment = payload.attachment
+    # expense.updated_at = datetime.utcnow()
+    
+    # try:
+       #  db.commit()
+        # db.refresh(expense)
+        # return {"message": "Paiement confirmé avec succès", "expense": expense}
+    # except Exception as e:
+        # db.rollback()
+        # raise HTTPException(500, f"Erreur lors de la confirmation: {str(e)}")
 
 @router.get("/stats")
 def get_expense_stats(
