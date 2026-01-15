@@ -238,11 +238,11 @@ def export_merged_pos_report(
             fmt_header_ac = workbook.add_format({**header_base, "fg_color": "#93c47d"})
             fmt_header_pac = workbook.add_format({**header_base, "fg_color": "#6d9eeb"})
             fmt_header_red = workbook.add_format({**header_base, "fg_color": "#e06666"})
-            fmt_header_violet = workbook.add_format({**header_base, "fg_color": "#a64d79"})
+            fmt_header_violet = workbook.add_format({**header_base, "fg_color": "#c76e9b"})
             fmt_bg_ac = workbook.add_format({"bg_color": "#D9EAD3"})
             fmt_bg_pac = workbook.add_format({"bg_color": "#CFE2F3"})
             fmt_bg_red = workbook.add_format({"bg_color": "#F4CCCC"})
-            fmt_bg_violet = workbook.add_format({"bg_color": "#CE8AE5"})
+            fmt_bg_violet = workbook.add_format({"bg_color": "#E0ADF0"})
             headers = export_df.columns.tolist()
 
             # --- APPLY COLUMN WIDTHS AND FORMATTING ---
