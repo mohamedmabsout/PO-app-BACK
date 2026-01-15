@@ -697,9 +697,17 @@ class ExpenseBase(BaseModel):
     remark: str
     amount: PositiveFloat # type: ignore
     attachment: str | None = None
+    act_id: Optional[int] = None 
 
 class ExpenseCreate(ExpenseBase):
+
     pass
+class ExpenseResponse(ExpenseCreate):
+    id: int
+    act_id: Optional[int] = None  # Pour inclure les détails
+    
+    class Config:
+        from_attributes = True
 
 class ExpenseUpdate(BaseModel):
     exp_type: str | None = None
@@ -736,3 +744,5 @@ class ExpenseReject(BaseModel):
     reason: str
     
     model_config = ConfigDict(from_attributes=True)
+    class ConfirmPaymentRequest(BaseModel):
+     attachment: str

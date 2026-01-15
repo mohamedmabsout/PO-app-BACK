@@ -3962,24 +3962,24 @@ def get_request_by_id(db: Session, req_id: int):
 
 # ==================== EXPENSES CRUD ====================
 
-def create_expense(db: Session, current_user: models.User, payload: schemas.ExpenseCreate):
-    """Crée une nouvelle dépense en statut DRAFT"""
+def create_expense(db: Session, current_user, payload):
     expense = models.Expense(
         project_id=payload.project_id,
-        creator_id=current_user.id,
-        exp_type=payload.exp_type,
+        exp_type=payload.exp_type,  # Changez expense_type en exp_type
         beneficiary=payload.beneficiary,
-        remark=payload.remark,
         amount=payload.amount,
+        remark=payload.remark,
         attachment=payload.attachment,
-        status="DRAFT"
+         act_id=payload.act_id,# Maintenant que c'est dans le schéma, utilisez directement
+        requester_id=current_user.id,
+        status='PENDING_L1',
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow()
     )
     db.add(expense)
     db.commit()
     db.refresh(expense)
     return expense
-
-
 def list_my_requests(db: Session, current_user: models.User):
     query = db.query(models.Expense).options(
         joinedload(models.Expense.project),
@@ -3987,12 +3987,18 @@ def list_my_requests(db: Session, current_user: models.User):
     )
     
     role_str = str(current_user.role).upper()
+    
+    # For non-admin/non-PD/non-CEO users, filter by requester
     if "ADMIN" not in role_str and "PD" not in role_str and "CEO" not in role_str:
-        # Correction ici : requester_id au lieu de creator_id
         query = query.filter(models.Expense.requester_id == current_user.id)
     
-    return query.order_by(models.Expense.created_at.desc()).all()
-
+    # Add explicit ordering
+    result = query.order_by(models.Expense.created_at.desc()).all()
+    
+    # Debug logging
+    print(f"DEBUG - User {current_user.id} retrieved {len(result)} expenses")
+    
+    return result
 
 def list_pending_l1(db: Session):
     """Liste toutes les dépenses en attente de validation L1 (PD)"""
