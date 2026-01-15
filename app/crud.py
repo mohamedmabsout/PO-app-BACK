@@ -1091,6 +1091,7 @@ def get_filtered_merged_pos(
     internal_project_id: Optional[int] = None,
     customer_project_id: Optional[int] = None,
     site_code: Optional[str] = None,
+    category: Optional[str] = None,
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
     search: Optional[str] = None
@@ -1115,7 +1116,8 @@ def get_filtered_merged_pos(
     
     if site_code:
         query = query.filter(models.MergedPO.site_code == site_code)
-
+    if category:
+        query = query.filter(models.MergedPO.category == category)
     if start_date:
         query = query.filter(sa.func.date(models.MergedPO.publish_date) >= start_date)
 

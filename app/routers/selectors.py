@@ -1,5 +1,6 @@
 # in backend/app/routers/selectors.py
 from fastapi import APIRouter, Depends, Query
+from sqlalchemy import distinct
 from sqlalchemy.orm import Session
 from typing import List
 
@@ -73,3 +74,25 @@ def get_customer_project_selector(
     if search:
         query = query.filter(models.CustomerProject.name.ilike(f"%{search}%"))
     return query.limit(20).all()
+
+@router.get("/categories", response_model=List[str])
+def get_categories_selector(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """
+    Returns a list of all distinct categories currently in the database.
+    """
+    # 1. Query distinct categories from MergedPO
+    categories = db.query(distinct(models.MergedPO.category)).all()
+    
+    # 2. Flatten the result (list of tuples -> list of strings)
+    # Filter out None values just in case
+    category_list = [c[0] for c in categories if c[0]]
+    
+    # 3. Ensure "TBD" is always in the list if you want it explicitly
+    if "TBD" not in category_list:
+        category_list.append("TBD")
+        
+    # 4. Sort alphabetically
+    return sorted(category_list)
