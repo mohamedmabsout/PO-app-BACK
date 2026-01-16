@@ -4013,6 +4013,58 @@ def get_request_by_id(db: Session, req_id: int):
         "items": items
     }
 
+
+def get_all_wallets_summary(db: Session):
+    """
+    Returns a list of all PM wallets with their balance and pending incoming amount.
+    Used for Admin/PD detailed view.
+    """
+    # 1. Get all PMs, PDs, and Admins (anyone who might have a wallet)
+    pms = db.query(models.User).filter(
+        models.User.role.in_([models.UserRole.PM, models.UserRole.PD, models.UserRole.ADMIN])
+    ).all()
+    
+    results = []
+    for pm in pms:
+        # A. Get Wallet Balance
+        wallet = db.query(models.Caisse).filter(models.Caisse.user_id == pm.id).first()
+        balance = wallet.balance if wallet else 0.0
+        
+        # B. Get Pending Incoming (Logic similar to get_caisse_stats)
+        # 1. Pending Approval (Use requested_amount)
+        pending_reqs = db.query(func.sum(models.FundRequestItem.requested_amount)).join(models.FundRequest).filter(
+            models.FundRequestItem.target_pm_id == pm.id,
+            models.FundRequest.status == models.FundRequestStatus.PENDING_APPROVAL
+        ).scalar() or 0.0
+        
+        # 2. Approved but not yet Confirmed/Paid (Use approved_amount)
+        # Note: In our new logic, "Approved" means paid, so this might be 0, 
+        # but we keep it for consistency with legacy statuses.
+        waiting_funds = db.query(func.sum(models.FundRequestItem.approved_amount)).join(models.FundRequest).filter(
+            models.FundRequestItem.target_pm_id == pm.id,
+            models.FundRequest.status == models.FundRequestStatus.APPROVED_WAITING_FUNDS
+        ).scalar() or 0.0
+        
+        # 3. Partial Pending (Use remaining requested)
+        # This is tricky. If status is PARTIALLY_PAID, the "Pending" amount is 
+        # (Total Requested for this PM - Amount Paid to this PM).
+        # We need to find requests where this PM is a target and status is PARTIAL.
+        # Simple approximation: Sum of requested - Sum of approved for partial items?
+        # Actually, let's keep it simple: Pending In = Pending Approval + Waiting Funds.
+        # Partial requests are technically "Approved" partially, so the rest is not guaranteed.
+        
+        results.append({
+            "user_id": pm.id,
+            "user_name": f"{pm.first_name} {pm.last_name}",
+            "balance": balance,
+            "pending_in": pending_reqs + waiting_funds
+        })
+        
+    # Sort by balance descending to see who has the most cash
+    return sorted(results, key=lambda x: x['balance'], reverse=True)
+
+
+
 # ==================== EXPENSES CRUD ====================
 
 def create_expense(db: Session, current_user, payload):
