@@ -3741,7 +3741,8 @@ def create_fund_request(db: Session, pd_user: int, items: list):
     new_req = models.FundRequest(
         request_number=req_num,
         requester_id=pd_user,
-        status=models.FundRequestStatus.PENDING_APPROVAL
+        status=models.FundRequestStatus.PENDING_APPROVAL,
+        created_at=datetime.now()
     )
     db.add(new_req)
     db.flush() # Get ID
@@ -3757,6 +3758,8 @@ def create_fund_request(db: Session, pd_user: int, items: list):
         db.add(db_item)
         
     db.commit()
+    db.refresh(new_req) # Refresh to load relationships/IDs
+
     return new_req
 def approve_fund_request(db: Session, req_id: int, admin_id: int, approved_items: dict):
     # approved_items is a dict: { item_id: approved_amount }
