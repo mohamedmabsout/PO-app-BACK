@@ -4063,6 +4063,119 @@ def get_all_wallets_summary(db: Session):
     # Sort by balance descending to see who has the most cash
     return sorted(results, key=lambda x: x['balance'], reverse=True)
 
+def process_fund_request(
+    db: Session, 
+    req_id: int, 
+    payload: schemas.FundRequestReviewAction, 
+    admin_id: int
+):
+    req = db.query(models.FundRequest).get(req_id)
+    if not req: raise ValueError("Request not found")
+
+    # 1. HANDLE REJECTION
+    if payload.action == "REJECT":
+        if not payload.comment:
+            raise ValueError("A comment is mandatory when rejecting.")
+        
+        req.status = models.FundRequestStatus.REJECTED
+        req.admin_comment = payload.comment
+        req.approver_id = admin_id
+        req.approved_at = datetime.now()
+        # No money moves on rejection.
+    
+    # 2. HANDLE APPROVAL (Full or Partial)
+    elif payload.action == "APPROVE":
+        amount_giving_now = payload.amount_to_pay
+        
+        if amount_giving_now <= 0:
+             raise ValueError("Approval requires a positive amount.")
+
+        # A. Update Global Request Tracking
+        current_paid = req.paid_amount or 0.0
+        req.paid_amount = current_paid + amount_giving_now
+        
+        req.approver_id = admin_id
+        req.approved_at = datetime.now()
+        req.admin_comment = payload.comment
+
+        # B. DISTRIBUTE MONEY TO PM WALLETS (Proportional / Single PM Logic)
+        # We need to know which PM gets the money.
+        # Since this is a global payment amount, we credit the TARGET PM(s).
+        
+        # 1. Identify the target PMs from the items
+        target_pms = list(set([item.target_pm_id for item in req.items]))
+        
+        if len(target_pms) == 1:
+            # Simple Case: 1 PM. Give them the money.
+            target_pm_id = target_pms[0]
+            wallet = db.query(models.Caisse).filter(models.Caisse.user_id == target_pm_id).first()
+            if not wallet:
+                wallet = models.Caisse(user_id=target_pm_id, balance=0.0)
+                db.add(wallet)
+                db.flush()
+                
+            wallet.balance += amount_giving_now
+            
+            # Create Transaction Record
+            trx = models.Transaction(
+                caisse_id=wallet.id,
+                type=models.TransactionType.CREDIT,
+                amount=amount_giving_now,
+                description=f"Refill Request #{req.request_number} (Payment)",
+                related_request_id=req.id,
+                created_by_id=admin_id
+            )
+            db.add(trx)
+            
+        else:
+            # Multiple PMs in one request.
+            # Strategy: Credit the REQUESTER (PD) so they can distribute it manually?
+            # Or distribute evenly? 
+            # Current fallback: Credit the Requester (PD) to be safe.
+            target_id = req.requester_id 
+            wallet = db.query(models.Caisse).filter(models.Caisse.user_id == target_id).first()
+            if not wallet:
+                wallet = models.Caisse(user_id=target_id, balance=0.0)
+                db.add(wallet)
+                db.flush()
+            
+            wallet.balance += amount_giving_now
+            
+            trx = models.Transaction(
+                caisse_id=wallet.id,
+                type=models.TransactionType.CREDIT,
+                amount=amount_giving_now,
+                description=f"Refill Request #{req.request_number} (Bulk PM Payment)",
+                related_request_id=req.id,
+                created_by_id=admin_id
+            )
+            db.add(trx)
+
+        # C. Save Admin Notes (Per Item) - Optional but good for history
+        if payload.items:
+             # Create a map for fast lookup: item_id -> note
+             note_map = {item.item_id: item.admin_note for item in payload.items if item.admin_note}
+             
+             for db_item in req.items:
+                 if db_item.id in note_map:
+                     db_item.admin_note = note_map[db_item.id]
+
+        # D. Determine New Status
+        total_requested = sum(i.requested_amount for i in req.items)
+        remaining = total_requested - req.paid_amount
+        
+        # Check if fully paid (with small float tolerance)
+        if remaining <= 0.01:
+            req.status = models.FundRequestStatus.COMPLETED
+        else:
+            if payload.close_request:
+                req.status = models.FundRequestStatus.CLOSED_PARTIAL
+            else:
+                req.status = models.FundRequestStatus.PARTIALLY_PAID
+    
+    db.commit()
+    db.refresh(req)
+    return req
 
 
 # ==================== EXPENSES CRUD ====================
