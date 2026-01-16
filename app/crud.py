@@ -4063,6 +4063,7 @@ def get_all_wallets_summary(db: Session):
     # Sort by balance descending to see who has the most cash
     return sorted(results, key=lambda x: x['balance'], reverse=True)
 
+
 def process_fund_request(
     db: Session, 
     req_id: int, 
@@ -4085,8 +4086,13 @@ def process_fund_request(
     
     # 2. HANDLE APPROVAL (Full or Partial)
     elif payload.action == "APPROVE":
-        amount_giving_now = payload.amount_to_pay
-        
+        if not payload.items:
+             raise ValueError("Approval requires items.")
+
+        # --- FIX: Calculate Total Amount from Items ---
+        amount_giving_now = sum(i.amount_to_pay for i in payload.items)
+        # ---------------------------------------------
+
         if amount_giving_now <= 0:
              raise ValueError("Approval requires a positive amount.")
 
@@ -4098,73 +4104,47 @@ def process_fund_request(
         req.approved_at = datetime.now()
         req.admin_comment = payload.comment
 
-        # B. DISTRIBUTE MONEY TO PM WALLETS (Proportional / Single PM Logic)
-        # We need to know which PM gets the money.
-        # Since this is a global payment amount, we credit the TARGET PM(s).
-        
-        # 1. Identify the target PMs from the items
-        target_pms = list(set([item.target_pm_id for item in req.items]))
-        
-        if len(target_pms) == 1:
-            # Simple Case: 1 PM. Give them the money.
-            target_pm_id = target_pms[0]
-            wallet = db.query(models.Caisse).filter(models.Caisse.user_id == target_pm_id).first()
+        # B. DISTRIBUTE MONEY & SAVE NOTES
+        for item_review in payload.items:
+            # Find the DB item
+            db_item = next((i for i in req.items if i.id == item_review.item_id), None)
+            if not db_item: continue
+
+            # 1. Update Admin Note
+            if item_review.admin_note:
+                db_item.admin_note = item_review.admin_note
+            
+            amount = item_review.amount_to_pay
+            if amount <= 0: continue
+
+            # 2. Update Item Approved Amount
+            db_item.approved_amount = (db_item.approved_amount or 0.0) + amount
+
+            # 3. Credit Specific PM Wallet
+            pm_id = db_item.target_pm_id
+            wallet = db.query(models.Caisse).filter(models.Caisse.user_id == pm_id).first()
             if not wallet:
-                wallet = models.Caisse(user_id=target_pm_id, balance=0.0)
+                wallet = models.Caisse(user_id=pm_id, balance=0.0)
                 db.add(wallet)
                 db.flush()
                 
-            wallet.balance += amount_giving_now
+            wallet.balance += amount
             
-            # Create Transaction Record
+            # 4. Create Transaction
             trx = models.Transaction(
                 caisse_id=wallet.id,
                 type=models.TransactionType.CREDIT,
-                amount=amount_giving_now,
-                description=f"Refill Request #{req.request_number} (Payment)",
-                related_request_id=req.id,
-                created_by_id=admin_id
-            )
-            db.add(trx)
-            
-        else:
-            # Multiple PMs in one request.
-            # Strategy: Credit the REQUESTER (PD) so they can distribute it manually?
-            # Or distribute evenly? 
-            # Current fallback: Credit the Requester (PD) to be safe.
-            target_id = req.requester_id 
-            wallet = db.query(models.Caisse).filter(models.Caisse.user_id == target_id).first()
-            if not wallet:
-                wallet = models.Caisse(user_id=target_id, balance=0.0)
-                db.add(wallet)
-                db.flush()
-            
-            wallet.balance += amount_giving_now
-            
-            trx = models.Transaction(
-                caisse_id=wallet.id,
-                type=models.TransactionType.CREDIT,
-                amount=amount_giving_now,
-                description=f"Refill Request #{req.request_number} (Bulk PM Payment)",
+                amount=amount,
+                description=f"Refill Request #{req.request_number} (Item #{db_item.id})",
                 related_request_id=req.id,
                 created_by_id=admin_id
             )
             db.add(trx)
 
-        # C. Save Admin Notes (Per Item) - Optional but good for history
-        if payload.items:
-             # Create a map for fast lookup: item_id -> note
-             note_map = {item.item_id: item.admin_note for item in payload.items if item.admin_note}
-             
-             for db_item in req.items:
-                 if db_item.id in note_map:
-                     db_item.admin_note = note_map[db_item.id]
-
-        # D. Determine New Status
+        # C. Determine New Status
         total_requested = sum(i.requested_amount for i in req.items)
         remaining = total_requested - req.paid_amount
         
-        # Check if fully paid (with small float tolerance)
         if remaining <= 0.01:
             req.status = models.FundRequestStatus.COMPLETED
         else:
@@ -4176,8 +4156,6 @@ def process_fund_request(
     db.commit()
     db.refresh(req)
     return req
-
-
 # ==================== EXPENSES CRUD ====================
 
 def create_expense(db: Session, current_user, payload):
