@@ -4052,6 +4052,7 @@ def approve_expense_l1(db: Session, expense_id: int, approver_id: int):
     return expense
 
 
+
 def approve_l2(db: Session, expense_id: int, current_user: models.User):
     """Validation L2 et paiement par Admin/CEO"""
     expense = db.query(models.Expense).filter(models.Expense.id == expense_id).first()
@@ -4061,18 +4062,18 @@ def approve_l2(db: Session, expense_id: int, current_user: models.User):
     if expense.status != "PENDING_L2":
         raise ValueError("Cette dépense n'est pas en attente de paiement")
     
-    # Vérifier et débiter la caisse
+    # ✅ CORRECTION ICI : Utilisez requester_id au lieu de creator_id
     caisse = db.query(models.Caisse).filter(
-        models.Caisse.user_id == expense.creator_id
+        models.Caisse.user_id == expense.requester_id 
     ).first()
     
     if not caisse or caisse.balance < expense.amount:
         raise ValueError("Insufficient balance in caisse")
     
-    # Débiter
+    # Débiter la caisse
     caisse.balance -= expense.amount
     
-    # Créer une transaction
+    # Créer une transaction de débit
     transaction = models.Transaction(
         caisse_id=caisse.id,
         type=models.TransactionType.DEBIT,
@@ -4082,10 +4083,11 @@ def approve_l2(db: Session, expense_id: int, current_user: models.User):
     )
     db.add(transaction)
     
-    # Marquer comme payé
+    # Mettre à jour le statut de la dépense
     expense.status = "PAID"
+    # Assurez-vous d'utiliser la bonne date
+    expense.approved_l2_at = datetime.now() 
     expense.approved_l2_by = current_user.id
-    expense.approved_l2_at = datetime.now(timezone.utc)
     
     db.commit()
     db.refresh(expense)
