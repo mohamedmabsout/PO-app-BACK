@@ -717,7 +717,18 @@ class ExpenseUpdate(BaseModel):
     remark: str | None = None
     amount: PositiveFloat | None = None # type: ignore
     attachment: str | None = None
+class ProjectSimple(BaseModel):
+    id: int
+    name: str
+    
+    model_config = ConfigDict(from_attributes=True)
 
+class CaisseStats(BaseModel):
+    balance: float
+    pending_in: float
+    spent_month: float
+
+    model_config = ConfigDict(from_attributes=True)
 class ExpenseOut(BaseModel):
     id: int
     project_id: int
@@ -726,6 +737,7 @@ class ExpenseOut(BaseModel):
     amount: float
     remark: Optional[str]
     status: str
+    internal_project: Optional[ProjectSimple] = None 
     # CHANGEZ CES DEUX LIGNES :
     created_at: datetime  # <--- Mettre datetime au lieu de str
     updated_at: datetime  # <--- Mettre datetime au lieu de str

@@ -2,6 +2,7 @@
 import datetime
 import io
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.temp_pydantic_v1_params import Body
 import pandas as pd
 from sqlalchemy.orm import Session
 from typing import List
@@ -200,3 +201,29 @@ def export_expenses_to_excel(
         media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         headers=headers
     )
+@router.get("/pending-payment", response_model=list[schemas.ExpenseOut])
+def get_pending_payment(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    # Sécurité : Seul le PD (ou Admin) peut voir cette liste de paiement
+    require_roles(current_user, ["PD", "PROJECT DIRECTOR", "ADMIN"])
+    return crud.list_pending_payment(db)
+
+@router.post("/{id}/confirm-payment")
+def confirm_payment(
+    id: int, 
+    payload: dict = Body(...), # Reçoit {"attachment": "nom_du_fichier.pdf"}
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    require_roles(current_user, ["PD", "PROJECT DIRECTOR"])
+    
+    attachment = payload.get("attachment")
+    if not attachment:
+        raise HTTPException(status_code=400, detail="L'attachement est obligatoire")
+        
+    try:
+        return crud.confirm_expense_payment(db, id, attachment)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))

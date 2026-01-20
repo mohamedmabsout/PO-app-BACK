@@ -100,7 +100,7 @@ class InternalProject(Base):
     final_customer = relationship("Customer", foreign_keys=[final_customer_id])
     project_manager = relationship("User", foreign_keys=[project_manager_id])
   # CORRECT : une seule définition pointant vers 'project' (qui existe dans Expense)
-    expenses = relationship("Expense", back_populates="project")
+    expenses = relationship("Expense", back_populates="internal_project")
    
     # --- CRITICAL FIX: REMOVED customer_projects relationship ---
     # Since CustomerProject no longer has a foreign key to this table, 
@@ -604,9 +604,12 @@ class Expense(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     rejection_reason = Column(String(500), nullable=True)
+    approved_l1_at = Column(DateTime, nullable=True)
+    approved_l2_at = Column(DateTime, nullable=True)
+
     # Relations
        # C'est elle qui permet de faire "exp.act.act_number"
     act = relationship("ServiceAcceptance") 
-    project = relationship("InternalProject", back_populates="expenses")
+    internal_project = relationship("InternalProject", back_populates="expenses")
     requester = relationship("User", back_populates="expenses")
     
