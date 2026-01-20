@@ -764,32 +764,65 @@ def get_merged_po_data_as_dataframe(
     
     return df
 
+import re
+
 def deduce_category(description: str) -> str:
-    """Deduces the category based on keywords in the item description."""
-    if not isinstance(description, str):
+    """
+    Robustly deduces the category based on keywords in the item description.
+    Priority is given to specific keywords like 'Transportation', 'Survey', etc.
+    """
+    if not isinstance(description, str) or not description.strip():
         return "TBD"
 
-    description_lower = description.lower()
+    desc_lower = description.lower()
 
-    # Using simple 'in' checks for broad matching
-    if "transport" in description_lower:
+    # --- CATEGORY RULES ---
+    # The order matters! Put more specific categories first.
+    
+    # 1. Transportation
+    # Keywords: transportation, transport, km<distance, vehicle, tractor, driver
+    if any(k in desc_lower for k in ["transport", "distance<=", "vehicle", "tractor", "driver", "per time"]):
         return "Transportation"
-    if "survey" in description_lower:
-        return "Survey"
-    if "site engineer" in description_lower or "fsc" in description_lower:
+
+    # 2. Site Engineer / FSC
+    # Keywords: fsc, site engineer, work order, rigger
+    if any(k in desc_lower for k in ["fsc", "site engineer", "work order", "rigger"]):
         return "Site Engineer"
 
-    # If it's none of the specific keywords above, default to "Service"
-    # This covers the vast majority of your examples.
-    # Add more specific checks above this line if needed.
-    if (
-        "service" in description_lower
-        or "install" in description_lower
-        or "zone" in description_lower
-    ):
+    # 3. Survey
+    # Keywords: survey, report(level
+    if any(k in desc_lower for k in ["survey", "tssr", "level a", "level b"]):
+        return "Survey"
+        
+    # 4. Civil Work (New Category recommended based on your data)
+    # Keywords: civil work, foundation, excavation, concrete, painting, wall opening
+    if any(k in desc_lower for k in ["civil work", "foundation", "excavation", "concrete", "paint", "wall opening", "soil"]):
+        return "Civil Work"
+
+    # 5. Hardware / Material (New Category recommended)
+    # Keywords: supply, cable, antenna, rack, battery, cabinet, pvc, rod, connector
+    # But ONLY if it doesn't say "installation" explicitly (which implies service)
+    # This is tricky. Often "Supply and Install" is Service. 
+    # Pure material: "Connector-Item...", "RF coaxial connector"
+    if any(k in desc_lower for k in ["connector", "jumper", "packaging", "box", "screw", "bolt"]):
+        if "install" not in desc_lower:
+             return "Material"
+
+    # 6. Service (Catch-all for installation/swap/expansion)
+    # Keywords: install, swap, expansion, dismantling, commissioning, integration, upgrade, replacement
+    service_keywords = [
+        "service", "install", "swap", "expansion", "dismantling", 
+        "commissioning", "integration", "upgrade", "replacement", 
+        "zone", "configuration", "acceptance", "testing"
+    ]
+    if any(k in desc_lower for k in service_keywords):
         return "Service"
 
-    return "TBD"  # Default if no keywords match
+    # 7. Fallback for specific equipment mentions that usually imply service
+    if any(k in desc_lower for k in ["rru", "bbu", "aau", "bts", "msan", "olt", "wdm", "microwave"]):
+        return "Service"
+
+    return "TBD"
 
 def process_acceptances_by_ids(db: Session, raw_acceptance_ids: List[int]):
     """
@@ -1058,6 +1091,7 @@ def get_filtered_merged_pos(
     internal_project_id: Optional[int] = None,
     customer_project_id: Optional[int] = None,
     site_code: Optional[str] = None,
+    category: Optional[str] = None,
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
     search: Optional[str] = None
@@ -1082,7 +1116,8 @@ def get_filtered_merged_pos(
     
     if site_code:
         query = query.filter(models.MergedPO.site_code == site_code)
-
+    if category:
+        query = query.filter(models.MergedPO.category == category)
     if start_date:
         query = query.filter(sa.func.date(models.MergedPO.publish_date) >= start_date)
 
@@ -1111,6 +1146,11 @@ def get_total_financial_summary(db: Session, user: models.User = None) -> dict:
         func.sum(models.MergedPO.accepted_ac_amount).label("total_accepted_ac"),
         func.sum(models.MergedPO.accepted_pac_amount).label("total_accepted_pac")
     )
+    canceled_query = db.query(
+        func.sum(models.MergedPO.line_amount_hw).label("total_canceled")
+    ).filter(models.MergedPO.internal_control == 0)
+
+
     # --- THIS IS THE FIX ---
     # If a user is provided and their role is PM, filter the data
     if user and user.role in [UserRole.PM]:
@@ -1130,13 +1170,16 @@ def get_total_financial_summary(db: Session, user: models.User = None) -> dict:
     total_po_value = result.total_po_value or 0.0
     total_accepted_ac = result.total_accepted_ac or 0.0
     total_accepted_pac = result.total_accepted_pac or 0.0
+    total_canceled = canceled_query.scalar() or 0.0
 
 
     return {
         "total_po_value": total_po_value,
         "total_accepted_ac": total_accepted_ac,
         "total_accepted_pac": total_accepted_pac,
-        "remaining_gap": remaining_gap
+        "remaining_gap": remaining_gap,
+        "total_canceled": total_canceled 
+
     }
 def get_internal_projects_financial_summary(db: Session, user: models.User = None):
     # 1. Fetch APPROVED data grouped by Internal Project AND Project Manager
@@ -1553,7 +1596,11 @@ def get_export_dataframe(
     
     CustProj = aliased(models.CustomerProject)
     IntProj = aliased(models.InternalProject)
-    
+    remaining_expr = (models.MergedPO.line_amount_hw - (
+        func.coalesce(models.MergedPO.accepted_ac_amount, 0) + 
+        func.coalesce(models.MergedPO.accepted_pac_amount, 0)
+    ))
+
     # --- CORRECTED & COMPLETE SELECT STATEMENT ---
     query = db.query(
         # 1. Start with the required new fields, PO ID first
@@ -1582,10 +1629,10 @@ def get_export_dataframe(
         models.MergedPO.total_pac_amount.label("Total PAC (20%)"),
         models.MergedPO.accepted_pac_amount.label("Accepted PAC Amount"),
         models.MergedPO.date_pac_ok.label("Date PAC OK"),
-        (models.MergedPO.line_amount_hw - (
-            func.coalesce(models.MergedPO.accepted_ac_amount, 0) + 
-            func.coalesce(models.MergedPO.accepted_pac_amount, 0)
-        )).label("Remaining Amount")
+        remaining_expr.label("Remaining Amount"),
+        (remaining_expr * models.MergedPO.internal_control).label("Real Backlog")
+
+
     ).select_from(models.MergedPO)
 
     # --- JOINS ---
@@ -1621,7 +1668,10 @@ def get_export_dataframe(
     if "Remaining Amount" in df.columns:
         df["Remaining Amount"] = df["Remaining Amount"].round(5)
         df.loc[df["Remaining Amount"].abs() < 1, "Remaining Amount"] = 0
-        
+    if "Real Backlog" in df.columns:
+        df["Real Backlog"] = df["Real Backlog"].round(5)
+        df.loc[df["Real Backlog"].abs() < 1, "Real Backlog"] = 0
+       
     return df
 
 
@@ -3691,7 +3741,8 @@ def create_fund_request(db: Session, pd_user: int, items: list):
     new_req = models.FundRequest(
         request_number=req_num,
         requester_id=pd_user,
-        status=models.FundRequestStatus.PENDING_APPROVAL
+        status=models.FundRequestStatus.PENDING_APPROVAL,
+        created_at=datetime.now()
     )
     db.add(new_req)
     db.flush() # Get ID
@@ -3707,6 +3758,8 @@ def create_fund_request(db: Session, pd_user: int, items: list):
         db.add(db_item)
         
     db.commit()
+    db.refresh(new_req) # Refresh to load relationships/IDs
+
     return new_req
 def approve_fund_request(db: Session, req_id: int, admin_id: int, approved_items: dict):
     # approved_items is a dict: { item_id: approved_amount }
@@ -3960,6 +4013,149 @@ def get_request_by_id(db: Session, req_id: int):
         "items": items
     }
 
+
+def get_all_wallets_summary(db: Session):
+    """
+    Returns a list of all PM wallets with their balance and pending incoming amount.
+    Used for Admin/PD detailed view.
+    """
+    # 1. Get all PMs, PDs, and Admins (anyone who might have a wallet)
+    pms = db.query(models.User).filter(
+        models.User.role.in_([models.UserRole.PM, models.UserRole.PD, models.UserRole.ADMIN])
+    ).all()
+    
+    results = []
+    for pm in pms:
+        # A. Get Wallet Balance
+        wallet = db.query(models.Caisse).filter(models.Caisse.user_id == pm.id).first()
+        balance = wallet.balance if wallet else 0.0
+        
+        # B. Get Pending Incoming (Logic similar to get_caisse_stats)
+        # 1. Pending Approval (Use requested_amount)
+        pending_reqs = db.query(func.sum(models.FundRequestItem.requested_amount)).join(models.FundRequest).filter(
+            models.FundRequestItem.target_pm_id == pm.id,
+            models.FundRequest.status == models.FundRequestStatus.PENDING_APPROVAL
+        ).scalar() or 0.0
+        
+        # 2. Approved but not yet Confirmed/Paid (Use approved_amount)
+        # Note: In our new logic, "Approved" means paid, so this might be 0, 
+        # but we keep it for consistency with legacy statuses.
+        waiting_funds = db.query(func.sum(models.FundRequestItem.approved_amount)).join(models.FundRequest).filter(
+            models.FundRequestItem.target_pm_id == pm.id,
+            models.FundRequest.status == models.FundRequestStatus.APPROVED_WAITING_FUNDS
+        ).scalar() or 0.0
+        
+        # 3. Partial Pending (Use remaining requested)
+        # This is tricky. If status is PARTIALLY_PAID, the "Pending" amount is 
+        # (Total Requested for this PM - Amount Paid to this PM).
+        # We need to find requests where this PM is a target and status is PARTIAL.
+        # Simple approximation: Sum of requested - Sum of approved for partial items?
+        # Actually, let's keep it simple: Pending In = Pending Approval + Waiting Funds.
+        # Partial requests are technically "Approved" partially, so the rest is not guaranteed.
+        
+        results.append({
+            "user_id": pm.id,
+            "user_name": f"{pm.first_name} {pm.last_name}",
+            "balance": balance,
+            "pending_in": pending_reqs + waiting_funds
+        })
+        
+    # Sort by balance descending to see who has the most cash
+    return sorted(results, key=lambda x: x['balance'], reverse=True)
+
+
+def process_fund_request(
+    db: Session, 
+    req_id: int, 
+    payload: schemas.FundRequestReviewAction, 
+    admin_id: int
+):
+    req = db.query(models.FundRequest).get(req_id)
+    if not req: raise ValueError("Request not found")
+
+    # 1. HANDLE REJECTION
+    if payload.action == "REJECT":
+        if not payload.comment:
+            raise ValueError("A comment is mandatory when rejecting.")
+        
+        req.status = models.FundRequestStatus.REJECTED
+        req.admin_comment = payload.comment
+        req.approver_id = admin_id
+        req.approved_at = datetime.now()
+        # No money moves on rejection.
+    
+    # 2. HANDLE APPROVAL (Full or Partial)
+    elif payload.action == "APPROVE":
+        if not payload.items:
+             raise ValueError("Approval requires items.")
+
+        # --- FIX: Calculate Total Amount from Items ---
+        amount_giving_now = sum(i.amount_to_pay for i in payload.items)
+        # ---------------------------------------------
+
+        if amount_giving_now <= 0:
+             raise ValueError("Approval requires a positive amount.")
+
+        # A. Update Global Request Tracking
+        current_paid = req.paid_amount or 0.0
+        req.paid_amount = current_paid + amount_giving_now
+        
+        req.approver_id = admin_id
+        req.approved_at = datetime.now()
+        req.admin_comment = payload.comment
+
+        # B. DISTRIBUTE MONEY & SAVE NOTES
+        for item_review in payload.items:
+            # Find the DB item
+            db_item = next((i for i in req.items if i.id == item_review.item_id), None)
+            if not db_item: continue
+
+            # 1. Update Admin Note
+            if item_review.admin_note:
+                db_item.admin_note = item_review.admin_note
+            
+            amount = item_review.amount_to_pay
+            if amount <= 0: continue
+
+            # 2. Update Item Approved Amount
+            db_item.approved_amount = (db_item.approved_amount or 0.0) + amount
+
+            # 3. Credit Specific PM Wallet
+            pm_id = db_item.target_pm_id
+            wallet = db.query(models.Caisse).filter(models.Caisse.user_id == pm_id).first()
+            if not wallet:
+                wallet = models.Caisse(user_id=pm_id, balance=0.0)
+                db.add(wallet)
+                db.flush()
+                
+            wallet.balance += amount
+            
+            # 4. Create Transaction
+            trx = models.Transaction(
+                caisse_id=wallet.id,
+                type=models.TransactionType.CREDIT,
+                amount=amount,
+                description=f"Refill Request #{req.request_number} (Item #{db_item.id})",
+                related_request_id=req.id,
+                created_by_id=admin_id
+            )
+            db.add(trx)
+
+        # C. Determine New Status
+        total_requested = sum(i.requested_amount for i in req.items)
+        remaining = total_requested - req.paid_amount
+        
+        if remaining <= 0.01:
+            req.status = models.FundRequestStatus.COMPLETED
+        else:
+            if payload.close_request:
+                req.status = models.FundRequestStatus.CLOSED_PARTIAL
+            else:
+                req.status = models.FundRequestStatus.PARTIALLY_PAID
+    
+    db.commit()
+    db.refresh(req)
+    return req
 # ==================== EXPENSES CRUD ====================
 
 def create_expense(db: Session, current_user, payload):
@@ -4203,3 +4399,35 @@ def get_expenses_export_dataframe(db: Session):
         })
 
     return pd.DataFrame(data)
+
+def bulk_update_internal_control(db: Session, identifiers: List[str], new_value: int):
+    # Clean input
+    clean_ids = [s.strip() for s in identifiers if s.strip()]
+    if not clean_ids: return 0
+    
+    # Update Query
+    # Matches either PO ID or Site Code
+    query = db.query(models.MergedPO).filter(
+        sa.or_(
+            models.MergedPO.po_id.in_(clean_ids),
+            models.MergedPO.site_code.in_(clean_ids)
+        )
+    )
+    
+    updated_count = query.update(
+        {models.MergedPO.internal_control: new_value},
+        synchronize_session=False
+    )
+    db.commit()
+    return updated_count
+
+def search_pos_for_control(db: Session, identifiers: List[str]):
+    clean_ids = [s.strip() for s in identifiers if s.strip()]
+    if not clean_ids: return []
+    
+    return db.query(models.MergedPO).filter(
+        sa.or_(
+            models.MergedPO.po_id.in_(clean_ids),
+            models.MergedPO.site_code.in_(clean_ids)
+        )
+    ).limit(1000).all()

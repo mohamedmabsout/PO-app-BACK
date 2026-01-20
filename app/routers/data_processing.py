@@ -1,6 +1,5 @@
 # in app/routers/data_processing.py
 from typing import List
-from django import db
 from fastapi.responses import StreamingResponse
 import pandas as pd
 import io
@@ -106,6 +105,7 @@ def get_merged_pos_preview(
     internal_project_id: Optional[int] = Query(None),
     customer_project_id: Optional[int] = Query(None),
     site_code: Optional[str] = Query(None),
+    category: Optional[str] = Query(None),
     start_date: Optional[date] = Query(None, description="Format: YYYY-MM-DD"),
     end_date: Optional[date] = Query(None, description="Format: YYYY-MM-DD"),
     search: Optional[str] = Query(None),
@@ -122,6 +122,7 @@ def get_merged_pos_preview(
         internal_project_id=internal_project_id,
         customer_project_id=customer_project_id,
         site_code=site_code,
+        category=category,
         start_date=start_date,
         end_date=end_date,
         search=search,
@@ -150,6 +151,7 @@ def export_merged_pos_report(
     internal_project_id: Optional[int] = Query(None),
     customer_project_id: Optional[int] = Query(None),
     site_code: Optional[str] = Query(None),
+    category: Optional[str] = Query(None),
     start_date: Optional[date] = Query(None, description="Format: YYYY-MM-DD"),
     end_date: Optional[date] = Query(None, description="Format: YYYY-MM-DD"),
     search: Optional[str] = Query(None),
@@ -164,6 +166,7 @@ def export_merged_pos_report(
             internal_project_id=internal_project_id,
             customer_project_id=customer_project_id,
             site_code=site_code,
+            category=category,
             start_date=start_date,
             end_date=end_date,
             search=search,
@@ -199,6 +202,7 @@ def export_merged_pos_report(
             "Accepted PAC Amount",
             "Date PAC OK",
             "Remaining Amount",
+            "Real Backlog"
         ]
 
         # Reorder the dataframe to match the desired output
@@ -238,10 +242,11 @@ def export_merged_pos_report(
             fmt_header_ac = workbook.add_format({**header_base, "fg_color": "#93c47d"})
             fmt_header_pac = workbook.add_format({**header_base, "fg_color": "#6d9eeb"})
             fmt_header_red = workbook.add_format({**header_base, "fg_color": "#e06666"})
+            fmt_header_violet = workbook.add_format({**header_base, "fg_color": "#c76e9b"})
             fmt_bg_ac = workbook.add_format({"bg_color": "#D9EAD3"})
             fmt_bg_pac = workbook.add_format({"bg_color": "#CFE2F3"})
             fmt_bg_red = workbook.add_format({"bg_color": "#F4CCCC"})
-
+            fmt_bg_violet = workbook.add_format({"bg_color": "#E0ADF0"})
             headers = export_df.columns.tolist()
 
             # --- APPLY COLUMN WIDTHS AND FORMATTING ---
@@ -256,6 +261,9 @@ def export_merged_pos_report(
                     worksheet.set_column(col_idx, col_idx, col_width, fmt_bg_pac)
                 elif "Remaining Amount" in col_name:
                     worksheet.set_column(col_idx, col_idx, col_width, fmt_bg_red)
+                elif "Real Backlog" in col_name:
+                    # Maybe color it differently? Or same as Remaining?
+                    worksheet.set_column(col_idx, col_idx, col_width, fmt_bg_violet)
                 else:
                     worksheet.set_column(col_idx, col_idx, col_width)
 
@@ -267,6 +275,8 @@ def export_merged_pos_report(
                     style = fmt_header_pac
                 elif "Remaining Amount" in col_name:
                     style = fmt_header_red
+                elif "Real Backlog" in col_name:
+                    style = fmt_header_violet   
                 else:
                     style = fmt_header_std
 

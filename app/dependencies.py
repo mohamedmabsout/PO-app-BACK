@@ -57,6 +57,6 @@ class RoleChecker:
         return user
 
 # Pre-defined dependencies to use in Routers
-require_admin = RoleChecker(["Admin"])
+require_admin = RoleChecker(["ADMIN"])
 require_management = RoleChecker(["Admin", "Project Manager", "Project Director"])
 

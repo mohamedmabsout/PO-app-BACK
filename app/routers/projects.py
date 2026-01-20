@@ -355,3 +355,19 @@ def review_assignments(
 ):
     count = crud.process_assignment_review(db, payload.merged_po_ids, payload.action, current_user)
     return {"message": f"Successfully processed {count} sites."}
+@router.post("/internal-control/search")
+def search_internal_control(
+    payload: schemas.InternalControlUpdate, # reusing schema for list input
+    db: Session = Depends(get_db)
+):
+    results = crud.search_pos_for_control(db, payload.identifiers)
+    return results # Pydantic will serialize MergedPO list
+
+@router.post("/internal-control/update")
+def update_internal_control(
+    payload: schemas.InternalControlUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_admin) # Protect this!
+):
+    count = crud.bulk_update_internal_control(db, payload.identifiers, payload.set_to_value)
+    return {"message": f"Updated {count} records successfully."}
