@@ -419,7 +419,7 @@ class SBCResponse(BaseModel):
     activity_sector: Optional[str] = None
     phone_number: Optional[str] = None
     address: Optional[str] = None
-    created_at: datetime
+    created_at: Optional[datetime] = None 
     created_by: Optional[UserInfo] = None
     has_contract_attachment: bool
     contract_upload_date: Optional[datetime] = None
@@ -767,3 +767,11 @@ class InternalControlUpdate(BaseModel):
 
     class ConfirmPaymentRequest(BaseModel):
      attachment: str
+
+     class WalletSummary(BaseModel):
+         user_id: int
+    user_name: str
+    balance: float
+
+    class Config:
+        from_attributes = True

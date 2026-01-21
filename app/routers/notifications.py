@@ -23,7 +23,7 @@ def get_dashboard_notifications(
     all_notifs = db.query(models.Notification).filter(
         models.Notification.recipient_id == current_user.id,
         models.Notification.is_read == False
-    ).order_by(models.Notification.created_at.desc()).limit(20).all()
+    ).order_by(models.Notification.created_at.desc()).limit(50).all()
 
     todos = []
     alerts = []
