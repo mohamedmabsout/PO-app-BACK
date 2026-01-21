@@ -34,7 +34,7 @@ def get_dashboard_notifications(
             "title": n.title,
             "desc": n.message,
             "link": n.link,
-            "time": n.created_at.strftime('%d/%m/%Y'), # Frontend will format "10 mins ago"
+            "time": n.created_at.isoformat(), # Frontend will format "10 mins ago"
             # Map types to UI styling
             "priority": "High" if n.type == "TODO" else "Info",
             "badgeBg": "danger" if n.type == "TODO" else "info",
