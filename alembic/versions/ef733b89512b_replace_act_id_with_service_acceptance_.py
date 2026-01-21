@@ -48,7 +48,7 @@ def upgrade() -> None:
                existing_type=mysql.DATETIME(),
                nullable=True,
                existing_server_default=sa.text('CURRENT_TIMESTAMP'))
-    op.drop_constraint(op.f('fk_expenses_act'), 'expenses', type_='foreignkey')
+    # op.drop_constraint(op.f('fk_expenses_act'), 'expenses', type_='foreignkey')
     op.create_foreign_key(None, 'expenses', 'service_acceptances', ['service_acceptance_id'], ['id'])
     op.drop_column('expenses', 'approved_l2_by')
     op.drop_column('expenses', 'act_id')
