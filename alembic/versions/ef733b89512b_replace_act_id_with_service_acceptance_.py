@@ -96,5 +96,5 @@ def downgrade() -> None:
     op.alter_column('expenses', 'project_id',
                existing_type=mysql.INTEGER(display_width=11),
                nullable=False)
-    op.drop_column('expenses', 'service_acceptance_id')
+    # op.drop_column('expenses', 'service_acceptance_id')
     # ### end Alembic commands ###
