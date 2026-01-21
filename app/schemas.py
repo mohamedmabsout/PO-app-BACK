@@ -738,6 +738,8 @@ class ExpenseOut(BaseModel):
     remark: Optional[str]
     status: str
     internal_project: Optional[ProjectSimple] = None 
+    requester: Optional[UserBase] = None
+    rejection_reason: Optional[str] = None
     # CHANGEZ CES DEUX LIGNES :
     created_at: datetime  # <--- Mettre datetime au lieu de str
     updated_at: datetime  # <--- Mettre datetime au lieu de str

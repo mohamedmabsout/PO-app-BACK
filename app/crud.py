@@ -4434,7 +4434,7 @@ def search_pos_for_control(db: Session, identifiers: List[str]):
 def list_pending_payment(db: Session):
     """Liste les dépenses validées L2 et prêtes pour le paiement final"""
     return db.query(models.Expense).options(
-        joinedload(models.Expense.project),
+        joinedload(models.Expense.internal_project),
         joinedload(models.Expense.requester)
     ).filter(models.Expense.status == "PENDING_L2").all()
 
@@ -4445,7 +4445,8 @@ def confirm_expense_payment(db: Session, expense_id: int, attachment_name: str):
         return None
     
     # 1. Récupérer la caisse du demandeur (le PM) pour déduire l'argent
-    caisse = db.query(models.Caisse).filter(models.Caisse.user_id == expense.reuester_id).first()
+  
+    caisse = db.query(models.Caisse).filter(models.Caisse.user_id == expense.requester_id).first()
     
     if not caisse or caisse.balance < expense.amount:
         raise ValueError("Solde de caisse insuffisant pour effectuer ce paiement.")
