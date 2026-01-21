@@ -51,7 +51,7 @@ def upgrade() -> None:
     # op.drop_constraint(op.f('fk_expenses_act'), 'expenses', type_='foreignkey')
     op.create_foreign_key(None, 'expenses', 'service_acceptances', ['service_acceptance_id'], ['id'])
     # op.drop_column('expenses', 'approved_l2_by')
-    op.drop_column('expenses', 'act_id')
+    # op.drop_column('expenses', 'act_id')
     # op.drop_column('expenses', 'approved_l2_at')
     # op.drop_column('expenses', 'rejection_reason')
     # op.drop_column('expenses', 'approved_l1_by')
