@@ -4178,7 +4178,7 @@ def create_expense(db: Session, current_user, payload):
     return expense
 def list_my_requests(db: Session, current_user: models.User):
     query = db.query(models.Expense).options(
-        joinedload(models.Expense.project),
+        joinedload(models.Expense.internal_project),
         joinedload(models.Expense.requester)
     )
     
@@ -4240,12 +4240,13 @@ def approve_expense_l1(db: Session, expense_id: int, approver_id: int):
     
     expense.status = "PENDING_L2"
     # Utilisation correcte avec l'import de datetime
-    expense.approved_l1_at = datetime.now(dt_timezone.utc)
+    expense.approved_l1_at = datetime.utcnow()  # ✅ Date L1
     expense.approved_l1_by = approver_id
     
     db.commit()
     db.refresh(expense)
     return expense
+
 
 
 def approve_l2(db: Session, expense_id: int, current_user: models.User):
@@ -4257,18 +4258,18 @@ def approve_l2(db: Session, expense_id: int, current_user: models.User):
     if expense.status != "PENDING_L2":
         raise ValueError("Cette dépense n'est pas en attente de paiement")
     
-    # Vérifier et débiter la caisse
+    # ✅ CORRECTION ICI : Utilisez requester_id au lieu de creator_id
     caisse = db.query(models.Caisse).filter(
-        models.Caisse.user_id == expense.creator_id
+        models.Caisse.user_id == expense.requester_id 
     ).first()
     
     if not caisse or caisse.balance < expense.amount:
         raise ValueError("Insufficient balance in caisse")
     
-    # Débiter
+    # Débiter la caisse
     caisse.balance -= expense.amount
     
-    # Créer une transaction
+    # Créer une transaction de débit
     transaction = models.Transaction(
         caisse_id=caisse.id,
         type=models.TransactionType.DEBIT,
@@ -4278,10 +4279,11 @@ def approve_l2(db: Session, expense_id: int, current_user: models.User):
     )
     db.add(transaction)
     
-    # Marquer comme payé
+    # Mettre à jour le statut de la dépense
     expense.status = "PAID"
+    # Assurez-vous d'utiliser la bonne date
+    expense.approved_l2_at = datetime.utcnow()  # ✅ Date L2
     expense.approved_l2_by = current_user.id
-    expense.approved_l2_at = datetime.now(timezone.utc)
     
     db.commit()
     db.refresh(expense)
@@ -4375,7 +4377,7 @@ def deduct_from_caisse(db: Session, user_id: int, amount: float, description: st
 def get_expenses_export_dataframe(db: Session):
     # Requête avec toutes les jointures nécessaires
     query = db.query(models.Expense).options(
-        joinedload(models.Expense.project),
+        joinedload(models.Expense.internal_project),
         joinedload(models.Expense.requester),
         joinedload(models.Expense.act)
     ).all()
@@ -4385,7 +4387,7 @@ def get_expenses_export_dataframe(db: Session):
         data.append({
             "ID Dépense": exp.id,
             "Date Création": exp.created_at.strftime("%d/%m/%Y") if exp.created_at else "",
-            "Projet": exp.project.name if exp.project else "N/A",
+          "Projet": exp.internal_project.name if exp.internal_project else "N/A",
             "Demandeur (PM)": f"{exp.requester.first_name} {exp.requester.last_name}" if exp.requester else "N/A",
             "Type": exp.exp_type,
             "Bénéficiaire": exp.beneficiary,
@@ -4429,3 +4431,34 @@ def search_pos_for_control(db: Session, identifiers: List[str]):
             models.MergedPO.site_code.in_(clean_ids)
         )
     ).limit(1000).all()
+def list_pending_payment(db: Session):
+    """Liste les dépenses validées L2 et prêtes pour le paiement final"""
+    return db.query(models.Expense).options(
+        joinedload(models.Expense.project),
+        joinedload(models.Expense.requester)
+    ).filter(models.Expense.status == "PENDING_L2").all()
+
+def confirm_expense_payment(db: Session, expense_id: int, attachment_name: str):
+    """Finalise le paiement, enregistre le reçu et débite le solde de la caisse"""
+    expense = db.query(models.Expense).get(expense_id)
+    if not expense:
+        return None
+    
+    # 1. Récupérer la caisse du demandeur (le PM) pour déduire l'argent
+    caisse = db.query(models.Caisse).filter(models.Caisse.user_id == expense.reuester_id).first()
+    
+    if not caisse or caisse.balance < expense.amount:
+        raise ValueError("Solde de caisse insuffisant pour effectuer ce paiement.")
+    
+    # 1. Débiter la caisse
+    caisse.balance -= expense.amount
+    
+    # 2. Mettre à jour la dépense
+    expense.status = "PAID"
+    expense.attachment = attachment_name
+    expense.updated_at = datetime.now()
+    
+    db.commit()
+    db.refresh(expense)
+    return expense
+
