@@ -52,11 +52,11 @@ def upgrade() -> None:
     op.create_foreign_key(None, 'expenses', 'service_acceptances', ['service_acceptance_id'], ['id'])
     # op.drop_column('expenses', 'approved_l2_by')
     op.drop_column('expenses', 'act_id')
-    op.drop_column('expenses', 'approved_l2_at')
-    op.drop_column('expenses', 'rejection_reason')
-    op.drop_column('expenses', 'approved_l1_by')
-    op.drop_column('expenses', 'approved_l1_at')
-    # ### end Alembic commands ###
+    # op.drop_column('expenses', 'approved_l2_at')
+    # op.drop_column('expenses', 'rejection_reason')
+    # op.drop_column('expenses', 'approved_l1_by')
+    # op.drop_column('expenses', 'approved_l1_at')
+    # # ### end Alembic commands ###
 
 
 def downgrade() -> None:
