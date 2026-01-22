@@ -2628,11 +2628,23 @@ def submit_bc(db: Session, bc_id: int):
     db.commit()
     return bc
 
+
 def approve_bc_l1(db: Session, bc_id: int, approver_id: int):
+    # 1. Fetch the Approver User to check permissions
+    approver = db.query(models.User).get(approver_id)
+    if not approver:
+        raise ValueError("Approver user not found.")
+        
+    # --- SECURITY CHECK: Must be PD or Admin ---
+    # (Admins usually have super-powers, so including them is safe, but strict PD is fine too)
+    if approver.role not in [models.UserRole.PD, models.UserRole.ADMIN]:
+        raise ValueError("Permission Denied: Only a Project Director (PD) can perform L1 validation.")
+    # -------------------------------------------
+
     bc = db.query(models.BonDeCommande).get(bc_id)
-    # Check if it is SUBMITTED (instead of DRAFT)
+    # Check if it is SUBMITTED
     if not bc or bc.status != models.BCStatus.SUBMITTED:
-        raise ValueError("BC must be SUBMITTED before L1 Approval.")
+        raise ValueError("BC must be in SUBMITTED status for L1 Validation.")
     
     bc.status = models.BCStatus.PENDING_L2
     bc.approver_l1_id = approver_id
@@ -2640,6 +2652,27 @@ def approve_bc_l1(db: Session, bc_id: int, approver_id: int):
     db.commit()
     return bc
 
+
+def approve_bc_l2(db: Session, bc_id: int, approver_id: int):
+    # 1. Fetch the Approver User
+    approver = db.query(models.User).get(approver_id)
+    if not approver:
+        raise ValueError("Approver user not found.")
+
+    # --- SECURITY CHECK: Must be Admin ---
+    if approver.role != models.UserRole.ADMIN:
+        raise ValueError("Permission Denied: Only an Administrator can perform Final Approval (L2).")
+    # -------------------------------------
+
+    bc = db.query(models.BonDeCommande).get(bc_id)
+    if not bc or bc.status != models.BCStatus.PENDING_L2:
+        raise ValueError("BC must be in PENDING_L2 status for Final Approval.")
+    
+    bc.status = models.BCStatus.APPROVED # Final
+    bc.approver_l2_id = approver_id
+    bc.approved_l2_at = datetime.now()
+    db.commit()
+    return bc
 def get_bcs_by_status(db: Session, status: models.BCStatus, search_term: Optional[str] = None):
     query = db.query(models.BonDeCommande).filter(models.BonDeCommande.status == status)
 
@@ -2691,17 +2724,6 @@ def get_all_bcs(db: Session, current_user: models.User, search: Optional[str] = 
     return query.order_by(models.BonDeCommande.created_at.desc()).all()
 
 
-
-def approve_bc_l2(db: Session, bc_id: int, approver_id: int):
-    bc = db.query(models.BonDeCommande).get(bc_id)
-    if not bc or bc.status != models.BCStatus.PENDING_L2:
-        raise ValueError("BC not found or not ready for L2 approval")
-    
-    bc.status = models.BCStatus.APPROVED # Final
-    bc.approver_l2_id = approver_id
-    bc.approved_l2_at = datetime.now()
-    db.commit()
-    return bc
 def reject_bc(db: Session, bc_id: int, reason: str, rejector_id: int):
     bc = db.query(models.BonDeCommande).get(bc_id)
     if not bc or bc.status not in [models.BCStatus.SUBMITTED, models.BCStatus.PENDING_L2]:
