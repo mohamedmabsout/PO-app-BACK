@@ -4314,7 +4314,7 @@ def approve_l2(db: Session, expense_id: int, current_user: models.User):
     if not expense:
         return None
     
-    if expense.status != "PENDING_L1":
+    if expense.status != "PENDING_L2":
         raise ValueError("Cette dépense n'est pas en attente de paiement")
     
     # ✅ CORRECTION ICI : Utilisez requester_id au lieu de creator_id
