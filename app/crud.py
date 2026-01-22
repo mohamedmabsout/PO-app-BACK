@@ -4402,8 +4402,9 @@ def get_payable_acts(db: Session, project_id: int):
     acts = db.query(models.ServiceAcceptance).join(
         models.BonDeCommande
     ).filter(
+        
         models.BonDeCommande.project_id == project_id,
-        models.BonDeCommande.status == models.BCStatus.APPROVED_L2
+        models.BonDeCommande.status == models.BCStatus.APPROVED,
     ).all()
     
     result = []
