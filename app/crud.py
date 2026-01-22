@@ -4314,7 +4314,7 @@ def approve_l2(db: Session, expense_id: int, current_user: models.User):
     if not expense:
         return None
     
-    if expense.status != "PENDING_L2":
+    if expense.status != "PENDING_L1":
         raise ValueError("Cette dépense n'est pas en attente de paiement")
     
     # ✅ CORRECTION ICI : Utilisez requester_id au lieu de creator_id
@@ -4339,7 +4339,7 @@ def approve_l2(db: Session, expense_id: int, current_user: models.User):
     db.add(transaction)
     
     # Mettre à jour le statut de la dépense
-    expense.status = "PAID"
+    expense.status = "PENDING_PAYMENT"
     expense.approved_l2_at = datetime.utcnow() 
     expense.approved_l2_by = current_user.id
     
@@ -4511,7 +4511,7 @@ def list_pending_payment(db: Session):
     return db.query(models.Expense).options(
         joinedload(models.Expense.internal_project),
         joinedload(models.Expense.requester)
-    ).filter(models.Expense.status == "PENDING_L2").all()
+    ).filter(models.Expense.status == "PENDING_PAYMENT").all()
 
 def confirm_expense_payment(db: Session, expense_id: int, attachment_name: str):
     """Finalise le paiement, enregistre le reçu et débite le solde de la caisse"""
