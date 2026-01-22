@@ -2367,7 +2367,7 @@ def create_bon_de_commande(db: Session, bc_data: schemas.BCCreate, creator_id: i
         sbc_id=bc_data.sbc_id,
         status=models.BCStatus.DRAFT,
         bc_type=bc_type_to_set, # Set the BC type automatically
-
+        craeted_at=bc_data.created_at or datetime.now(),
         creator_id=creator_id,
         year=datetime.now().year
     )
