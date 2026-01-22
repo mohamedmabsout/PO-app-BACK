@@ -4251,6 +4251,30 @@ def submit_expense(db: Session, expense_id: int):
     
     expense.status = "PENDING_L1"
     db.commit()
+    pds = db.query(models.User).filter(
+        or_(
+            models.User.role.ilike("PD"),
+            models.User.role.ilike("PROJECT DIRECTOR"),
+            models.User.role.ilike("PROJECTDIRECTOR"),
+            models.User.role.ilike("%DIRECTOR%") # Cherche n'importe quoi contenant DIRECTOR
+        )
+    ).all()
+
+    # DEBUG : Regardez votre terminal VS Code pour voir ce chiffre
+    print(f"DEBUG NOTIF : Nombre de PD trouvés en base : {len(pds)}")
+
+    for pd in pds:
+        print(f"DEBUG NOTIF : Envoi à {pd.username} (ID: {pd.id})")
+        create_notification(
+            db,
+            recipient_id=pd.id,
+            type=models.NotificationType.TODO,
+            title="Validation L1 Requise (Petty Cash)",
+            message=f"Le PM {expense.requester.first_name} a soumis {expense.amount} MAD pour le projet {expense.internal_project.name}.",
+            link="/expenses?tab=l1"
+        )
+    
+    db.commit() # Très important pour enregistrer les notifs
     db.refresh(expense)
     return expense
 
@@ -4265,6 +4289,16 @@ def approve_expense_l1(db: Session, expense_id: int, approver_id: int):
     expense.approved_l1_at = datetime.utcnow()  # ✅ Date L1
     expense.approved_l1_by = approver_id
     
+    db.commit()
+    admins = db.query(models.User).filter(models.User.role.ilike("ADMIN")).all()
+    for admin in admins:
+        create_notification(
+            db, recipient_id=admin.id, type=models.NotificationType.TODO,
+            title="Paiement Requis (L2)",
+            message=f"La dépense #{expense.id} de {expense.amount} MAD a été validée par le PD. Merci de procéder au paiement.",
+            link="/expenses?tab=l2"
+        )
+        
     db.commit()
     db.refresh(expense)
     return expense
@@ -4303,9 +4337,16 @@ def approve_l2(db: Session, expense_id: int, current_user: models.User):
     
     # Mettre à jour le statut de la dépense
     expense.status = "PAID"
-    # Assurez-vous d'utiliser la bonne date
-    expense.approved_l2_at = datetime.utcnow()  # ✅ Date L2
+    expense.approved_l2_at = datetime.utcnow() 
     expense.approved_l2_by = current_user.id
+    
+    db.commit()
+    create_notification(
+        db, recipient_id=expense.requester_id, type=models.NotificationType.APP,
+        title="Dépense Payée ✅",
+        message=f"Votre demande de {expense.amount} MAD a été payée. Votre solde caisse a été mis à jour.",
+        link="/expenses"
+    )
     
     db.commit()
     db.refresh(expense)
@@ -4322,6 +4363,14 @@ def reject_expense(db: Session, expense_id: int, current_user: models.User, reas
     expense.rejected_by = current_user.id
     expense.approved_l1_at = datetime.now
     expense.rejection_reason = reason
+    
+    db.commit()
+    create_notification(
+        db, recipient_id=expense.requester_id, type=models.NotificationType.ALERT,
+        title="Demande Rejetée ❌",
+        message=f"Votre demande de {expense.amount} MAD a été rejetée. Motif: {reason}",
+        link="/expenses"
+    )
     
     db.commit()
     db.refresh(expense)
@@ -4481,6 +4530,15 @@ def confirm_expense_payment(db: Session, expense_id: int, attachment_name: str):
     expense.attachment = attachment_name
     expense.updated_at = datetime.now()
     
+    db.commit()
+    create_notification(
+        db,
+        recipient_id=expense.requester_id,
+        type=models.NotificationType.APP,
+        title="Dépense Payée ✅",
+        message=f"Votre demande de {expense.amount} MAD a été payée. Votre solde caisse a été débité.",
+        link="/expenses"
+    )
     db.commit()
     db.refresh(expense)
     return expense

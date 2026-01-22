@@ -227,3 +227,11 @@ def confirm_payment(
         return crud.confirm_expense_payment(db, id, attachment)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    
+@router.get("/wallets-summary", response_model=None) # ✅ Ajoutez response_model=None
+def get_wallets_summary(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    # Votre logique de récupération des caisses...
+    return crud.get_all_wallets_summary(db)
