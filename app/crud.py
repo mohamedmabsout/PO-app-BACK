@@ -1589,6 +1589,7 @@ def get_export_dataframe(
     internal_project_id: Optional[int] = None,
     customer_project_id: Optional[int] = None,
     site_code: Optional[str] = None,
+    category: Optional[str] = None,
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
     search: Optional[str] = None
@@ -1649,6 +1650,8 @@ def get_export_dataframe(
         query = query.filter(CustProj.id == customer_project_id)
     if site_code:
         query = query.filter(models.MergedPO.site_code == site_code)
+    if category:
+        query= query.filter(models.MergedPO.category == category)
     if start_date:
         query = query.filter(sa.func.date(models.MergedPO.publish_date) >= start_date)
     if end_date:
