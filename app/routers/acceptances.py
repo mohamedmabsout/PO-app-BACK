@@ -375,3 +375,26 @@ def export_act_details(
     filename = f"ACT_Details_{act.act_number}.xlsx"
     headers = {'Content-Disposition': f'attachment; filename="{filename}"'}
     return StreamingResponse(output, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', headers=headers)
+
+@router.get("/payable-acts", response_model=List[ServiceAcceptance]) # <--- Vérifiez cette ligne
+def get_payable_acts_for_expenses(
+    project_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """
+    Récupère les ACT approuvés d'un projet qui ne sont pas encore liés à une dépense.
+    """
+    # 1. On récupère les IDs des ACT déjà "utilisés" pour ne pas payer deux fois
+    used_act_ids = db.query(models.Expense.act_id).filter(
+        models.Expense.act_id.isnot(None),
+        models.Expense.status != "REJECTED"
+    )
+
+    # 2. On filtre les ACT par projet et on exclut les "utilisés"
+    return db.query(models.ServiceAcceptance).join(
+        models.BonDeCommande
+    ).filter(
+        models.BonDeCommande.project_id == project_id,
+        ~models.ServiceAcceptance.id.in_(used_act_ids)
+    ).all()

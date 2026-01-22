@@ -235,3 +235,18 @@ def get_wallets_summary(
 ):
     # Votre logique de récupération des caisses...
     return crud.get_all_wallets_summary(db)
+
+@router.post("/{id}/confirm-reception")
+def confirm_reception(
+    id: int, 
+    db: Session = Depends(get_db), 
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    # Sécurité : Seul le SBC bénéficiaire peut confirmer
+    expense = db.query(models.Expense).get(id)
+    if not expense:
+        raise HTTPException(status_code=404, detail="Dépense non trouvée")
+        
+    expense.status = "RECEIVED" # Nouveau statut final
+    db.commit()
+    return expense
