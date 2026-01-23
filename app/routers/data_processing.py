@@ -23,7 +23,8 @@ from fastapi.responses import StreamingResponse  # <-- Import this
 from fastapi import BackgroundTasks # Import this
 import shutil
 import os
-from ..utils import pdf_generator
+from ..utils import pdf_generator , email
+
 import traceback
 
 router = APIRouter(prefix="/api/data", tags=["data_processing"])
