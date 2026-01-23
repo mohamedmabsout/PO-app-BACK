@@ -1,7 +1,9 @@
 # In utils/email.py or similar
 
 from fastapi_mail import MessageSchema, MessageType
-from ..config import conf , FastMail
+from ..config import conf 
+from fastapi_mail import FastMail, MessageSchema, MessageType
+
 
 async def send_bc_status_email(bc, recipient_email, status, background_tasks):
     if not recipient_email: return
