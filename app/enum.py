@@ -41,7 +41,7 @@ class NotificationType(str, enum.Enum):
     TODO = "TODO"       # Action Required (e.g., Approve BC)
     APP = "APP"         # Status Update (e.g., Your BC was approved)
     SYSTEM = "SYSTEM"  
-
+    ALERT = "ALERT" 
 class AssignmentStatus(str, enum.Enum):
     APPROVED = "APPROVED" # Normal state
     PENDING_APPROVAL = "PENDING_APPROVAL" # Waiting for PM

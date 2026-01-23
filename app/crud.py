@@ -4184,57 +4184,53 @@ def process_fund_request(
 # ==================== EXPENSES CRUD ====================
 
 def create_expense(db: Session, current_user, payload):
+    """Crée une dépense en statut DRAFT"""
     expense = models.Expense(
         project_id=payload.project_id,
-        exp_type=payload.exp_type,  # Changez expense_type en exp_type
+        exp_type=payload.exp_type,
         beneficiary=payload.beneficiary,
         amount=payload.amount,
         remark=payload.remark,
         attachment=payload.attachment,
-         act_id=payload.act_id,# Maintenant que c'est dans le schéma, utilisez directement
+        act_id=payload.act_id,
         requester_id=current_user.id,
-        status='PENDING_L1',
+        status='DRAFT',  # ✅ CHANGÉ : Créer en DRAFT au lieu de PENDING_L1
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow()
     )
     db.add(expense)
     db.commit()
     db.refresh(expense)
+    
+    print(f"✅ Dépense créée - ID: {expense.id}, Status: {expense.status}")
+    
     return expense
 # In crud.py
 
 def list_my_requests(db: Session, current_user: models.User):
-    # 1. Base Query
+    """
+    Règle de visibilité :
+    - Un PM ne voit que ses propres dépenses (Draft ou autres).
+    - Un PD ou Admin voit TOUTES les dépenses SAUF les brouillons des autres.
+    """
     query = db.query(models.Expense).options(
         joinedload(models.Expense.internal_project),
-        joinedload(models.Expense.requester),
-        # Ensure we load the relationships needed for SBC logic if applicable
-        joinedload(models.Expense.act).joinedload(models.ServiceAcceptance.bc)
+        joinedload(models.Expense.requester)
     )
     
     role_str = str(current_user.role).upper()
-    print("user role(UPPER):", role_str)
-    # 2. Logic for SBC (Personne Physique)
-    if current_user.role in [UserRole.SBC]:
-        if not current_user.sbc_id:
-            print("account not related to any sbc")
-            return [] # SBC User not linked to SBC Profile
-        print("Filtering expenses for SBC ID:", current_user.sbc_id)
-        # Filter expenses linked to this SBC's BCs via Acceptances
-        query = query.join(models.ServiceAcceptance, models.Expense.act_id == models.ServiceAcceptance.id)\
-                    .join(models.BonDeCommande, models.ServiceAcceptance.bc_id == models.BonDeCommande.id)\
-                    .filter(models.BonDeCommande.sbc_id == current_user.sbc_id)
-        
-    # 3. Logic for PM (Requester) - existing logic
-    elif "ADMIN" not in role_str and "PD" not in role_str and "CEO" not in role_str:
+    
+    if "ADMIN" in role_str or "PD" in role_str or "PROJECT DIRECTOR" in role_str:
+        # ✅ Le PD et l'Admin voient tout, mais on EXCLUT les brouillons (DRAFT)
+        # car un brouillon n'appartient qu'à celui qui l'écrit.
+        # Ils voient tout à partir de PENDING_L1, PENDING_L2, PAID, etc.
+        query = query.filter(models.Expense.status != "DRAFT")
+    else:
+        # ✅ Le PM ne voit que ce qu'il a créé (Brouillons inclus)
         query = query.filter(models.Expense.requester_id == current_user.id)
-        
-    # 4. Logic for Admin/PD - They see everything (no filter needed)
     
-    # Add explicit ordering
-    result = query.order_by(models.Expense.created_at.desc()).all()
-    
-    return result
+    return query.order_by(models.Expense.created_at.desc()).all()
+
 def list_pending_l1(db: Session):
     """Liste toutes les dépenses en attente de validation L1 (PD)"""
     return db.query(models.Expense).filter(
@@ -4249,39 +4245,47 @@ def list_pending_l2(db: Session):
     ).order_by(models.Expense.created_at.desc()).all()
 
 
+
 def submit_expense(db: Session, expense_id: int):
     """Soumet une dépense pour validation L1"""
     expense = db.query(models.Expense).filter(models.Expense.id == expense_id).first()
+    
     if not expense:
         raise ValueError("Dépense introuvable")
     
-    if expense.status != "DRAFT":
-        raise ValueError("Seules les dépenses en brouillon peuvent être soumises")
+    print(f"🔍 Submit - ID: {expense_id}, Status actuel: {expense.status}")
     
-    # Vérifier le solde de la caisse
+    if expense.status != "DRAFT":
+        raise ValueError(f"Seules les dépenses en brouillon peuvent être soumises. Status actuel: {expense.status}")
+    
+    # ✅ CORRECTION : Utiliser requester_id au lieu de creator_id
     caisse = db.query(models.Caisse).filter(
-        models.Caisse.user_id == expense.creator_id
+        models.Caisse.user_id == expense.requester_id  # ✅ Changé de creator_id à requester_id
     ).first()
     
     if not caisse or caisse.balance < expense.amount:
         raise ValueError("Solde caisse insuffisant")
     
+    # Changer le statut
     expense.status = "PENDING_L1"
+    expense.submitted_at = datetime.utcnow()  # ✅ Ajoutez cette ligne si vous avez ce champ
+    
     db.commit()
+    
+    # Notifications aux PD
     pds = db.query(models.User).filter(
         or_(
             models.User.role.ilike("PD"),
             models.User.role.ilike("PROJECT DIRECTOR"),
             models.User.role.ilike("PROJECTDIRECTOR"),
-            models.User.role.ilike("%DIRECTOR%") # Cherche n'importe quoi contenant DIRECTOR
+            models.User.role.ilike("%DIRECTOR%")
         )
     ).all()
 
-    # DEBUG : Regardez votre terminal VS Code pour voir ce chiffre
-    print(f"DEBUG NOTIF : Nombre de PD trouvés en base : {len(pds)}")
+    print(f"📧 Envoi de notifications à {len(pds)} PD(s)")
 
     for pd in pds:
-        print(f"DEBUG NOTIF : Envoi à {pd.username} (ID: {pd.id})")
+        print(f"  → {pd.username} (ID: {pd.id})")
         create_notification(
             db,
             recipient_id=pd.id,
@@ -4291,9 +4295,13 @@ def submit_expense(db: Session, expense_id: int):
             link="/expenses?tab=l1"
         )
     
-    db.commit() # Très important pour enregistrer les notifs
+    db.commit()
     db.refresh(expense)
+    
+    print(f"✅ Dépense soumise - ID: {expense_id}, Nouveau status: {expense.status}")
+    
     return expense
+
 
 
 def approve_expense_l1(db: Session, expense_id: int, approver_id: int):
@@ -4383,7 +4391,7 @@ def reject_expense(db: Session, expense_id: int, current_user: models.User, reas
     
     db.commit()
     create_notification(
-        db, recipient_id=expense.requester_id, type=models.NotificationType.ALERT,
+        db, recipient_id=expense.requester_id, type=models.NotificationType.SYSTEM,
         title="Demande Rejetée ❌",
         message=f"Votre demande de {expense.amount} MAD a été rejetée. Motif: {reason}",
         link="/expenses"
@@ -4561,3 +4569,29 @@ def confirm_expense_payment(db: Session, expense_id: int, attachment_name: str):
     db.refresh(expense)
     return expense
 
+# app/crud.py
+
+def update_expense(db: Session, expense_id: int, payload: schemas.ExpenseCreate, user_id: int):
+    # 1. Chercher la dépense existante
+    db_expense = db.query(models.Expense).filter(models.Expense.id == expense_id).first()
+    
+    if not db_expense:
+        return None
+
+    # 2. Sécurité : vérifier que seul le propriétaire (ou admin) peut modifier un brouillon
+    if db_expense.requester_id != user_id:
+        # Optionnel : lever une erreur ici ou retourner None
+        return None
+
+    # 3. Mettre à jour les champs
+    db_expense.project_id = payload.project_id
+    db_expense.exp_type = payload.exp_type
+    db_expense.beneficiary = payload.beneficiary
+    db_expense.amount = payload.amount
+    db_expense.remark = payload.remark
+    db_expense.act_id = payload.act_id
+    db_expense.updated_at = datetime.now() # Si vous avez ce champ
+
+    db.commit()
+    db.refresh(db_expense)
+    return db_expense
