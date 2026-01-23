@@ -661,26 +661,39 @@ def get_upload_history(db: Session, skip: int = 0, limit: int = 100):
 def get_eligible_pos_for_bc(
     db: Session, 
     project_id: int, 
-    site_codes: Optional[List[str]] = None, # Expects a list now
+    site_codes: Optional[List[str]] = None,
     start_date: Optional[date] = None,
     end_date: Optional[date] = None
 ):
     """
     Fetches POs for the project that have REMAINING Quantity > 0.
+    IGNORES usage from Rejected BCs.
     """
-    # Subquery: Sum of quantities used in existing BCs per PO
+    
+    # --- FIX STARTS HERE ---
+    
+    # Subquery: Sum of quantities used in VALID (non-rejected) BCs per PO
     used_subquery = db.query(
         models.BCItem.merged_po_id,
         func.sum(models.BCItem.quantity_sbc).label("used_qty")
+    ).join(
+        models.BonDeCommande, models.BCItem.bc_id == models.BonDeCommande.id
+    ).filter(
+        # Only count items if the BC is NOT rejected
+        models.BonDeCommande.status != models.BCStatus.REJECTED 
     ).group_by(models.BCItem.merged_po_id).subquery()
+
+    # --- FIX ENDS HERE ---
 
     # Main Query: Left Join MergedPO with the Usage Subquery
     query = db.query(models.MergedPO).outerjoin(
         used_subquery, models.MergedPO.id == used_subquery.c.merged_po_id
     ).filter(
         models.MergedPO.internal_project_id == project_id,
-        # CRITICAL FILTER: Requested Qty must be greater than Used Qty (treating NULL as 0)
-        models.MergedPO.requested_qty > func.coalesce(used_subquery.c.used_qty, 0)
+        
+        # CRITICAL FILTER: Requested Qty > Valid Used Qty
+        # We use a small epsilon (0.0001) for float safety
+        models.MergedPO.requested_qty > (func.coalesce(used_subquery.c.used_qty, 0) + 0.0001)
     )
 
     # Standard Filters
@@ -2263,43 +2276,6 @@ def get_remaining_to_accept_dataframe(
     # ------------------------------------
     
     return df   
-def get_eligible_pos_for_bc(
-    db: Session, 
-    project_id: int, 
-    site_codes: Optional[List[str]] = None,
-    start_date: Optional[date] = None,
-    end_date: Optional[date] = None
-):
-    """
-    Fetches POs for the project that have REMAINING Quantity > 0.
-    """
-    # Subquery: Sum of quantities used in existing BCs per PO
-    used_subquery = db.query(
-        models.BCItem.merged_po_id,
-        func.sum(models.BCItem.quantity_sbc).label("used_qty")
-    ).group_by(models.BCItem.merged_po_id).subquery()
-
-    # Main Query: Left Join MergedPO with the Usage Subquery
-    query = db.query(models.MergedPO).outerjoin(
-        used_subquery, models.MergedPO.id == used_subquery.c.merged_po_id
-    ).filter(
-        models.MergedPO.internal_project_id == project_id,
-        # CRITICAL FILTER: Requested Qty must be greater than Used Qty (treating NULL as 0)
-        models.MergedPO.requested_qty > func.coalesce(used_subquery.c.used_qty, 0)
-    )
-
-    # Standard Filters
-    if site_codes and len(site_codes) > 0:
-        clean_codes = [c.strip() for c in site_codes if c.strip()]
-        if clean_codes:
-            query = query.filter(models.MergedPO.site_code.in_(clean_codes))
-
-    if start_date:
-        query = query.filter(func.date(models.MergedPO.publish_date) >= start_date)
-    if end_date:
-        query = query.filter(func.date(models.MergedPO.publish_date) <= end_date)
-        
-    return query.all()
 
 def generate_bc_number(db: Session):
     """
@@ -2726,7 +2702,7 @@ def get_all_bcs(db: Session, current_user: models.User, search: Optional[str] = 
     # Order by newest first and execute
     return query.order_by(models.BonDeCommande.created_at.desc()).all()
 
-
+    
 def reject_bc(db: Session, bc_id: int, reason: str, rejector_id: int):
     bc = db.query(models.BonDeCommande).get(bc_id)
     if not bc or bc.status not in [models.BCStatus.SUBMITTED, models.BCStatus.PENDING_L2]:
@@ -3477,6 +3453,7 @@ def validate_bc_item(db: Session, item_id: int, user: models.User, action: str, 
         history = models.ItemRejectionHistory(
             bc_item_id=item.id,
             rejected_by_id=user.id,
+            rejected_at=datetime.now(),
             comment=comment
         )
         db.add(history)
@@ -4393,7 +4370,7 @@ def reject_expense(db: Session, expense_id: int, current_user: models.User, reas
     
     expense.status = "REJECTED"
     expense.rejected_by = current_user.id
-    expense.approved_l1_at = datetime.now
+    expense.approved_l1_at = datetime.now()
     expense.rejection_reason = reason
     
     db.commit()
@@ -4576,6 +4553,73 @@ def confirm_expense_payment(db: Session, expense_id: int, attachment_name: str):
     db.refresh(expense)
     return expense
 
+def update_bon_de_commande(db: Session, bc_id: int, bc_data: schemas.BCCreate, user_id: int):
+    # 1. Fetch existing BC
+    bc = db.query(models.BonDeCommande).get(bc_id)
+    if not bc: raise ValueError("BC not found")
+    
+    # 2. Checks
+    if bc.status != models.BCStatus.DRAFT:
+        raise ValueError("Only DRAFT BCs can be edited.")
+    if bc.creator_id != user_id:
+        raise ValueError("You can only edit your own BCs.")
+        
+    # 3. Update Header Info
+    bc.project_id = bc_data.internal_project_id
+    bc.sbc_id = bc_data.sbc_id
+    
+    # 4. Handle Items (Strategy: Delete old, Re-create new)
+    # This is simplest to ensure consistency with quantity checks.
+    # First, restore quantities or just delete if we re-check availability.
+    
+    # Delete existing items
+    db.query(models.BCItem).filter(models.BCItem.bc_id == bc.id).delete()
+    
+    total_ht = 0.0
+    total_tax = 0.0
+    
+    # Re-create items (Reuse logic from create_bon_de_commande)
+    for item_data in bc_data.items:
+        po = db.query(models.MergedPO).get(item_data.merged_po_id)
+        if not po: raise ValueError(f"PO {item_data.merged_po_id} not found")
+        
+        # Recalculate availability (excluding THIS BC since we just deleted its items)
+        consumed_qty = db.query(func.sum(models.BCItem.quantity_sbc)).filter(
+            models.BCItem.merged_po_id == po.id
+        ).scalar() or 0.0
+        
+        available_qty = po.requested_qty - consumed_qty
+        
+        if item_data.quantity_sbc > (available_qty + 0.0001):
+             raise ValueError(f"Insufficient quantity for PO {po.po_id}")
+
+        unit_price_sbc = (po.unit_price or 0) * item_data.rate_sbc
+        line_amount_sbc = unit_price_sbc * item_data.quantity_sbc
+        
+        current_year = datetime.now().year
+        tax_rate_val = get_tax_rate(db, category=po.category, year=current_year)
+        line_tax = line_amount_sbc * tax_rate_val
+        
+        new_item = models.BCItem(
+            bc_id=bc.id,
+            merged_po_id=po.id,
+            rate_sbc=item_data.rate_sbc,
+            quantity_sbc=item_data.quantity_sbc,
+            unit_price_sbc=unit_price_sbc,
+            line_amount_sbc=line_amount_sbc,
+            applied_tax_rate=tax_rate_val
+        )
+        db.add(new_item)
+        total_ht += line_amount_sbc
+        total_tax += line_tax
+        
+    bc.total_amount_ht = total_ht
+    bc.total_tax_amount = total_tax
+    bc.total_amount_ttc = total_ht + total_tax
+    
+    db.commit()
+    db.refresh(bc)
+    return bc
 # app/crud.py
 
 def update_expense(db: Session, expense_id: int, payload: schemas.ExpenseCreate, user_id: int):

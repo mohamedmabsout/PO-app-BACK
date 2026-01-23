@@ -22,7 +22,9 @@ from fastapi.responses import StreamingResponse  # <-- Import this
 from fastapi import BackgroundTasks # Import this
 import shutil
 import os
-from ..utils import pdf_generator
+from ..utils import pdf_generator 
+from ..utils.email import send_bc_status_email
+
 import traceback
 
 router = APIRouter(prefix="/api/data", tags=["data_processing"])
@@ -454,10 +456,34 @@ def read_all_bcs(
 
     return crud.get_all_bcs(db, current_user, search=search, status_filter=status_filter)  # <-- Pass status_filter
 
+@router.get("/bc/ready-for-acceptance", response_model=List[schemas.BCResponse])
+def list_bcs_ready_for_act(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    # Security: Only Admin/PD/SBC
+    
+    query = db.query(models.BonDeCommande).options(
+        joinedload(models.BonDeCommande.sbc),
+        joinedload(models.BonDeCommande.internal_project),
+        # Load items to check if they are already fully accepted? 
+        # Or just show the BC and let the user drill down.
+        joinedload(models.BonDeCommande.items)
+    ).filter(
+        models.BonDeCommande.status == models.BCStatus.APPROVED
+    )
+
+    if current_user.role == "PM":
+        query = query.filter(models.BonDeCommande.creator_id == current_user.id)
+    elif current_user.role == "SBC":
+        query = query.filter(models.BonDeCommande.sbc_id == current_user.sbc_id)
+
+    return query.order_by(models.BonDeCommande.updated_at.desc()).all()
 
 @router.post("/bc/{bc_id}/approve-l1")
 def approve_l1(
     bc_id: int,
+    background_tasks: BackgroundTasks, 
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
 ):
@@ -476,6 +502,8 @@ def approve_l1(
             message=f"BC {bc.bc_number} validated L1. Pending final approval.",
             link=f"/configuration/bc/detail/{bc.id}",
         )
+        send_bc_status_email(bc, admin.email, "VALIDATED L1 (Waiting L2)", background_tasks)
+
     db.commit()
     return bc
 
@@ -483,8 +511,9 @@ def approve_l1(
 @router.post("/bc/{bc_id}/approve-l2")
 def approve_l2(
     bc_id: int,
+    background_tasks: BackgroundTasks, 
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user),
+    current_user: models.User = Depends(auth.get_current_user)
 ):
     # Check if Admin
     bc = crud.approve_bc_l2(db, bc_id, current_user.id)
@@ -498,6 +527,9 @@ def approve_l2(
         message=f"Your BC {bc.bc_number} has been fully approved.",
         link=f"/configuration/bc/detail/{bc.id}",
     )
+    if bc.sbc and bc.sbc.email:
+        send_bc_status_email(bc, bc.sbc.email, "APPROVED", background_tasks)
+
     db.commit()
     return bc
 
@@ -558,6 +590,7 @@ def reject_bon_de_commande(
 @router.post("/bc/{bc_id}/submit")
 def submit_bon_de_commande(
     bc_id: int,
+    background_tasks: BackgroundTasks, 
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
@@ -577,17 +610,35 @@ def submit_bon_de_commande(
             message=f"BC {bc.bc_number} submitted by {current_user.first_name} requires L1 validation.",
             link=f"/configuration/bc/detail/{bc.id}",
         )
+        send_bc_status_email(bc, pd.email, "SUBMITTED (Waiting L1)", background_tasks)
+
     db.commit()
     return bc
 
 
 @router.get("/bc/{bc_id}", response_model=schemas.BCResponse)
-def get_bc_details(bc_id: int, db: Session = Depends(get_db)):
+def get_bc_details(bc_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
     bc = crud.get_bc_by_id(db, bc_id)
     if not bc:
         raise HTTPException(status_code=404, detail="BC not found")
+
+    if current_user.role == "SBC":
+        if bc.sbc_id != current_user.sbc_id:
+             raise HTTPException(403, "Access Denied: This BC does not belong to you.")
+
     return bc
 
+@router.put("/bc/{bc_id}", response_model=schemas.BCResponse)
+def update_bc(
+    bc_id: int,
+    payload: schemas.BCCreate, # Reusing create schema for update
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    try:
+        return crud.update_bon_de_commande(db, bc_id, payload, current_user.id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @router.post("/bc/{bc_id}/cancel", status_code=status.HTTP_200_OK)
 def cancel_bc_endpoint(

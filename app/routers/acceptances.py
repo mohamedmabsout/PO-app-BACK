@@ -194,6 +194,18 @@ def generate_act_endpoint(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
+    """
+    Generates an Acceptance Certificate (ACT) PDF for the specified BC and items.
+    Returns the PDF as a streaming response.
+    """
+    bc = db.query(models.BonDeCommande).get(bc_id)
+    if not bc: raise HTTPException(404, "BC Not Found")
+
+    if current_user.role == "SBC":
+        if bc.sbc_id != current_user.sbc_id:
+             raise HTTPException(403, "Access Denied: Not your BC")
+    elif current_user.role not in ["ADMIN", "PD", "PM"]:
+         raise HTTPException(403, "Access Denied")
     # Check if user is PD
     try:
         act = crud.generate_act_record(db, bc_id, current_user.id, payload.item_ids)
