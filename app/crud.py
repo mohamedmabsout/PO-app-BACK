@@ -661,26 +661,39 @@ def get_upload_history(db: Session, skip: int = 0, limit: int = 100):
 def get_eligible_pos_for_bc(
     db: Session, 
     project_id: int, 
-    site_codes: Optional[List[str]] = None, # Expects a list now
+    site_codes: Optional[List[str]] = None,
     start_date: Optional[date] = None,
     end_date: Optional[date] = None
 ):
     """
     Fetches POs for the project that have REMAINING Quantity > 0.
+    IGNORES usage from Rejected BCs.
     """
-    # Subquery: Sum of quantities used in existing BCs per PO
+    
+    # --- FIX STARTS HERE ---
+    
+    # Subquery: Sum of quantities used in VALID (non-rejected) BCs per PO
     used_subquery = db.query(
         models.BCItem.merged_po_id,
         func.sum(models.BCItem.quantity_sbc).label("used_qty")
+    ).join(
+        models.BonDeCommande, models.BCItem.bc_id == models.BonDeCommande.id
+    ).filter(
+        # Only count items if the BC is NOT rejected
+        models.BonDeCommande.status != models.BCStatus.REJECTED 
     ).group_by(models.BCItem.merged_po_id).subquery()
+
+    # --- FIX ENDS HERE ---
 
     # Main Query: Left Join MergedPO with the Usage Subquery
     query = db.query(models.MergedPO).outerjoin(
         used_subquery, models.MergedPO.id == used_subquery.c.merged_po_id
     ).filter(
         models.MergedPO.internal_project_id == project_id,
-        # CRITICAL FILTER: Requested Qty must be greater than Used Qty (treating NULL as 0)
-        models.MergedPO.requested_qty > func.coalesce(used_subquery.c.used_qty, 0)
+        
+        # CRITICAL FILTER: Requested Qty > Valid Used Qty
+        # We use a small epsilon (0.0001) for float safety
+        models.MergedPO.requested_qty > (func.coalesce(used_subquery.c.used_qty, 0) + 0.0001)
     )
 
     # Standard Filters
@@ -3477,6 +3490,7 @@ def validate_bc_item(db: Session, item_id: int, user: models.User, action: str, 
         history = models.ItemRejectionHistory(
             bc_item_id=item.id,
             rejected_by_id=user.id,
+            rejected_at=datetime.now(),
             comment=comment
         )
         db.add(history)
