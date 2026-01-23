@@ -4209,9 +4209,11 @@ def create_expense(db: Session, current_user, payload):
 
 def list_my_requests(db: Session, current_user: models.User):
     """
-    Règle de visibilité :
-    - Un PM ne voit que ses propres dépenses (Draft ou autres).
-    - Un PD ou Admin voit TOUTES les dépenses SAUF les brouillons des autres.
+    Règle de visibilité CORRIGÉE :
+    - Un PM ne voit que ses propres dépenses (Draft inclus).
+    - Un PD ou Admin voit :
+        • Ses PROPRES dépenses (Draft inclus)
+        • Les dépenses des AUTRES à partir de PENDING_L1 (pas leurs Drafts)
     """
     query = db.query(models.Expense).options(
         joinedload(models.Expense.internal_project),
@@ -4221,10 +4223,15 @@ def list_my_requests(db: Session, current_user: models.User):
     role_str = str(current_user.role).upper()
     
     if "ADMIN" in role_str or "PD" in role_str or "PROJECT DIRECTOR" in role_str:
-        # ✅ Le PD et l'Admin voient tout, mais on EXCLUT les brouillons (DRAFT)
-        # car un brouillon n'appartient qu'à celui qui l'écrit.
-        # Ils voient tout à partir de PENDING_L1, PENDING_L2, PAID, etc.
-        query = query.filter(models.Expense.status != "DRAFT")
+        # ✅ Le PD/Admin voit :
+        # 1. SES propres dépenses (tous statuts, DRAFT inclus)
+        # 2. Les dépenses des AUTRES (sauf leurs DRAFT)
+        query = query.filter(
+            or_(
+                models.Expense.requester_id == current_user.id,  # Ses propres dépenses
+                models.Expense.status != "DRAFT"  # Dépenses des autres (sauf DRAFT)
+            )
+        )
     else:
         # ✅ Le PM ne voit que ce qu'il a créé (Brouillons inclus)
         query = query.filter(models.Expense.requester_id == current_user.id)
