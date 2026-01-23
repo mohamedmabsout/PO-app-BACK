@@ -12,7 +12,6 @@ from fastapi import Query, status
 
 from app import database
 from app.core.security import is_admin, is_pd, is_pd_or_admin, is_pm
-from backend.app.utils.email import send_bc_status_email
 from ..dependencies import get_current_user, get_db
 from .. import crud, models, auth, schemas
 from datetime import datetime, date
