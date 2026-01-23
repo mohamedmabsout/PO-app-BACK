@@ -4392,12 +4392,12 @@ def reject_expense(db: Session, expense_id: int, current_user: models.User, reas
     
     expense.status = "REJECTED"
     expense.rejected_by = current_user.id
-    expense.approved_l1_at = datetime.now
+    expense.approved_l1_at = datetime.now()
     expense.rejection_reason = reason
     
     db.commit()
     create_notification(
-        db, recipient_id=expense.requester_id, type=models.NotificationType.ALERT,
+        db, recipient_id=expense.requester_id, type=models.NotificationType.SYSTEM,
         title="Demande Rejetée ❌",
         message=f"Votre demande de {expense.amount} MAD a été rejetée. Motif: {reason}",
         link="/expenses"
@@ -4575,3 +4575,70 @@ def confirm_expense_payment(db: Session, expense_id: int, attachment_name: str):
     db.refresh(expense)
     return expense
 
+def update_bon_de_commande(db: Session, bc_id: int, bc_data: schemas.BCCreate, user_id: int):
+    # 1. Fetch existing BC
+    bc = db.query(models.BonDeCommande).get(bc_id)
+    if not bc: raise ValueError("BC not found")
+    
+    # 2. Checks
+    if bc.status != models.BCStatus.DRAFT:
+        raise ValueError("Only DRAFT BCs can be edited.")
+    if bc.creator_id != user_id:
+        raise ValueError("You can only edit your own BCs.")
+        
+    # 3. Update Header Info
+    bc.project_id = bc_data.internal_project_id
+    bc.sbc_id = bc_data.sbc_id
+    
+    # 4. Handle Items (Strategy: Delete old, Re-create new)
+    # This is simplest to ensure consistency with quantity checks.
+    # First, restore quantities or just delete if we re-check availability.
+    
+    # Delete existing items
+    db.query(models.BCItem).filter(models.BCItem.bc_id == bc.id).delete()
+    
+    total_ht = 0.0
+    total_tax = 0.0
+    
+    # Re-create items (Reuse logic from create_bon_de_commande)
+    for item_data in bc_data.items:
+        po = db.query(models.MergedPO).get(item_data.merged_po_id)
+        if not po: raise ValueError(f"PO {item_data.merged_po_id} not found")
+        
+        # Recalculate availability (excluding THIS BC since we just deleted its items)
+        consumed_qty = db.query(func.sum(models.BCItem.quantity_sbc)).filter(
+            models.BCItem.merged_po_id == po.id
+        ).scalar() or 0.0
+        
+        available_qty = po.requested_qty - consumed_qty
+        
+        if item_data.quantity_sbc > (available_qty + 0.0001):
+             raise ValueError(f"Insufficient quantity for PO {po.po_id}")
+
+        unit_price_sbc = (po.unit_price or 0) * item_data.rate_sbc
+        line_amount_sbc = unit_price_sbc * item_data.quantity_sbc
+        
+        current_year = datetime.now().year
+        tax_rate_val = get_tax_rate(db, category=po.category, year=current_year)
+        line_tax = line_amount_sbc * tax_rate_val
+        
+        new_item = models.BCItem(
+            bc_id=bc.id,
+            merged_po_id=po.id,
+            rate_sbc=item_data.rate_sbc,
+            quantity_sbc=item_data.quantity_sbc,
+            unit_price_sbc=unit_price_sbc,
+            line_amount_sbc=line_amount_sbc,
+            applied_tax_rate=tax_rate_val
+        )
+        db.add(new_item)
+        total_ht += line_amount_sbc
+        total_tax += line_tax
+        
+    bc.total_amount_ht = total_ht
+    bc.total_tax_amount = total_tax
+    bc.total_amount_ttc = total_ht + total_tax
+    
+    db.commit()
+    db.refresh(bc)
+    return bc
