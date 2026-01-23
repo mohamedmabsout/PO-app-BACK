@@ -1,5 +1,5 @@
 # app/routers/expenses.py
-import datetime
+from datetime import datetime
 import io
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.temp_pydantic_v1_params import Body
@@ -236,17 +236,33 @@ def get_wallets_summary(
     # Votre logique de récupération des caisses...
     return crud.get_all_wallets_summary(db)
 
-@router.post("/{id}/confirm-reception")
-def confirm_reception(
-    id: int, 
-    db: Session = Depends(get_db), 
+@router.post("/{expense_id}/confirm-receipt")
+def confirm_expense_receipt(
+    expense_id: int,
+    db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
-    # Sécurité : Seul le SBC bénéficiaire peut confirmer
-    expense = db.query(models.Expense).get(id)
-    if not expense:
-        raise HTTPException(status_code=404, detail="Dépense non trouvée")
+    # 1. Get Expense
+    expense = db.query(models.Expense).get(expense_id)
+    if not expense: raise HTTPException(404, "Expense not found")
+
+    # 2. Security Check: Is this expense really for this SBC?
+    # We verify the link: Expense -> ACT -> BC -> SBC ID must match User SBC ID
+    if not expense.act_id:
+        raise HTTPException(400, "This expense is not linked to an Acceptance/SBC.")
+    
+    # We need to fetch the related SBC ID to verify ownership
+    # (Assuming relationships are set up in models)
+    sbc_id_of_expense = expense.act.bc.sbc_id
+    
+    if current_user.role != "SBC" or current_user.sbc_id != sbc_id_of_expense:
+        raise HTTPException(403, "You are not authorized to confirm this expense.")
+
+    # 3. Update Status
+    if expense.sbc_confirmation_date:
+        raise HTTPException(400, "Already confirmed.")
         
-    expense.status = "RECEIVED" # Nouveau statut final
+    expense.sbc_confirmation_date = datetime.now()
     db.commit()
-    return expense
+    
+    return {"message": "Receipt confirmed successfully"}

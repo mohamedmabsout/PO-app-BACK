@@ -606,6 +606,7 @@ class Expense(Base):
     rejection_reason = Column(String(500), nullable=True)
     approved_l1_at = Column(DateTime, nullable=True)
     approved_l2_at = Column(DateTime, nullable=True)
+    sbc_confirmation_date = Column(DateTime, nullable=True)
 
     # Relations
        # C'est elle qui permet de faire "exp.act.act_number"

@@ -4201,26 +4201,40 @@ def create_expense(db: Session, current_user, payload):
     db.commit()
     db.refresh(expense)
     return expense
+# In crud.py
+
 def list_my_requests(db: Session, current_user: models.User):
+    # 1. Base Query
     query = db.query(models.Expense).options(
         joinedload(models.Expense.internal_project),
-        joinedload(models.Expense.requester)
+        joinedload(models.Expense.requester),
+        # Ensure we load the relationships needed for SBC logic if applicable
+        joinedload(models.Expense.act).joinedload(models.ServiceAcceptance.bc)
     )
     
     role_str = str(current_user.role).upper()
-    
-    # For non-admin/non-PD/non-CEO users, filter by requester
-    if "ADMIN" not in role_str and "PD" not in role_str and "CEO" not in role_str:
+    print("user role(UPPER):", role_str)
+    # 2. Logic for SBC (Personne Physique)
+    if current_user.role in [UserRole.SBC]:
+        if not current_user.sbc_id:
+            print("account not related to any sbc")
+            return [] # SBC User not linked to SBC Profile
+        print("Filtering expenses for SBC ID:", current_user.sbc_id)
+        # Filter expenses linked to this SBC's BCs via Acceptances
+        query = query.join(models.ServiceAcceptance, models.Expense.act_id == models.ServiceAcceptance.id)\
+                    .join(models.BonDeCommande, models.ServiceAcceptance.bc_id == models.BonDeCommande.id)\
+                    .filter(models.BonDeCommande.sbc_id == current_user.sbc_id)
+        
+    # 3. Logic for PM (Requester) - existing logic
+    elif "ADMIN" not in role_str and "PD" not in role_str and "CEO" not in role_str:
         query = query.filter(models.Expense.requester_id == current_user.id)
+        
+    # 4. Logic for Admin/PD - They see everything (no filter needed)
     
     # Add explicit ordering
     result = query.order_by(models.Expense.created_at.desc()).all()
     
-    # Debug logging
-    print(f"DEBUG - User {current_user.id} retrieved {len(result)} expenses")
-    
     return result
-
 def list_pending_l1(db: Session):
     """Liste toutes les dépenses en attente de validation L1 (PD)"""
     return db.query(models.Expense).filter(
