@@ -2276,43 +2276,6 @@ def get_remaining_to_accept_dataframe(
     # ------------------------------------
     
     return df   
-def get_eligible_pos_for_bc(
-    db: Session, 
-    project_id: int, 
-    site_codes: Optional[List[str]] = None,
-    start_date: Optional[date] = None,
-    end_date: Optional[date] = None
-):
-    """
-    Fetches POs for the project that have REMAINING Quantity > 0.
-    """
-    # Subquery: Sum of quantities used in existing BCs per PO
-    used_subquery = db.query(
-        models.BCItem.merged_po_id,
-        func.sum(models.BCItem.quantity_sbc).label("used_qty")
-    ).group_by(models.BCItem.merged_po_id).subquery()
-
-    # Main Query: Left Join MergedPO with the Usage Subquery
-    query = db.query(models.MergedPO).outerjoin(
-        used_subquery, models.MergedPO.id == used_subquery.c.merged_po_id
-    ).filter(
-        models.MergedPO.internal_project_id == project_id,
-        # CRITICAL FILTER: Requested Qty must be greater than Used Qty (treating NULL as 0)
-        models.MergedPO.requested_qty > func.coalesce(used_subquery.c.used_qty, 0)
-    )
-
-    # Standard Filters
-    if site_codes and len(site_codes) > 0:
-        clean_codes = [c.strip() for c in site_codes if c.strip()]
-        if clean_codes:
-            query = query.filter(models.MergedPO.site_code.in_(clean_codes))
-
-    if start_date:
-        query = query.filter(func.date(models.MergedPO.publish_date) >= start_date)
-    if end_date:
-        query = query.filter(func.date(models.MergedPO.publish_date) <= end_date)
-        
-    return query.all()
 
 def generate_bc_number(db: Session):
     """
