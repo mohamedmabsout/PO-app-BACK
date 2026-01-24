@@ -408,5 +408,5 @@ def get_payable_acts_for_expenses(
         models.BonDeCommande
     ).filter(
         models.BonDeCommande.project_id == project_id,
-        ~models.ServiceAcceptance.id.in_(used_act_ids)
+        models.ServiceAcceptance.id.in_(used_act_ids)
     ).all()

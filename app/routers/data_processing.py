@@ -478,7 +478,7 @@ def list_bcs_ready_for_act(
     elif current_user.role == "SBC":
         query = query.filter(models.BonDeCommande.sbc_id == current_user.sbc_id)
 
-    return query.order_by(models.BonDeCommande.updated_at.desc()).all()
+    return query.order_by(models.BonDeCommande.approved_l2_at.desc()).all()
 
 @router.post("/bc/{bc_id}/approve-l1")
 def approve_l1(
