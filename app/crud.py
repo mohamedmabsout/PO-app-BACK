@@ -4201,7 +4201,10 @@ def list_my_requests(db: Session, current_user: models.User):
         # ✅ Le PD et l'Admin voient tout, mais on EXCLUT les brouillons (DRAFT)
         # car un brouillon n'appartient qu'à celui qui l'écrit.
         # Ils voient tout à partir de PENDING_L1, PENDING_L2, PAID, etc.
-        query = query.filter(models.Expense.status != "DRAFT")
+        query = query.filter(or_(
+            models.Expense.requester_id == current_user.id,
+            models.Expense.status != "DRAFT"
+        ))
     else:
         # ✅ Le PM ne voit que ce qu'il a créé (Brouillons inclus)
         query = query.filter(models.Expense.requester_id == current_user.id)
