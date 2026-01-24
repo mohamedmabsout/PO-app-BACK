@@ -2702,7 +2702,7 @@ def get_all_bcs(db: Session, current_user: models.User, search: Optional[str] = 
     # Order by newest first and execute
     return query.order_by(models.BonDeCommande.created_at.desc()).all()
 
-
+    
 def reject_bc(db: Session, bc_id: int, reason: str, rejector_id: int):
     bc = db.query(models.BonDeCommande).get(bc_id)
     if not bc or bc.status not in [models.BCStatus.SUBMITTED, models.BCStatus.PENDING_L2]:

@@ -22,7 +22,8 @@ from fastapi.responses import StreamingResponse  # <-- Import this
 from fastapi import BackgroundTasks # Import this
 import shutil
 import os
-from ..utils import pdf_generator , email
+from ..utils import pdf_generator 
+from ..utils.email import send_bc_status_email
 
 import traceback
 
@@ -455,6 +456,29 @@ def read_all_bcs(
 
     return crud.get_all_bcs(db, current_user, search=search, status_filter=status_filter)  # <-- Pass status_filter
 
+@router.get("/bc/ready-for-acceptance", response_model=List[schemas.BCResponse])
+def list_bcs_ready_for_act(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    # Security: Only Admin/PD/SBC
+    
+    query = db.query(models.BonDeCommande).options(
+        joinedload(models.BonDeCommande.sbc),
+        joinedload(models.BonDeCommande.internal_project),
+        # Load items to check if they are already fully accepted? 
+        # Or just show the BC and let the user drill down.
+        joinedload(models.BonDeCommande.items)
+    ).filter(
+        models.BonDeCommande.status == models.BCStatus.APPROVED
+    )
+
+    if current_user.role == "PM":
+        query = query.filter(models.BonDeCommande.creator_id == current_user.id)
+    elif current_user.role == "SBC":
+        query = query.filter(models.BonDeCommande.sbc_id == current_user.sbc_id)
+
+    return query.order_by(models.BonDeCommande.updated_at.desc()).all()
 
 @router.post("/bc/{bc_id}/approve-l1")
 def approve_l1(
@@ -593,10 +617,15 @@ def submit_bon_de_commande(
 
 
 @router.get("/bc/{bc_id}", response_model=schemas.BCResponse)
-def get_bc_details(bc_id: int, db: Session = Depends(get_db)):
+def get_bc_details(bc_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
     bc = crud.get_bc_by_id(db, bc_id)
     if not bc:
         raise HTTPException(status_code=404, detail="BC not found")
+
+    if current_user.role == "SBC":
+        if bc.sbc_id != current_user.sbc_id:
+             raise HTTPException(403, "Access Denied: This BC does not belong to you.")
+
     return bc
 
 @router.put("/bc/{bc_id}", response_model=schemas.BCResponse)
