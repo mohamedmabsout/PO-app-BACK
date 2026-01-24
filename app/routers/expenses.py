@@ -266,3 +266,17 @@ def confirm_expense_receipt(
     db.commit()
     
     return {"message": "Receipt confirmed successfully"}
+@router.put("/{id}", response_model=schemas.ExpenseOut)
+def update_expense_endpoint(
+    id: int,
+    payload: schemas.ExpenseCreate, # On réutilise le schéma de création pour la modification
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    # Appel de la fonction CRUD pour mettre à jour
+    db_expense = crud.update_expense(db, id, payload, current_user.id)
+    
+    if not db_expense:
+        raise HTTPException(status_code=404, detail="Dépense non trouvée")
+        
+    return db_expense
