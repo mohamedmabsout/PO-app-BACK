@@ -217,17 +217,18 @@ def confirm_payment(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
-    require_roles(current_user, ["PD", "PROJECT DIRECTOR"])
-    
+    require_roles(current_user, ["PM"])
+
     attachment = payload.get("attachment")
+    
+    # CORRECTION 422 : On vérifie que la clé existe dans le dictionnaire
     if not attachment:
-        raise HTTPException(status_code=400, detail="L'attachement est obligatoire")
+        raise HTTPException(status_code=400, detail="Le nom du justificatif est obligatoire")
         
     try:
         return crud.confirm_expense_payment(db, id, attachment)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    
 @router.get("/wallets-summary", response_model=None) # ✅ Ajoutez response_model=None
 def get_wallets_summary(
     db: Session = Depends(get_db),
