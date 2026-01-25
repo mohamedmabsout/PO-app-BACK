@@ -120,7 +120,7 @@ def post_reject(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
 ):
-    require_roles(current_user, [models.UserRole.PD, models.UserRole.ADMIN, models.UserRole.CEO])
+    require_roles(current_user, [models.UserRole.PD, models.UserRole.ADMIN, models.UserRole.CEO,models.UserRole.PM])
     exp = crud.reject_expense(db, id, current_user, payload.reason)
     if not exp:
         raise HTTPException(404, "Expense not found")
@@ -213,22 +213,27 @@ def get_pending_payment(
 @router.post("/{id}/confirm-payment")
 def confirm_payment(
     id: int, 
-    payload: dict = Body(...), # Reçoit {"attachment": "nom_du_fichier.pdf"}
+    payload: dict = Body(...), 
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
-    require_roles(current_user, ["PM"])
+    # Security: Ensure only the PM can confirm
+    require_roles(current_user, ["PM", "ADMIN"])
 
-    attachment = payload.get("attachment")
+    expense = db.query(models.Expense).get(id)
     
-    # CORRECTION 422 : On vérifie que la clé existe dans le dictionnaire
-    if not attachment:
-        raise HTTPException(status_code=400, detail="Le nom du justificatif est obligatoire")
-        
-    try:
-        return crud.confirm_expense_payment(db, id, attachment)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    # 🔒 Mandatory attachment check
+    attachment = payload.get("attachment")
+    if not attachment or attachment == "":
+        raise HTTPException(status_code=400, detail="Attachment is mandatory for payment confirmation")
+
+    # Update logic
+    expense.status = "PAID"
+    expense.attachment = attachment
+    expense.paid_at = datetime.now()
+    
+    db.commit()
+    return {"message": "Payment confirmed successfully"}
 @router.get("/wallets-summary", response_model=None) # ✅ Ajoutez response_model=None
 def get_wallets_summary(
     db: Session = Depends(get_db),
@@ -281,3 +286,16 @@ def update_expense_endpoint(
         raise HTTPException(status_code=404, detail="Dépense non trouvée")
         
     return db_expense
+@router.get("/{id}", response_model=schemas.ExpenseOut) # Route GET simple
+def get_expense(
+    id: int, 
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    # Chercher la dépense par son ID
+    expense = db.query(models.Expense).filter(models.Expense.id == id).first()
+    
+    if not expense:
+        raise HTTPException(status_code=404, detail="Dépense introuvable")
+    
+    return expense
