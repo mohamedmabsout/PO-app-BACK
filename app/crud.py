@@ -4178,7 +4178,8 @@ def process_fund_request(
                 description=f"Refill #{req.request_number} (Item #{db_item.id})",
                 related_request_id=req.id,
                 created_by_id=admin_id,
-                
+                created_at=datetime.now(),
+
                 # --- THIS IS WHERE IT GETS SET ---
                 status=models.TransactionStatus.PENDING 
                 # ---------------------------------

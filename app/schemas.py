@@ -224,6 +224,9 @@ class MergedPOBase(BaseModel):
     internal_control: int
     line_amount_hw: float
     publish_date: FormattedDate
+    unit_price: Optional[float] = None # <--- REQUIRED FOR EDIT CALCULATION
+    requested_qty: Optional[float] = None # <--- USEFUL TOO
+
     category: Optional[str] = None
     total_ac_amount: Optional[float] = None
     accepted_ac_amount: Optional[float] = None
