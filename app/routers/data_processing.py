@@ -23,7 +23,7 @@ from fastapi import BackgroundTasks # Import this
 import shutil
 import os
 from ..utils import pdf_generator 
-from ..utils.email import send_bc_status_email
+from ..utils.email import send_bc_status_email, send_email_background
 
 import traceback
 
@@ -702,12 +702,25 @@ def list_pending_requests(
         
     return crud.get_pending_requests(db)
 @router.post("/request")
-def create_fund_request(
+def create_fund_request(    background_tasks: BackgroundTasks, 
+
     payload: schemas.FundRequestCreate,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
-    return crud.create_fund_request(db, current_user.id, payload.items) 
+    req = crud.create_fund_request(db, current_user.id, payload.items) 
+    admins = db.query(models.User).filter(models.User.role == "ADMIN").all()
+    admin_emails = [u.email for u in admins if u.email]
+    
+    if admin_emails:
+        send_email_background(
+            background_tasks=background_tasks,
+            subject="New Fund Request",
+            email_to=admin_emails,
+            body=f"PD {current_user.last_name} requested funds. Ref: {req.request_number}"
+        )
+
+    return req
 
 
 @router.post("/request/{req_id}/review")
@@ -774,6 +787,8 @@ def get_wallets_summary(
 def process_request_endpoint(
     req_id: int, 
     payload: schemas.FundRequestReviewAction,
+        background_tasks: BackgroundTasks, # <--- Add this
+
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
@@ -781,8 +796,34 @@ def process_request_endpoint(
         raise HTTPException(403, "Admins only")
         
     try:
-        crud.process_fund_request(db, req_id, payload, current_user.id)
-        return {"message": "Request processed"}
+        req = crud.process_fund_request(db, req_id, payload, current_user.id)
+        
+        # 2. Send Notifications (If Approved)
+        if payload.action == "APPROVE":
+            # Find unique PMs involved in this request to notify them
+            # We can get them from the items
+            pm_ids = set(i.target_pm_id for i in req.items)
+            pms = db.query(models.User).filter(models.User.id.in_(pm_ids)).all()
+            
+            emails = [pm.email for pm in pms if pm.email]
+            
+            if emails:
+                subject = f"Funds Approved: Request #{req.request_number}"
+                body = f"""
+                <h3>Funds Approved</h3>
+                <p>The Admin has approved a payment for request <strong>{req.request_number}</strong>.</p>
+                <p>Please log in to your Caisse Dashboard to confirm receipt.</p>
+                """
+                send_email_background(background_tasks, subject, emails, body)
+
+        return {"message": "Request processed and notifications sent."}
+        
     except ValueError as e:
         raise HTTPException(400, str(e))
-    
+@router.get("/history/grouped")
+def get_history_grouped(
+    page: int = 1,
+    limit: int = 10,
+    db: Session = Depends(get_db)
+):
+    return crud.get_grouped_history(db, page, limit)

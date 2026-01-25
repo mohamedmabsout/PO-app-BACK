@@ -3736,9 +3736,30 @@ def get_sbc_acceptances(db: Session, user: models.User):
 
     return items
 def create_fund_request(db: Session, pd_user: int, items: list):
-    # Generate ID
-    count = db.query(models.FundRequest).count() + 1
-    req_num = f"REQ-{datetime.now().year}-{str(count).zfill(3)}"
+    now = datetime.now()
+    year = now.year
+    month = now.month
+    
+    # Generate ID based on Year-Month
+    # Count requests in this specific month to restart sequence or just keep global sequence?
+    # Global sequence is safer: REQ-2026-01-001
+    
+    # Find last request from this month
+    pattern = f"REQ-{year}-{month:02d}-%"
+    last_req = db.query(models.FundRequest).filter(
+        models.FundRequest.request_number.like(pattern)
+    ).order_by(models.FundRequest.id.desc()).first()
+    
+    if last_req:
+        try:
+            last_seq = int(last_req.request_number.split('-')[-1])
+            new_seq = last_seq + 1
+        except:
+            new_seq = 1
+    else:
+        new_seq = 1
+        
+    req_num = f"REQ-{year}-{month:02d}-{new_seq:03d}"
     
     new_req = models.FundRequest(
         request_number=req_num,
@@ -3746,6 +3767,7 @@ def create_fund_request(db: Session, pd_user: int, items: list):
         status=models.FundRequestStatus.PENDING_APPROVAL,
         created_at=datetime.now()
     )
+
     db.add(new_req)
     db.flush() # Get ID
     
@@ -3781,39 +3803,43 @@ def approve_fund_request(db: Session, req_id: int, admin_id: int, approved_items
     db.commit()
     return req
 def confirm_fund_reception(db: Session, req_id: int, pd_user: int):
-    req = db.query(models.FundRequest).get(req_id)
-    if req.status != models.FundRequestStatus.APPROVED_WAITING_FUNDS:
-        raise ValueError("Request not ready for confirmation")
-        
-    # Start Transaction
-    req.status = models.FundRequestStatus.COMPLETED
-    req.completed_at = datetime.now()
+    """
+    Confirms all PENDING transactions. This moves money into the visible wallet balance.
+    """
+    # 1. Find all PENDING transactions for this request
+    pending_txs = db.query(models.Transaction).filter(
+        models.Transaction.related_request_id == req_id,
+        models.Transaction.status == models.TransactionStatus.PENDING
+    ).all()
     
-    for item in req.items:
-        if item.approved_amount > 0:
-            # 1. Get/Create Wallet for the PM
-            wallet = db.query(models.Caisse).filter(models.Caisse.user_id == item.target_pm_id).first()
-            if not wallet:
-                wallet = models.Caisse(user_id=item.target_pm_id, balance=0.0)
-                db.add(wallet)
-                db.flush()
-            
-            # 2. Update Balance
-            wallet.balance += item.approved_amount
-            
-            # 3. Create CREDIT Transaction
-            trx = models.Transaction(
-                caisse_id=wallet.id,
-                type=models.TransactionType.CREDIT,
-                amount=item.approved_amount,
-                description=f"Refill Request {req.request_number}",
-                related_request_id=req.id,
-                created_by_id=pd_user
-            )
-            db.add(trx)
-            
+    if not pending_txs:
+        # Check if maybe it's just fully done
+        req = db.query(models.FundRequest).get(req_id)
+        # If there are no pending transactions, it means everything approved so far 
+        # has already been confirmed. We can just return success.
+        return {"message": "All approved funds have already been confirmed."}
+        
+    confirmed_count = 0
+    total_confirmed_amount = 0.0
+    
+    for tx in pending_txs:
+        # 2. Update the Wallet Balance NOW
+        wallet = db.query(models.Caisse).get(tx.caisse_id)
+        if wallet:
+            wallet.balance += tx.amount
+        
+        # 3. Mark Transaction as COMPLETED
+        tx.status = models.TransactionStatus.COMPLETED
+        
+        confirmed_count += 1
+        total_confirmed_amount += tx.amount
+        
     db.commit()
-    return req
+    
+    return {
+        "confirmed_count": confirmed_count, 
+        "total_amount": total_confirmed_amount
+    }
 
 def get_caisse_stats(db: Session, user: models.User):
    
@@ -3942,33 +3968,42 @@ def get_transactions(
     
 def get_pending_requests(db: Session):
     """
-    Returns all requests that need attention (Pending or Approved/Waiting).
-    Used for the Dashboard table.
+    Returns unique pending requests with a flag indicating if confirmation is needed.
     """
-    # Filter for statuses that are 'active' workflow steps
     query = db.query(models.FundRequest).filter(
         models.FundRequest.status.in_([
             models.FundRequestStatus.PENDING_APPROVAL,
-            models.FundRequestStatus.APPROVED_WAITING_FUNDS,
-            models.FundRequestStatus.PARTIALLY_PAID 
-
+            models.FundRequestStatus.PARTIALLY_PAID,
+            models.FundRequestStatus.APPROVED_WAITING_FUNDS
         ])
     ).order_by(models.FundRequest.created_at.desc())
     
-    reqs = query.all()
+    reqs = query.distinct().all()
     
-    # Format
     results = []
     for r in reqs:
-        # Calculate total amount for this request
+        # Calculate total amount (sum of items)
         total = sum(i.requested_amount for i in r.items)
+        accepted = r.paid_amount or 0.0
+
+        # --- FIX: Check for Pending Transactions ---
+        # If there are transactions with status 'PENDING', the PD needs to confirm receipt.
+        pending_tx_count = db.query(models.Transaction).filter(
+            models.Transaction.related_request_id == r.id,
+            models.Transaction.status == models.TransactionStatus.PENDING
+        ).count()
+
         results.append({
             "id": r.id,
             "request_number": r.request_number,
             "created_at": r.created_at,
             "status": r.status,
             "total_amount": total,
-            "requester_name": f"{r.requester.first_name} {r.requester.last_name}"
+            "paid_amount": accepted,
+            "requester_name": f"{r.requester.first_name} {r.requester.last_name}",
+            
+            # --- NEW FIELD ---
+            "has_pending_transfer": pending_tx_count > 0 
         })
         
     return results
@@ -4016,12 +4051,14 @@ def get_request_by_id(db: Session, req_id: int):
     }
 
 
+# In crud.py
+
 def get_all_wallets_summary(db: Session):
     """
     Returns a list of all PM wallets with their balance and pending incoming amount.
-    Used for Admin/PD detailed view.
+    Pending Incoming = (Requested Amount - Approved Amount) for all active requests.
     """
-    # 1. Get all PMs, PDs, and Admins (anyone who might have a wallet)
+    # 1. Get all PMs/PDs/Admins
     pms = db.query(models.User).filter(
         models.User.role.in_([models.UserRole.PM, models.UserRole.PD, models.UserRole.ADMIN])
     ).all()
@@ -4032,39 +4069,38 @@ def get_all_wallets_summary(db: Session):
         wallet = db.query(models.Caisse).filter(models.Caisse.user_id == pm.id).first()
         balance = wallet.balance if wallet else 0.0
         
-        # B. Get Pending Incoming (Logic similar to get_caisse_stats)
-        # 1. Pending Approval (Use requested_amount)
-        pending_reqs = db.query(func.sum(models.FundRequestItem.requested_amount)).join(models.FundRequest).filter(
-            models.FundRequestItem.target_pm_id == pm.id,
-            models.FundRequest.status == models.FundRequestStatus.PENDING_APPROVAL
-        ).scalar() or 0.0
+        # B. Calculate Pending Incoming
+        # Logic: Sum of (Item.requested - Item.approved) for all items belonging to this PM
+        # where the request is NOT Completed or Rejected.
         
-        # 2. Approved but not yet Confirmed/Paid (Use approved_amount)
-        # Note: In our new logic, "Approved" means paid, so this might be 0, 
-        # but we keep it for consistency with legacy statuses.
-        waiting_funds = db.query(func.sum(models.FundRequestItem.approved_amount)).join(models.FundRequest).filter(
+        pending_items = db.query(
+            func.sum(models.FundRequestItem.requested_amount),
+            func.sum(models.FundRequestItem.approved_amount)
+        ).join(models.FundRequest).filter(
             models.FundRequestItem.target_pm_id == pm.id,
-            models.FundRequest.status == models.FundRequestStatus.APPROVED_WAITING_FUNDS
-        ).scalar() or 0.0
+            models.FundRequest.status.in_([
+                models.FundRequestStatus.PENDING_APPROVAL,
+                models.FundRequestStatus.APPROVED_WAITING_FUNDS,
+                models.FundRequestStatus.PARTIALLY_PAID
+            ])
+        ).first()
         
-        # 3. Partial Pending (Use remaining requested)
-        # This is tricky. If status is PARTIALLY_PAID, the "Pending" amount is 
-        # (Total Requested for this PM - Amount Paid to this PM).
-        # We need to find requests where this PM is a target and status is PARTIAL.
-        # Simple approximation: Sum of requested - Sum of approved for partial items?
-        # Actually, let's keep it simple: Pending In = Pending Approval + Waiting Funds.
-        # Partial requests are technically "Approved" partially, so the rest is not guaranteed.
+        req_sum = pending_items[0] or 0.0
+        app_sum = pending_items[1] or 0.0
+        
+        pending_in = req_sum - app_sum
         
         results.append({
             "user_id": pm.id,
             "user_name": f"{pm.first_name} {pm.last_name}",
             "balance": balance,
-            "pending_in": pending_reqs + waiting_funds
+            "pending_in": pending_items[0] or 0.0, # Just show requested for now, or use pending_in for gap
+             # Let's show the GAP (Money expected but not yet received)
+            "pending_in": pending_in
         })
         
-    # Sort by balance descending to see who has the most cash
+    # Sort by balance descending
     return sorted(results, key=lambda x: x['balance'], reverse=True)
-
 
 def process_fund_request(
     db: Session, 
@@ -4084,45 +4120,46 @@ def process_fund_request(
         req.admin_comment = payload.comment
         req.approver_id = admin_id
         req.approved_at = datetime.now()
-        # No money moves on rejection.
     
-    # 2. HANDLE APPROVAL (Full or Partial)
+    # 2. HANDLE APPROVAL
     elif payload.action == "APPROVE":
         if not payload.items:
-             raise ValueError("Approval requires items.")
+             raise ValueError("Approval requires item details.")
 
-        # --- FIX: Calculate Total Amount from Items ---
         amount_giving_now = sum(i.amount_to_pay for i in payload.items)
-        # ---------------------------------------------
-
-        if amount_giving_now <= 0:
-             raise ValueError("Approval requires a positive amount.")
+        
+        # --- VALIDATION: PREVENT OVERPAYMENT ---
+        current_paid = req.paid_amount or 0.0
+        total_requested = sum(i.requested_amount for i in req.items)
+        
+        if (current_paid + amount_giving_now) > (total_requested + 1.0): # 1.0 buffer for float
+            raise ValueError(
+                f"Overpayment Blocked: Total requested is {total_requested}, "
+                f"already paid {current_paid}. Cannot add {amount_giving_now}."
+            )
 
         # A. Update Global Request Tracking
-        current_paid = req.paid_amount or 0.0
         req.paid_amount = current_paid + amount_giving_now
-        
         req.approver_id = admin_id
         req.approved_at = datetime.now()
         req.admin_comment = payload.comment
 
-        # B. DISTRIBUTE MONEY & SAVE NOTES
+        # B. DISTRIBUTE MONEY (Create PENDING Transactions)
         for item_review in payload.items:
-            # Find the DB item
             db_item = next((i for i in req.items if i.id == item_review.item_id), None)
             if not db_item: continue
 
-            # 1. Update Admin Note
+            # Save Admin Note
             if item_review.admin_note:
                 db_item.admin_note = item_review.admin_note
             
             amount = item_review.amount_to_pay
             if amount <= 0: continue
 
-            # 2. Update Item Approved Amount
+            # Update Item Approved Amount
             db_item.approved_amount = (db_item.approved_amount or 0.0) + amount
 
-            # 3. Credit Specific PM Wallet
+            # Get the Wallet (Create if not exists)
             pm_id = db_item.target_pm_id
             wallet = db.query(models.Caisse).filter(models.Caisse.user_id == pm_id).first()
             if not wallet:
@@ -4130,21 +4167,25 @@ def process_fund_request(
                 db.add(wallet)
                 db.flush()
                 
-            wallet.balance += amount
+            # --- CRITICAL FIX: DO NOT UPDATE BALANCE HERE ---
+            # wallet.balance += amount  <-- REMOVED. This happens on confirmation.
             
-            # 4. Create Transaction
+            # Create Transaction with PENDING status
             trx = models.Transaction(
                 caisse_id=wallet.id,
                 type=models.TransactionType.CREDIT,
                 amount=amount,
-                description=f"Refill Request #{req.request_number} (Item #{db_item.id})",
+                description=f"Refill #{req.request_number} (Item #{db_item.id})",
                 related_request_id=req.id,
-                created_by_id=admin_id
+                created_by_id=admin_id,
+                
+                # --- THIS IS WHERE IT GETS SET ---
+                status=models.TransactionStatus.PENDING 
+                # ---------------------------------
             )
             db.add(trx)
 
-        # C. Determine New Status
-        total_requested = sum(i.requested_amount for i in req.items)
+        # C. Determine Status
         remaining = total_requested - req.paid_amount
         
         if remaining <= 0.01:
@@ -4382,23 +4423,6 @@ def reject_expense(db: Session, expense_id: int, current_user: models.User, reas
     return expense
 
 
-def get_caisse_stats(db: Session, current_user: models.User):
-    """Retourne les stats de la caisse de l'utilisateur"""
-    caisse = db.query(models.Caisse).filter(
-        models.Caisse.user_id == current_user.id
-    ).first()
-    
-    if not caisse:
-        # Créer une caisse si elle n'existe pas
-        caisse = models.Caisse(user_id=current_user.id, balance=0.0)
-        db.add(caisse)
-        db.commit()
-        db.refresh(caisse)
-    
-    return {
-        "balance": caisse.balance,
-        "user_id": current_user.id
-    }
 
 
 def get_payable_acts(db: Session, project_id: int):
@@ -4642,3 +4666,63 @@ def update_expense(db: Session, expense_id: int, payload: schemas.ExpenseCreate,
     db.commit()
     db.refresh(db_expense)
     return db_expense
+def get_grouped_history(db: Session, page: int = 1, limit: int = 10):
+    """
+    Returns Transactions grouped by their Parent Request.
+    """
+    # 1. Get Requests (Paginated) with Eager Loading of Items
+    total_reqs = db.query(models.FundRequest).count()
+    
+    requests = db.query(models.FundRequest).options(
+        joinedload(models.FundRequest.items) # Load items to calculate total
+    ).order_by(
+        models.FundRequest.created_at.desc()
+    ).offset((page - 1) * limit).limit(limit).all()
+    
+    data = []
+    for req in requests:
+        # 2. Get transactions for this request
+        txs = db.query(models.Transaction).filter(
+            models.Transaction.related_request_id == req.id
+        ).all()
+        
+        # Format Transactions
+        tx_list = []
+        for tx in txs:
+            # Load user name (Wallet Owner)
+            user = db.query(models.User).join(models.Caisse).filter(models.Caisse.id == tx.caisse_id).first()
+            user_name = f"{user.first_name} {user.last_name}" if user else "Unknown"
+            
+            tx_list.append({
+                "id": tx.id,
+                "amount": tx.amount,
+                "type": tx.type,
+                "description": tx.description,
+                "created_at": tx.created_at,
+                "status": tx.status,
+                "pm_name": user_name
+            })
+
+        # 3. Calculate Total Amount dynamically
+        calculated_total = sum(item.requested_amount for item in req.items)
+            
+        data.append({
+            "request_id": req.id,
+            "request_number": req.request_number,
+            "created_at": req.created_at,
+            
+            # --- FIX IS HERE ---
+            "total_amount": calculated_total, 
+            # -------------------
+            
+            "paid_amount": req.paid_amount,
+            "status": req.status,
+            "transactions": tx_list
+        })
+        
+    return {
+        "items": data,
+        "total": total_reqs,
+        "page": page,
+        "pages": (total_reqs + limit - 1) // limit
+    }

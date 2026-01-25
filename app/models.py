@@ -7,7 +7,7 @@ import sqlalchemy as sa
 from .enum import (
     ProjectType, UserRole, SBCStatus, BCStatus, NotificationType, BCType,
     AssignmentStatus, ValidationState, ItemGlobalStatus, SBCType,
-    FundRequestStatus, TransactionType
+    FundRequestStatus, TransactionType, TransactionStatus
 )
 from .database import Base
  # <--- AJOUTER CET IMPORT
@@ -577,7 +577,7 @@ class Transaction(Base):
     type = Column(Enum(TransactionType), nullable=False) # CREDIT or DEBIT
     amount = Column(Float, nullable=False)
     description = Column(String(255))
-    
+    status= Column(String(50), default=TransactionStatus.COMPLETED) # PENDING, COMPLETED, FAILED
     # Optional links for traceability
     related_request_id = Column(Integer, ForeignKey("fund_requests.id"), nullable=True)
     

@@ -91,3 +91,6 @@ class ExpenseStatus(str, enum.Enum):
     PAID = "PAID"           # Confirm Payment OK (Attachment Mandatory)
     RECEIVED = "RECEIVED"   # Confirm Reception (Final)
     REJECTED = "REJECTED"
+class TransactionStatus(str, enum.Enum):
+    PENDING = "PENDING"
+    COMPLETED = "COMPLETED"
