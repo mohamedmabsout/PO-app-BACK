@@ -457,7 +457,7 @@ class BCItemResponse(BCItemCreate):
     unit_price_sbc: float
     line_amount_sbc: float
     applied_tax_rate: float
-    merged_po: Optional[MergedPOSimple] = None 
+    merged_po: Optional[MergedPOBase] = None 
     qc_validation_status: Optional[str] = None
     pm_validation_status: Optional[str] = None
     global_status: Optional[str] = None
@@ -466,7 +466,6 @@ class BCItemResponse(BCItemCreate):
     postponed_until: Optional[datetime] = None
     act_id: Optional[int] = None
     
-    merged_po: Optional[MergedPOSimple] = None 
 
     model_config = ConfigDict(from_attributes=True)
 
