@@ -4227,9 +4227,11 @@ def create_expense(db: Session, current_user, payload):
 
 def list_my_requests(db: Session, current_user: models.User):
     """
-    Règle de visibilité :
-    - Un PM ne voit que ses propres dépenses (Draft ou autres).
-    - Un PD ou Admin voit TOUTES les dépenses SAUF les brouillons des autres.
+    Règle de visibilité CORRIGÉE :
+    - Un PM ne voit que ses propres dépenses (Draft inclus).
+    - Un PD ou Admin voit :
+        • Ses PROPRES dépenses (Draft inclus)
+        • Les dépenses des AUTRES à partir de PENDING_L1 (pas leurs Drafts)
     """
     query = db.query(models.Expense).options(
         joinedload(models.Expense.internal_project),
