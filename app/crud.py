@@ -3554,14 +3554,19 @@ def generate_act_record(db: Session, bc_id: int, creator_id: int, item_ids: List
     # ------------------------------------------
 
     # 3. Create Record
-    now_str = datetime.now().strftime("%Y%m%d%H%M%S")
+    now_dt = datetime.now() # Capture time once
+    now_str = now_dt.strftime("%Y%m%d%H%M%S")
     act_number = f"ACT-{now_str}" 
 
     act = models.ServiceAcceptance(
         act_number=act_number,
         bc_id=bc_id,
         creator_id=creator_id,
-        applied_tax_rate=validated_tax_rate # Store the validated rate
+        applied_tax_rate=validated_tax_rate,
+        
+        # --- FIX: Explicitly set the creation time ---
+        created_at=now_dt 
+        # ---------------------------------------------
     )
     db.add(act)
     db.flush() 
@@ -3712,29 +3717,11 @@ def get_sbc_acceptances(db: Session, user: models.User):
     if user.role != "SBC" or not user.sbc_id:
         return []
 
-    # Query the BCItem directly. 
-    # Join BonDeCommande to check ownership (sbc_id).
-    # Join MergedPO to get the description/site/po_no for display.
-    items = db.query(models.BCItem).join(
-        models.BonDeCommande
-    ).join(
-        models.MergedPO
-    ).options(
-        joinedload(models.BCItem.merged_po), # Load details for display
-        joinedload(models.BCItem.act),       # Load ACT info if generated
-        joinedload(models.BCItem.bc)         # Load BC number
-    ).filter(
-        models.BonDeCommande.sbc_id == user.sbc_id,
-        
-        # FILTER: Only show items that have passed all internal validation steps.
-        # i.e., "READY_FOR_ACT" (Approved by PD, waiting for paper) or "ACCEPTED" (Paper generated)
-        models.BCItem.global_status.in_([
-            models.ItemGlobalStatus.READY_FOR_ACT, 
-            models.ItemGlobalStatus.ACCEPTED
-        ])
-    ).order_by(models.BCItem.id.desc()).all()
-
-    return items
+    acts = db.query(models.ServiceAcceptance).join(models.BonDeCommande).filter(
+        models.BonDeCommande.sbc_id == user.sbc_id
+    ).order_by(models.ServiceAcceptance.created_at.desc()).all()
+    
+    return acts
 def create_fund_request(db: Session, pd_user: int, items: list):
     now = datetime.now()
     year = now.year
