@@ -581,6 +581,12 @@ class BulkValidationPayload(BaseModel):
     item_ids: List[int]
     action: str
     comment: Optional[str] = None
+
+class BCInfo(BaseModel):
+    id: int
+    bc_number: str
+    model_config = ConfigDict(from_attributes=True)
+
 class ServiceAcceptance(BaseModel):
     id: int
     act_number: str
@@ -591,6 +597,7 @@ class ServiceAcceptance(BaseModel):
     total_amount_ht: float
     total_tax_amount: float
     total_amount_ttc: float
+    bc: Optional[BCResponse] = None # Nested BC object
 
     model_config = ConfigDict(from_attributes=True)
 class ServiceAcceptanceList(BaseModel):
@@ -600,6 +607,21 @@ class ServiceAcceptanceList(BaseModel):
     bc: BCResponse # Nested schema
     creator: UserInfo     # Nested schema
     items: List[BCItemResponse] # Nested schema
+    model_config = ConfigDict(from_attributes=True)
+
+class ServiceAcceptanceItemDetail(BaseModel):
+    id: int
+    quantity_sbc: float
+    unit_price_sbc: float
+    line_amount_sbc: float
+    applied_tax_rate: float
+    # Nested PO details for description
+    merged_po: Optional[MergedPOSimple] = None 
+    
+    model_config = ConfigDict(from_attributes=True)
+
+class ServiceAcceptanceDetail(ServiceAcceptance): # Inherits basic fields
+    items: List[ServiceAcceptanceItemDetail] = []
     model_config = ConfigDict(from_attributes=True)
 class SBCKpiSummary(BaseModel):
     total_bc_value: float

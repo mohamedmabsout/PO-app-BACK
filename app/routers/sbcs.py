@@ -1,10 +1,11 @@
 from fastapi import APIRouter, BackgroundTasks, Depends, UploadFile, File, Form, HTTPException
 from fastapi_mail import MessageSchema, MessageType, FastMail, ConnectionConfig
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session,joinedload
 from typing import List, Optional
 from .. import crud, schemas, auth, models
 from ..dependencies  import get_db,require_admin
 from ..config import conf
+
 import secrets
 router = APIRouter(prefix="/api/sbcs", tags=["SBC Management"])
 
@@ -76,6 +77,63 @@ def get_my_sbc_kpis(
 ):
     return crud.get_sbc_kpis(db, user=current_user)
 
+@router.get("/generated-acts")
+def get_sbc_generated_acts(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    if current_user.role != "SBC": return []
+    
+    # Fetch ACTs linked to SBC's BCs
+    acts = db.query(models.ServiceAcceptance).join(models.BonDeCommande).options(
+        joinedload(models.ServiceAcceptance.bc) # This loads the relationship
+    ).filter(
+        models.BonDeCommande.sbc_id == current_user.sbc_id
+    ).order_by(models.ServiceAcceptance.created_at.desc()).all()
+
+    return acts # Pydantic will serialize
+@router.get("/acceptance-pipeline")
+def get_sbc_acceptance_pipeline(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    if current_user.role != "SBC": return []
+
+    # Get BCs with items that have started the process
+    # Or just get all Approved BCs, as they are the candidates for acceptance
+    bcs = db.query(models.BonDeCommande).filter(
+        models.BonDeCommande.sbc_id == current_user.sbc_id,
+        models.BonDeCommande.status == models.BCStatus.APPROVED
+    ).all()
+    
+    result = []
+    for bc in bcs:
+        # Calculate stats for this BC
+        ready_count = 0
+        ready_amount = 0.0
+        pending_count = 0
+        
+        for item in bc.items:
+            if item.global_status == models.ItemGlobalStatus.READY_FOR_ACT:
+                ready_count += 1
+                ready_amount += (item.line_amount_sbc or 0)
+            elif item.global_status in [models.ItemGlobalStatus.PENDING_PD_APPROVAL]:
+                 pending_count += 1
+        
+        # Only include if there's activity
+        if ready_count > 0 or pending_count > 0:
+            result.append({
+                "bc_id": bc.id,
+                "bc_number": bc.bc_number,
+                "project": bc.internal_project.name,
+                "ready_count": ready_count,
+                "ready_amount": ready_amount,
+                "pending_count": pending_count,
+                "status": "Ready to Generate" if ready_count > 0 else "In Progress"
+            })
+            
+    return result
+
 @router.get("/my-acceptances")
 def read_sbc_acceptances(
     db: Session = Depends(get_db),
@@ -111,6 +169,37 @@ def read_sbc_acceptances(
             "act_number": item.act.act_number if item.act else "Pending Generation"
         })
     return result
+
+@router.get("/act/{act_id}", response_model=schemas.ServiceAcceptanceDetail) 
+def get_sbc_act_details(
+    act_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    # 1. Fetch ACT with items
+    act = db.query(models.ServiceAcceptance).options(
+        joinedload(models.ServiceAcceptance.bc).joinedload(models.BonDeCommande.internal_project),
+        joinedload(models.ServiceAcceptance.items).joinedload(models.BCItem.merged_po)
+    ).filter(models.ServiceAcceptance.id == act_id).first()
+    
+    if not act:
+        raise HTTPException(404, "Acceptance not found")
+        
+    # 2. Security Check (Crucial!)
+    if current_user.role == "SBC":
+        # Ensure this ACT belongs to a BC owned by this SBC
+        if not act.bc or act.bc.sbc_id != current_user.sbc_id:
+            raise HTTPException(403, "Access denied to this Acceptance record.")
+            
+    return act
+
+
+
+
+
+
+
+
 
 @router.post("/{sbc_id}/approve")
 async def approve_sbc_endpoint(
