@@ -4530,35 +4530,26 @@ def list_pending_payment(db: Session):
     ).filter(models.Expense.status == "PENDING_PAYMENT").all()
 
 def confirm_expense_payment(db: Session, expense_id: int, attachment_name: str):
-    """Finalise le paiement, enregistre le reçu et débite le solde de la caisse"""
+    """Finalise la dépense : change le statut et enregistre le reçu sans déduction de solde"""
     expense = db.query(models.Expense).get(expense_id)
     if not expense:
         return None
     
-    # 1. Récupérer la caisse du demandeur (le PM) pour déduire l'argent
-  
-    caisse = db.query(models.Caisse).filter(models.Caisse.user_id == expense.requester_id).first()
-    
-    if not caisse or caisse.balance < expense.amount:
-        raise ValueError("Solde de caisse insuffisant pour effectuer ce paiement.")
-    
-    # 1. Débiter la caisse
-    caisse.balance -= expense.amount
-    
-    # 2. Mettre à jour la dépense
+    # 1. Mise à jour de la dépense
     expense.status = "PAID"
     expense.attachment = attachment_name
     expense.updated_at = datetime.now()
     
-    db.commit()
+    # 2. Notification au PM pour confirmer que tout est en ordre
     create_notification(
         db,
         recipient_id=expense.requester_id,
         type=models.NotificationType.APP,
-        title="Dépense Payée ✅",
-        message=f"Votre demande de {expense.amount} MAD a été payée. Votre solde caisse a été débité.",
+        title="Paiement Confirmé 🏁",
+        message=f"Le justificatif pour votre dépense de {expense.amount} MAD a été enregistré. La demande est clôturée.",
         link="/expenses"
     )
+    
     db.commit()
     db.refresh(expense)
     return expense
