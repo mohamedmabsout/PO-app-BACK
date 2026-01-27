@@ -2693,7 +2693,7 @@ def submit_bc(db: Session, bc_id: int):
     return bc
 
 
-def approve_bc_l1(db: Session, bc_id: int, approver_id: int):
+def approve_bc_l1(db: Session, bc_id: int, approver_id: int, background_tasks: BackgroundTasks):
     # 1. Fetch the Approver User to check permissions
     approver = db.query(models.User).get(approver_id)
     if not approver:
@@ -2783,7 +2783,10 @@ def get_all_bcs(db: Session, current_user: models.User, search: Optional[str] = 
         # SBCs see BCs where they are the subcontractor
         if not current_user.sbc_id:
             return [] # This SBC user is not linked to an SBC profile, return nothing
-        query = query.filter(models.BonDeCommande.sbc_id == current_user.sbc_id)
+        query = query.filter(
+            or_(models.BonDeCommande.sbc_id == current_user.sbc_id,
+            models.BonDeCommande.status != models.BCStatus.DRAFT) # SBCs cannot see DRAFT BCs
+        )
 
     # Apply search filter
     if search:
@@ -2889,7 +2892,7 @@ def assign_site_to_internal_project_by_code(
     db.commit()
     return updated_rows
 
-def bulk_assign_sites(db: Session, site_ids: List[int], target_project_id: int, admin_user: models.User):
+def bulk_assign_sites(db: Session, site_ids: List[int], target_project_id: int, admin_user: models.User, background_tasks: BackgroundTasks):
     # 1. Get Target Project Details
     target_project = db.query(models.InternalProject).get(target_project_id)
     if not target_project: 
@@ -4373,7 +4376,7 @@ def list_pending_l2(db: Session):
 
 
 
-def submit_expense(db: Session, expense_id: int):
+def submit_expense(db: Session, expense_id: int,background_tasks: BackgroundTasks = None):
     """Soumet une dépense pour validation L1"""
     expense = db.query(models.Expense).filter(models.Expense.id == expense_id).first()
     
@@ -4445,7 +4448,7 @@ def submit_expense(db: Session, expense_id: int):
     return expense
 
 
-def approve_expense_l1(db: Session, expense_id: int, approver_id: int):
+def approve_expense_l1(db: Session, expense_id: int, approver_id: int,background_tasks: BackgroundTasks = None):
     expense = db.query(models.Expense).get(expense_id)
     if not expense:
         return None
