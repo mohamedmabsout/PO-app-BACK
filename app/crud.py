@@ -4454,24 +4454,32 @@ def submit_expense(db: Session, expense_id: int,background_tasks: BackgroundTask
     return expense
 
 
-def approve_expense_l1(db: Session, expense_id: int, approver_id: int,background_tasks: BackgroundTasks = None):
+def approve_expense_l1(db: Session, expense_id: int, approver_id: int, background_tasks: BackgroundTasks):
+    # 1. Récupération de la dépense
     expense = db.query(models.Expense).get(expense_id)
     if not expense:
         return None
     
+    # 2. Mise à jour du statut et de la traçabilité
     expense.status = "PENDING_L2"
-    # Utilisation correcte avec l'import de datetime
-    expense.approved_l1_at = datetime.utcnow()  # ✅ Date L1
+    expense.approved_l1_at = datetime.utcnow()
     expense.approved_l1_by = approver_id
     
     db.commit()
+
+    # 3. Notification des administrateurs
     admins = db.query(models.User).filter(models.User.role.ilike("ADMIN")).all()
     for admin in admins:
+        # On passe background_tasks seulement s'il n'est pas None
+        # pour éviter l'erreur "NoneType object has no attribute add_task"
         create_notification(
-            db, recipient_id=admin.id, type=models.NotificationType.TODO,
-            title="Paiement Requis (L2)",
+            db, 
+            recipient_id=admin.id, 
+            type=models.NotificationType.TODO,
+            title="Paiement Requis (L2) 🏦",
             message=f"La dépense #{expense.id} de {expense.amount} MAD a été validée par le PD. Merci de procéder au paiement.",
-            link="/expenses?tab=l2"
+            link="/expenses?tab=l2",
+            background_tasks=background_tasks  # Assurez-vous que create_notification accepte cet argument
         )
         
     db.commit()
