@@ -117,7 +117,7 @@ def get_sbc_acceptance_pipeline(
             if item.global_status == models.ItemGlobalStatus.READY_FOR_ACT:
                 ready_count += 1
                 ready_amount += (item.line_amount_sbc or 0)
-            elif item.global_status in [models.ItemGlobalStatus.PENDING_PD_APPROVAL, models.ItemGlobalStatus.PENDING, models.ItemGlobalStatus.PENDING_APPROVAL]:
+            elif item.global_status in [models.ItemGlobalStatus.PENDING_PD_APPROVAL, models.ItemGlobalStatus.PENDING]:
                  pending_count += 1
         
         # Only include if there's activity
