@@ -708,6 +708,12 @@ def create_fund_request(    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
+    if current_user.role not in [models.UserRole.PD, models.UserRole.ADMIN]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only Project Directors or Admins can create fund requests."
+        )
+
     req = crud.create_fund_request(db, current_user.id, payload.items) 
     admins = db.query(models.User).filter(models.User.role == "ADMIN").all()
     admin_emails = [u.email for u in admins if u.email]
