@@ -168,11 +168,18 @@ def get_acts_for_expense(
     return crud.get_payable_acts(db, project_id)
 
 @router.post("/{id}/submit")
-def submit_to_pd(id: int, db: Session = Depends(get_db)):
-    try:
-        return crud.submit_expense(db, id)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+def submit_to_pd(
+    id: int, 
+    background_tasks: BackgroundTasks, # 1. Ajoutez cet argument ici
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    # 2. Transmettez background_tasks à la fonction crud
+    exp = crud.submit_expense(db, id, background_tasks) 
+    
+    if not exp:
+        raise HTTPException(status_code=404, detail="Dépense non trouvée")
+    return exp
     
     
 @router.get("/export/excel")

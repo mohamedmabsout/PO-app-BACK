@@ -3256,7 +3256,9 @@ def create_notification(
     type: models.NotificationType, 
     title: str, 
     message: str, 
-    link: str = None
+    link: str = None,
+    background_tasks=None
+   
 ):
     notif = models.Notification(
         recipient_id=recipient_id,
@@ -3264,6 +3266,7 @@ def create_notification(
         title=title,
         message=message,
         link=link
+        
     )
     db.add(notif)
     # We usually commit in the main flow, but you can commit here if you want it instant
@@ -4254,7 +4257,7 @@ def submit_expense(db: Session, expense_id: int, background_tasks: BackgroundTas
             title="Nouvelle dépense à valider 📝",
             message=f"Le PM {expense.requester.first_name} a soumis une dépense de {expense.amount} MAD pour le projet {expense.internal_project.name}.",
             link="/expenses?tab=l1",
-            background_tasks=background_tasks
+            
         )
 
     db.commit()
