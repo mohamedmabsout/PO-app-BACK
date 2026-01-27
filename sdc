@@ -21,7 +21,7 @@ git push
 git add . 
 git commit -m "jkdcbv"
 git push origin site/internal
-
+git pull origin mohamed-clean-version
 # On the server, in your project directory
 
 # Step 1: Stop the running containers

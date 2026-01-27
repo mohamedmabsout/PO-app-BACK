@@ -4380,57 +4380,35 @@ def list_pending_l2(db: Session):
         models.Expense.status == "PENDING_L2"
     ).order_by(models.Expense.created_at.desc()).all()
 
-
-
-def submit_expense(db: Session, expense_id: int,background_tasks: BackgroundTasks = None):
-    """Soumet une dépense pour validation L1"""
+def submit_expense(db: Session, expense_id: int, background_tasks: BackgroundTasks):
+    # 1. Récupérer la dépense
     expense = db.query(models.Expense).filter(models.Expense.id == expense_id).first()
-    
     if not expense:
-        raise ValueError("Dépense introuvable")
-    
-    print(f"🔍 Submit - ID: {expense_id}, Status actuel: {expense.status}")
-    
-    if expense.status != "DRAFT":
-        raise ValueError(f"Seules les dépenses en brouillon peuvent être soumises. Status actuel: {expense.status}")
-    
-    # ✅ CORRECTION : Utiliser requester_id au lieu de creator_id
-    caisse = db.query(models.Caisse).filter(
-        models.Caisse.user_id == expense.requester_id  # ✅ Changé de creator_id à requester_id
-    ).first()
-    
-    if not caisse or caisse.balance < expense.amount:
-        raise ValueError("Solde caisse insuffisant")
-    
-    # Changer le statut
+        return None
+
+    # 2. Changer le statut pour le mettre dans le workflow du PD
     expense.status = "PENDING_L1"
-    expense.submitted_at = datetime.utcnow()  # ✅ Ajoutez cette ligne si vous avez ce champ
+    expense.submitted_at = datetime.utcnow() # Traçabilité
     
     db.commit()
-    
-    # Notifications aux PD
+
+    # 3. Notifier les Directeurs de Projet (PD)
+    # On cherche tous les utilisateurs qui ont le rôle PD
     pds = db.query(models.User).filter(
-        or_(
-            models.User.role.ilike("PD"),
-            models.User.role.ilike("PROJECT DIRECTOR"),
-            models.User.role.ilike("PROJECTDIRECTOR"),
-            models.User.role.ilike("%DIRECTOR%")
-        )
+        (models.User.role.ilike("PD")) | (models.User.role.ilike("PROJECT DIRECTOR"))
     ).all()
 
-    print(f"📧 Envoi de notifications à {len(pds)} PD(s)")
-
     for pd in pds:
-        print(f"  → {pd.username} (ID: {pd.id})")
         create_notification(
             db,
             recipient_id=pd.id,
             type=models.NotificationType.TODO,
-            title="Validation L1 Requise (Petty Cash)",
-            message=f"Le PM {expense.requester.first_name} a soumis {expense.amount} MAD pour le projet {expense.internal_project.name}.",
-            link="/expenses?tab=l1"
+            title="Nouvelle dépense à valider 📝",
+            message=f"Le PM {expense.requester.first_name} a soumis une dépense de {expense.amount} MAD pour le projet {expense.internal_project.name}.",
+            link="/expenses?tab=l1",
+            background_tasks=background_tasks
         )
-    
+
     db.commit()
     db.refresh(expense)
     
@@ -4454,32 +4432,26 @@ def submit_expense(db: Session, expense_id: int,background_tasks: BackgroundTask
     return expense
 
 
-def approve_expense_l1(db: Session, expense_id: int, approver_id: int, background_tasks: BackgroundTasks):
-    # 1. Récupération de la dépense
+
+def approve_expense_l1(db: Session, expense_id: int, approver_id: int , background_tasks: BackgroundTasks): # Ajoutez l'argument):
     expense = db.query(models.Expense).get(expense_id)
     if not expense:
         return None
     
-    # 2. Mise à jour du statut et de la traçabilité
     expense.status = "PENDING_L2"
-    expense.approved_l1_at = datetime.utcnow()
+    # Utilisation correcte avec l'import de datetime
+    expense.approved_l1_at = datetime.utcnow()  # ✅ Date L1
     expense.approved_l1_by = approver_id
     
     db.commit()
-
-    # 3. Notification des administrateurs
     admins = db.query(models.User).filter(models.User.role.ilike("ADMIN")).all()
     for admin in admins:
-        # On passe background_tasks seulement s'il n'est pas None
-        # pour éviter l'erreur "NoneType object has no attribute add_task"
-        create_notification(
-            db, 
-            recipient_id=admin.id, 
-            type=models.NotificationType.TODO,
-            title="Paiement Requis (L2) 🏦",
+          create_notification(
+            db, recipient_id=admin.id, type=models.NotificationType.TODO,
+            title="Paiement Requis (L2)",
             message=f"La dépense #{expense.id} de {expense.amount} MAD a été validée par le PD. Merci de procéder au paiement.",
             link="/expenses?tab=l2",
-            background_tasks=background_tasks  # Assurez-vous que create_notification accepte cet argument
+            background_tasks=background_tasks
         )
         
     db.commit()
