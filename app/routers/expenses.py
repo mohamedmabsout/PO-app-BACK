@@ -1,7 +1,7 @@
 # app/routers/expenses.py
 from datetime import datetime
 import io
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from fastapi.temp_pydantic_v1_params import Body
 import pandas as pd
 from sqlalchemy.orm import Session
@@ -71,6 +71,7 @@ def get_pending_l1(
 
 @router.post("/{id}/approve-l1")
 def approve_l1(
+    background_tasks: BackgroundTasks,
     id: int, 
     db: Session = Depends(get_db), 
     current_user: models.User = Depends(auth.get_current_user)
@@ -79,13 +80,10 @@ def approve_l1(
     require_roles(current_user, ["PD", "ADMIN"])
     
     # Appel de la logique de validation avec l'ID de l'approbateur
-    expense = crud.approve_expense_l1(db, id, current_user.id)  # Ajoutez current_user.id ici
-    
+    expense = crud.approve_expense_l1(db, id, current_user.id, background_tasks) 
     if not expense:
-        raise HTTPException(status_code=404, detail="Dépense non trouvée")
-        
+        raise HTTPException(status_code=404, detail="Expense not found")
     return expense
-
 @router.get("/pending-l2", response_model=list[schemas.ExpenseOut])
 def get_pending_l2(
     db: Session = Depends(get_db),
@@ -201,14 +199,15 @@ def export_expenses_to_excel(
         media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         headers=headers
     )
-@router.get("/pending-payment", response_model=list[schemas.ExpenseOut])
-def get_pending_payment(
-    db: Session = Depends(get_db),
+@router.get("/pending-payment", response_model=List[schemas.ExpenseOut])
+def get_pending_payments(
+    db: Session = Depends(get_db), 
     current_user: models.User = Depends(auth.get_current_user)
 ):
-    # Sécurité : Seul le PD (ou Admin) peut voir cette liste de paiement
-    require_roles(current_user, ["PD", "PROJECT DIRECTOR", "ADMIN"])
-    return crud.list_pending_payment(db)
+    # AJOUTEZ "PM" ICI dans les rôles autorisés
+    require_roles(current_user, ["ADMIN", "PD", "PROJECT DIRECTOR", "PM"]) 
+    
+    return db.query(models.Expense).filter(models.Expense.status == "PENDING_PAYMENT").all()
 
 @router.post("/{id}/confirm-payment")
 def confirm_payment(
