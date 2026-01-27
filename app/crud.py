@@ -4295,9 +4295,9 @@ def process_fund_request(
         # C. Determine Status
         remaining = total_requested - req.paid_amount
         
-        if remaining <= 0.01:
-            req.status = models.FundRequestStatus.COMPLETED
-        else:
+        # if remaining <= 0.01:
+        #     req.status = models.FundRequestStatus.COMPLETED
+        # else:
             if payload.close_request:
                 req.status = models.FundRequestStatus.CLOSED_PARTIAL
             else:
