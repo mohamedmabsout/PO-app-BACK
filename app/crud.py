@@ -4298,10 +4298,10 @@ def process_fund_request(
         # if remaining <= 0.01:
         #     req.status = models.FundRequestStatus.COMPLETED
         # else:
-            if payload.close_request:
-                req.status = models.FundRequestStatus.CLOSED_PARTIAL
-            else:
-                req.status = models.FundRequestStatus.PARTIALLY_PAID
+        if payload.close_request:
+            req.status = models.FundRequestStatus.CLOSED_PARTIAL
+        else:
+            req.status = models.FundRequestStatus.PARTIALLY_PAID
     
     db.commit()
     db.refresh(req)
