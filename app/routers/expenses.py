@@ -73,13 +73,15 @@ def get_pending_l1(
 def approve_l1(
     id: int, 
     db: Session = Depends(get_db), 
-    current_user: models.User = Depends(auth.get_current_user)
+    current_user: models.User = Depends(auth.get_current_user),
+        background_tasks: BackgroundTasks = BackgroundTasks() # 2. Add this parameter
+
 ):
     # On vérifie que l'utilisateur est soit PD, soit ADMIN
     require_roles(current_user, ["PD", "ADMIN"])
     
     # Appel de la logique de validation avec l'ID de l'approbateur
-    expense = crud.approve_expense_l1(db, id, current_user.id)  # Ajoutez current_user.id ici
+    expense = crud.approve_expense_l1(db, id, current_user.id, background_tasks)  # Ajoutez current_user.id ici
     
     if not expense:
         raise HTTPException(status_code=404, detail="Dépense non trouvée")
