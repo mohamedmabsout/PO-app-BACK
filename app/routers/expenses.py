@@ -71,7 +71,6 @@ def get_pending_l1(
 
 @router.post("/{id}/approve-l1")
 def approve_l1(
-    background_tasks: BackgroundTasks,
     id: int, 
     db: Session = Depends(get_db), 
     current_user: models.User = Depends(auth.get_current_user),
