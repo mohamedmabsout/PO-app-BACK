@@ -27,7 +27,8 @@ import secrets
 from .config import conf
 from datetime import datetime, timedelta
 from sqlalchemy import func,or_
-from .utils.pdf_generator import generate_act_pdf
+ 
+
 logger = logging.getLogger(__name__)
 
 
