@@ -3927,7 +3927,12 @@ def confirm_fund_reception(db: Session, req_id: int, pd_user: int):
         
     confirmed_count = 0
     total_confirmed_amount = 0.0
-    
+    req = db.query(models.FundRequest).get(req_id)
+    total_requested = sum(i.requested_amount for i in req.items)
+
+    remaining = total_requested - req.paid_amount
+    if remaining <= 0.01:
+             req.status = models.FundRequestStatus.COMPLETED
     for tx in pending_txs:
         # 2. Update the Wallet Balance NOW
         wallet = db.query(models.Caisse).get(tx.caisse_id)
