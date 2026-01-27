@@ -44,6 +44,59 @@ PAYMENT_TERM_MAP = {
     "AC1 (100%, Invoice AC -30D, Complete 100%) ▍": "AC PAC 100%",
     "COD": "AC PAC 100%",
 }
+def send_notification_email(
+    background_tasks: BackgroundTasks,
+    recipients: List[str],
+    subject: str,
+    template_name: str,
+    context: dict
+):
+    """
+    Generic helper to send HTML emails via background tasks.
+    """
+    if not recipients:
+        return
+
+    # Basic HTML builder (In a production app, use Jinja2 templates)
+    html_content = f"""
+    <html>
+        <body style="font-family: Arial, sans-serif; color: #333;">
+            <div style="background-color: #f8f9fa; padding: 20px; border-bottom: 2px solid #007bff;">
+                <h2 style="color: #007bff; margin: 0;">SIB Portal Notification</h2>
+            </div>
+            <div style="padding: 20px;">
+                <h3>{subject}</h3>
+                <p>Hello,</p>
+                <p>{context.get('message', '')}</p>
+                <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
+                    { "".join([f"<tr><td style='padding:8px; border:1px solid #ddd;'><b>{k}:</b></td><td style='padding:8px; border:1px solid #ddd;'>{v}</td></tr>" for k, v in context.get('details', {}).items()]) }
+                </table>
+                <p>Please log in to the portal to take action.</p>
+                <a href="{os.getenv('FRONTEND_URL', 'http://localhost:3000')}{context.get('link', '')}" 
+                   style="display: inline-block; padding: 10px 20px; background-color: #007bff; color: white; text-decoration: none; border-radius: 5px;">
+                   View in Portal
+                </a>
+            </div>
+            <div style="padding: 20px; font-size: 12px; color: #777;">
+                This is an automated message from the SIB Management System.
+            </div>
+        </body>
+    </html>
+    """
+
+    message = MessageSchema(
+        subject=f"SIB Portal: {subject}",
+        recipients=recipients,
+        body=html_content,
+        subtype=MessageType.html
+    )
+    fm = FastMail(conf)
+    background_tasks.add_task(fm.send_message, message)
+
+# --- ROLE HELPER ---
+def get_emails_by_role(db: Session, role: UserRole) -> List[str]:
+    users = db.query(models.User).filter(models.User.role == role, models.User.is_active == True).all()
+    return [u.email for u in users if u.email]
 
 
 def get_user_by_email(db: Session, email: str):
@@ -2444,7 +2497,7 @@ def save_upload_file(upload_file, sbc_code, doc_type):
         
     return filename
 
-def create_sbc(db: Session, form_data: dict, contract_file, tax_file, creator_id: int):
+def create_sbc(db: Session, form_data: dict, contract_file, tax_file, creator_id: int, background_tasks: BackgroundTasks):
     # 1. Handle Code
     email = form_data.get('email')
     phone = form_data.get('phone_1')
@@ -2501,6 +2554,20 @@ def create_sbc(db: Session, form_data: dict, contract_file, tax_file, creator_id
     db.add(new_sbc)
     db.commit()
     db.refresh(new_sbc)
+    admin_emails = get_emails_by_role(db, UserRole.ADMIN)
+    send_notification_email(
+        background_tasks,
+        admin_emails,
+        "New Subcontractor Pending Approval",
+        "",
+        {
+            "message": "A new subcontractor has been registered and requires validation.",
+            "details": {"SBC Name": new_sbc.name, "SBC Code": new_sbc.sbc_code, "Creator": f"User ID {creator_id}"},
+            "link": "/sbc/approve"
+        }
+    )
+    return new_sbc
+
     return new_sbc
 def get_pending_sbcs(db: Session):
     return db.query(models.SBC).filter(
@@ -2605,6 +2672,24 @@ def submit_bc(db: Session, bc_id: int):
     bc.status = models.BCStatus.SUBMITTED
     bc.submitted_at = datetime.now()
     db.commit()
+    # pd_emails = get_emails_by_role(db, UserRole.PD)
+    # send_notification_email(
+    #     background_tasks,
+    #     pd_emails,
+    #     "BC Submitted - L1 Approval Required",
+    #     "",
+    #     {
+    #         "message": "A new Purchase Order (BC) has been submitted and requires Project Director validation.",
+    #         "details": {
+    #             "BC Number": bc.bc_number,
+    #             "Project": bc.internal_project.name,
+    #             "Amount": f"{bc.total_amount_ttc:,.2f} MAD",
+    #             "Subcontractor": bc.sbc.short_name
+    #         },
+    #         "link": f"/bcs/{bc.id}"
+    #     }
+    # )
+
     return bc
 
 
@@ -2629,6 +2714,19 @@ def approve_bc_l1(db: Session, bc_id: int, approver_id: int):
     bc.approver_l1_id = approver_id
     bc.approved_l1_at = datetime.now()
     db.commit()
+    admin_emails = get_emails_by_role(db, UserRole.ADMIN)
+    send_notification_email(
+        background_tasks,
+        admin_emails,
+        "BC Validated L1 - Final Approval (L2) Required",
+        "",
+        {
+            "message": "A BC has passed L1 validation and is now pending final Admin approval.",
+            "details": {"BC Number": bc.bc_number, "L1 Approver": f"User ID {approver_id}"},
+            "link": f"/bcs/{bc.id}"
+        }
+    )
+
     return bc
 
 
@@ -2868,6 +2966,24 @@ def bulk_assign_sites(db: Session, site_ids: List[int], target_project_id: int, 
             db.commit()
         except Exception as e:
             print(f"Failed to send notification: {e}")
+    if target_project and target_project.project_manager:
+        pm_email = target_project.project_manager.email
+        if pm_email:
+            send_notification_email(
+                background_tasks,
+                [pm_email],
+                "New Site Assignments Pending Review",
+                "",
+                {
+                    "message": f"Admin {admin_user.first_name} has assigned new sites/POs to your project. Please review and approve the assignments.",
+                    "details": {
+                        "Project": target_project.name,
+                        "Total PO Lines": result_count,
+                        "Sites Count": len(site_ids)
+                    },
+                    "link": "/projects/approvals"
+                }
+            )
 
     return {"updated": result_count, "skipped": len(site_ids) - len(valid_site_ids)}
 
@@ -4162,7 +4278,7 @@ def process_fund_request(
                 caisse_id=wallet.id,
                 type=models.TransactionType.CREDIT,
                 amount=amount,
-                description=f"Refill #{req.request_number} (Item #{db_item.id})",
+                description=f"Refill \"{req.request_number}\" (Item {db_item.id})",
                 related_request_id=req.id,
                 created_by_id=admin_id,
                 created_at=datetime.now(),
@@ -4310,9 +4426,23 @@ def submit_expense(db: Session, expense_id: int):
     db.refresh(expense)
     
     print(f"✅ Dépense soumise - ID: {expense_id}, Nouveau status: {expense.status}")
-    
+    pd_emails = get_emails_by_role(db, UserRole.PD)
+    send_notification_email(
+        background_tasks,
+        pd_emails,
+        "Expense Approval Required (L1)",
+        "",
+        {
+            "message": f"PM {expense.requester.first_name} has submitted an expense for project {expense.internal_project.name}.",
+            "details": {
+                "Amount": f"{expense.amount} MAD",
+                "Type": expense.exp_type,
+                "Beneficiary": expense.beneficiary
+            },
+            "link": "/expenses?tab=l1"
+        }
+    )
     return expense
-
 
 
 def approve_expense_l1(db: Session, expense_id: int, approver_id: int):
@@ -4336,10 +4466,19 @@ def approve_expense_l1(db: Session, expense_id: int, approver_id: int):
         )
         
     db.commit()
-    db.refresh(expense)
+    admin_emails = get_emails_by_role(db, UserRole.ADMIN)
+    send_notification_email(
+        background_tasks,
+        admin_emails,
+        "Expense Validated L1 - Payment Required (L2)",
+        "",
+        {
+            "message": "An expense has been validated by a PD and requires final payment processing.",
+            "details": {"Expense ID": expense.id, "Amount": f"{expense.amount} MAD"},
+            "link": "/expenses?tab=l2"
+        }
+    )
     return expense
-
-
 
 def approve_l2(db: Session, expense_id: int, current_user: models.User):
     """Validation L2 et paiement par Admin/CEO"""
