@@ -4249,8 +4249,8 @@ def submit_expense(db: Session, expense_id: int, background_tasks: BackgroundTas
         (models.User.role.ilike("PD")) | (models.User.role.ilike("PROJECT DIRECTOR"))
     ).all()
 
-    for pd in pds:
-        create_notification(
+    background_tasks.add_task(
+        create_notification,
             db,
             recipient_id=pd.id,
             type=models.NotificationType.TODO,

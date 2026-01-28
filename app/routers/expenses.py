@@ -170,16 +170,12 @@ def get_acts_for_expense(
 @router.post("/{id}/submit")
 def submit_to_pd(
     id: int, 
-    background_tasks: BackgroundTasks, # 1. Ajoutez cet argument ici
+    background_tasks: BackgroundTasks, # <--- On demande à FastAPI l'accès aux tâches
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user)
+    current_user = Depends(auth.get_current_user)
 ):
-    # 2. Transmettez background_tasks à la fonction crud
-    exp = crud.submit_expense(db, id, background_tasks) 
-    
-    if not exp:
-        raise HTTPException(status_code=404, detail="Dépense non trouvée")
-    return exp
+    # On passe l'objet background_tasks au fichier crud.py
+    return crud.submit_expense(db, id, background_tasks)
     
     
 @router.get("/export/excel")
