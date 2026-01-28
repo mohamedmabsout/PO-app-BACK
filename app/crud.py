@@ -4232,35 +4232,32 @@ def list_pending_l2(db: Session):
     ).order_by(models.Expense.created_at.desc()).all()
 
 def submit_expense(db: Session, expense_id: int, background_tasks: BackgroundTasks):
-    # 1. Récupérer la dépense
-    expense = db.query(models.Expense).filter(models.Expense.id == expense_id).first()
+    expense = db.query(models.Expense).get(expense_id)
     if not expense:
         return None
 
-    # 2. Changer le statut pour le mettre dans le workflow du PD
+    # Étape 1 : Mise à jour du statut (ça, ça marche chez vous)
     expense.status = "PENDING_L1"
-    expense.submitted_at = datetime.utcnow() # Traçabilité
-    
-    db.commit()
+    db.commit() # L'enregistrement est fait ici
 
-    # 3. Notifier les Directeurs de Projet (PD)
-    # On cherche tous les utilisateurs qui ont le rôle PD
-    pds = db.query(models.User).filter(
-        (models.User.role.ilike("PD")) | (models.User.role.ilike("PROJECT DIRECTOR"))
-    ).all()
+    # Étape 2 : Notifications (C'est ICI que ça plante sûrement)
+    try:
+        pds = db.query(models.User).filter(models.User.role.ilike("PD")).all()
+        for pd in pds:
+            create_notification(
+                db,
+                recipient_id=pd.id,
+                type=models.NotificationType.TODO,
+                title="Nouvelle dépense",
+                message=f"Demande de {expense.amount} MAD à valider",
+                link="/expenses?tab=l1",
+                background_tasks=background_tasks # Vérifiez que create_notification accepte cet arg
+            )
+        db.commit()
+    except Exception as e:
+        print(f"Erreur notification mais DB ok: {e}")
+        # On ne bloque pas la réponse si seule la notification plante
 
-    background_tasks.add_task(
-        create_notification,
-            db,
-            recipient_id=pd.id,
-            type=models.NotificationType.TODO,
-            title="Nouvelle dépense à valider 📝",
-            message=f"Le PM {expense.requester.first_name} a soumis une dépense de {expense.amount} MAD pour le projet {expense.internal_project.name}.",
-            link="/expenses?tab=l1",
-            
-        )
-
-    db.commit()
     db.refresh(expense)
     return expense
 

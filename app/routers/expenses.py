@@ -167,19 +167,20 @@ def get_acts_for_expense(
     # Renvoie les ACT approuvés mais non payés pour un projet donné
     return crud.get_payable_acts(db, project_id)
 
+# app/routers/expenses.py
 @router.post("/{id}/submit")
 def submit_to_pd(
     id: int, 
-    background_tasks: BackgroundTasks, # <--- 1. AJOUTEZ CET ARGUMENT
+    background_tasks: BackgroundTasks, # 1. Indispensable
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
-    # 2. TRANSMETTEZ background_tasks à la fonction
+    # 2. On passe BIEN les 3 arguments au CRUD
     exp = crud.submit_expense(db, id, background_tasks) 
     
     if not exp:
         raise HTTPException(status_code=404, detail="Dépense non trouvée")
-    return exp
+    return exp # 3. Le serveur doit renvoyer l'objet ici
     
 @router.get("/export/excel")
 def export_expenses_to_excel(
