@@ -284,6 +284,8 @@ def update_sbc(
     tax_file: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
+     ice: Optional[str] = Form(None),  # 👈 AJOUTE ÇA
+    rc: Optional[str] = Form(None),   # 👈 A
 ):
     return crud.update_sbc(
         db, sbc_id,
@@ -295,8 +297,24 @@ def update_sbc(
             "rib": rib,
             "bank_name": bank_name,
             "tax_reg_end_date": tax_reg_end_date,
+            "ice": ice,
+             "rc": rc,
         },
         contract_file,
         tax_file,
         current_user.id
     )
+
+@router.get("/{sbc_id}", response_model=schemas.SBCResponse)
+def get_sbc_by_id(
+    sbc_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """Récupère un SBC par son ID"""
+    sbc = crud.get_sbc_by_id(db, sbc_id)
+
+    if not sbc:
+        raise HTTPException(status_code=404, detail="SBC not found")
+
+    return sbc

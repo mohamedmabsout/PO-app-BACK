@@ -1,7 +1,8 @@
+from ast import Dict
 from datetime import datetime, date, timedelta, timezone as dt_timezone # Renommé pour éviter le conflit
 
 from select import select
-from fastapi import BackgroundTasks
+from fastapi import BackgroundTasks, HTTPException, UploadFile
 from pytz import timezone
 from sqlalchemy.orm import Session
 from typing import List, Optional
@@ -4968,3 +4969,182 @@ def get_grouped_history(db: Session, page: int = 1, limit: int = 10):
         "page": page,
         "pages": (total_reqs + limit - 1) // limit
     }
+
+def update_sbc(
+    db: Session,
+    sbc_id: int,
+    form_data: Dict,
+    contract_file: Optional[UploadFile],
+    tax_file: Optional[UploadFile],
+    user_id: int
+):
+    """
+    Met à jour un SBC existant
+    
+    Args:
+        db: Session de base de données
+        sbc_id: ID du SBC à mettre à jour
+        form_data: Dictionnaire avec les données du formulaire
+        contract_file: Fichier de contrat (optionnel)
+        tax_file: Fichier fiscal (optionnel)
+        user_id: ID de l'utilisateur effectuant la modification
+    
+    Returns:
+        Le SBC mis à jour
+    
+    Raises:
+        HTTPException: Si le SBC n'existe pas ou erreur de traitement
+    """
+    
+    try:
+        # 1. Récupérer le SBC existant
+        sbc = db.query(models.SBC).filter(models.SBC.id == sbc_id).first()
+        
+        if not sbc:
+            raise HTTPException(status_code=404, detail=f"SBC with id {sbc_id} not found")
+        
+        print(f"📝 Updating SBC {sbc_id} - {sbc.sbc_code}")
+        
+        # 2. Mettre à jour les champs texte (seulement si fournis)
+        if form_data.get("short_name") is not None:
+            sbc.short_name = form_data["short_name"]
+            print(f"  ✓ short_name: {form_data['short_name']}")
+            
+        if form_data.get("name") is not None:
+            sbc.name = form_data["name"]
+            print(f"  ✓ name: {form_data['name']}")
+            
+        if form_data.get("ceo_name") is not None:
+            sbc.ceo_name = form_data["ceo_name"]
+            print(f"  ✓ ceo_name: {form_data['ceo_name']}")
+            
+        if form_data.get("email") is not None:
+            sbc.email = form_data["email"]
+            print(f"  ✓ email: {form_data['email']}")
+            
+        if form_data.get("rib") is not None:
+            sbc.rib = form_data["rib"]
+            print(f"  ✓ rib: {form_data['rib']}")
+            
+        if form_data.get("bank_name") is not None:
+            sbc.bank_name = form_data["bank_name"]
+            print(f"  ✓ bank_name: {form_data['bank_name']}")
+            
+        if form_data.get("ice") is not None:
+            sbc.ice = form_data["ice"]
+            print(f"  ✓ ice: {form_data['ice']}")
+            
+        if form_data.get("rc") is not None:
+            sbc.rc = form_data["rc"]
+            print(f"  ✓ rc: {form_data['rc']}")
+            
+        if form_data.get("tax_reg_end_date") is not None:
+            sbc.tax_reg_end_date = form_data["tax_reg_end_date"]
+            print(f"  ✓ tax_reg_end_date: {form_data['tax_reg_end_date']}")
+        
+        # 3. Gérer les fichiers uploadés
+        upload_dir = "uploads/sbc_docs"
+        os.makedirs(upload_dir, exist_ok=True)
+        
+        # Contract file
+        if contract_file and contract_file.filename:
+            print(f"  📎 Processing contract file: {contract_file.filename}")
+            try:
+                # Supprimer l'ancien fichier si il existe
+                if sbc.contract_file_path and os.path.exists(sbc.contract_file_path):
+                    os.remove(sbc.contract_file_path)
+                    print(f"  🗑️ Old contract file deleted")
+                
+                # Créer un nom de fichier unique
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                safe_filename = contract_file.filename.replace(" ", "_")
+                filename = f"contract_{sbc.sbc_code}_{timestamp}_{safe_filename}"
+                filepath = os.path.join(upload_dir, filename)
+                
+                # Sauvegarder le nouveau fichier
+                with open(filepath, "wb") as buffer:
+                    shutil.copyfileobj(contract_file.file, buffer)
+                
+                # Mettre à jour les chemins dans la DB
+                sbc.contract_file_path = filepath
+                sbc.contract_file_url = f"/static/sbc_docs/{filename}"
+                print(f"  ✅ Contract file saved: {filename}")
+                
+            except Exception as e:
+                print(f"  ❌ Error saving contract file: {e}")
+                # On continue même si le fichier échoue
+        
+        # Tax file
+        if tax_file and tax_file.filename:
+            print(f"  📎 Processing tax file: {tax_file.filename}")
+            try:
+                # Supprimer l'ancien fichier si il existe
+                if sbc.tax_file_path and os.path.exists(sbc.tax_file_path):
+                    os.remove(sbc.tax_file_path)
+                    print(f"  🗑️ Old tax file deleted")
+                
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                safe_filename = tax_file.filename.replace(" ", "_")
+                filename = f"tax_{sbc.sbc_code}_{timestamp}_{safe_filename}"
+                filepath = os.path.join(upload_dir, filename)
+                
+                with open(filepath, "wb") as buffer:
+                    shutil.copyfileobj(tax_file.file, buffer)
+                
+                sbc.tax_file_path = filepath
+                sbc.tax_file_url = f"/static/sbc_docs/{filename}"
+                print(f"  ✅ Tax file saved: {filename}")
+                
+            except Exception as e:
+                print(f"  ❌ Error saving tax file: {e}")
+        
+        # 4. Mettre à jour le timestamp de modification
+        sbc.updated_at = datetime.now()
+        
+        # 5. Sauvegarder en base de données
+        db.commit()
+        db.refresh(sbc)
+        
+        print(f"✅ SBC {sbc_id} updated successfully")
+        
+        return sbc
+        
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+        
+    except Exception as e:
+        # Rollback en cas d'erreur
+        db.rollback()
+        print(f"❌ Error updating SBC {sbc_id}: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to update SBC: {str(e)}"
+        )
+
+
+def get_sbc_by_id(db: Session, sbc_id: int):
+    """Récupère un SBC par son ID"""
+    return db.query(models.SBC).filter(models.SBC.id == sbc_id).first()
+
+
+def get_all_sbcs(db: Session, search: Optional[str] = None):
+    """Récupère tous les SBCs avec recherche optionnelle"""
+    query = db.query(models.SBC)
+    
+    if search:
+        query = query.filter(
+            (models.SBC.name.ilike(f"%{search}%")) |
+            (models.SBC.short_name.ilike(f"%{search}%")) |
+            (models.SBC.sbc_code.ilike(f"%{search}%"))
+        )
+    
+    return query.order_by(models.SBC.created_at.desc()).all()
+
+
+
+
+
+
