@@ -716,21 +716,67 @@ class FundRequestDetail(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 PositiveFloat = Annotated[float, Field(gt=0)]
 
+class ProjectSimple(BaseModel):
+    id: int
+    name: str
+    
+    model_config = ConfigDict(from_attributes=True)
+
+
+
+
+class ExpenseTypeSchema(BaseModel):
+    id: int
+    name: str
+    model_config = ConfigDict(from_attributes=True)
+
+class ExpenseTypeCreate(BaseModel):
+    name: str
 class ExpenseBase(BaseModel):
     project_id: int
     exp_type: str
-    beneficiary: str
-    remark: str
-    amount: PositiveFloat # type: ignore
+    beneficiary: Optional[str] = None # Optional because it might be auto-filled from ACT
+    remark: Optional[str] = None
+    amount: float # type: ignore
     attachment: str | None = None
     act_id: Optional[int] = None 
+    
+    # New flag for Draft vs Submit immediately
+    is_draft: bool = False 
 
 class ExpenseCreate(ExpenseBase):
 
     pass
-class ExpenseResponse(ExpenseCreate):
+class ExpenseResponse(BaseModel):
     id: int
-    act_id: Optional[int] = None  # Pour inclure les détails
+    project_id: int
+    internal_project: Optional[ProjectSimple] = None 
+    
+    exp_type: str
+    amount: float
+    status: str
+    
+    beneficiary: str
+    beneficiary_user_id: Optional[int] = None
+    
+    requester: Optional[UserBase] = None
+    
+    created_at: datetime
+    updated_at: datetime
+    
+    # Workflow info
+    l1_approver: Optional[UserInfo] = None
+    l1_at: Optional[datetime] = None
+    l2_approver: Optional[UserInfo] = None
+    l2_at: Optional[datetime] = None
+    
+    payment_confirmed_at: Optional[datetime] = None
+    acknowledged_at: Optional[datetime] = None
+    
+    is_signed_copy_uploaded: bool
+    
+    rejection_reason: Optional[str] = None
+    act_id: Optional[int] = None
     
     class Config:
         from_attributes = True
@@ -741,11 +787,6 @@ class ExpenseUpdate(BaseModel):
     remark: str | None = None
     amount: PositiveFloat | None = None # type: ignore
     attachment: str | None = None
-class ProjectSimple(BaseModel):
-    id: int
-    name: str
-    
-    model_config = ConfigDict(from_attributes=True)
 
 class CaisseStats(BaseModel):
     balance: float
@@ -796,6 +837,16 @@ class InternalControlUpdate(BaseModel):
          user_id: int
     user_name: str
     balance: float
+
+    class Config:
+        from_attributes = True
+
+class PayableActResponse(BaseModel):
+    id: int
+    act_number: str
+    total_amount_ht: float
+    sbc_name: str
+    created_at: datetime
 
     class Config:
         from_attributes = True

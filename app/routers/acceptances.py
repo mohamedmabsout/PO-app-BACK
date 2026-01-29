@@ -10,7 +10,7 @@ import os
 import shutil
 from typing import List, Optional
 from ..dependencies import get_db
-from ..schemas import BulkValidationPayload,GenerateACTPayload,ServiceAcceptance
+from ..schemas import BulkValidationPayload,GenerateACTPayload,ServiceAcceptance,PayableActResponse
 from .. import crud
 from ..auth import get_current_user  # Import your authentication dependency
 from .. import models  # To specify the user model type
@@ -388,25 +388,25 @@ def export_act_details(
     headers = {'Content-Disposition': f'attachment; filename="{filename}"'}
     return StreamingResponse(output, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', headers=headers)
 
-@router.get("/payable-acts", response_model=List[ServiceAcceptance]) # <--- Vérifiez cette ligne
-def get_payable_acts_for_expenses(
+@router.get("/payable-acts", response_model=List[PayableActResponse])
+def get_acts_for_expense(
     project_id: int,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
     """
-    Récupère les ACT approuvés d'un projet qui ne sont pas encore liés à une dépense.
+    Returns Approved 'Personne Physique' ACTs for a specific project
+    that are NOT currently linked to an active expense.
     """
-    # 1. On récupère les IDs des ACT déjà "utilisés" pour ne pas payer deux fois
-    used_act_ids = db.query(models.Expense.act_id).filter(
-        models.Expense.act_id.isnot(None),
-        models.Expense.status != "REJECTED"
-    )
+    # Allowed: PMs (to create requests), PDs/Admins (for visibility)
+    # We don't strictly enforce require_roles here as it's a read-only helper, 
+    # but generally only internal staff should access it.
+    if current_user.role == models.UserRole.SBC:
+         raise HTTPException(status_code=403, detail="Not authorized")
 
-    # 2. On filtre les ACT par projet et on exclut les "utilisés"
-    return db.query(models.ServiceAcceptance).join(
-        models.BonDeCommande
-    ).filter(
-        models.BonDeCommande.project_id == project_id,
-        models.ServiceAcceptance.id.in_(used_act_ids)
-    ).all()
+    acts = crud.get_payable_acts(db, project_id)
+    
+    if not acts:
+        return []
+        
+    return acts

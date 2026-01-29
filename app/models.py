@@ -7,7 +7,7 @@ import sqlalchemy as sa
 from .enum import (
     ProjectType, UserRole, SBCStatus, BCStatus, NotificationType, BCType,
     AssignmentStatus, ValidationState, ItemGlobalStatus, SBCType,
-    FundRequestStatus, TransactionType, TransactionStatus
+    FundRequestStatus, TransactionType, TransactionStatus, ExpenseStatus
 )
 from .database import Base
  # <--- AJOUTER CET IMPORT
@@ -50,7 +50,7 @@ class User(Base):
     
     # Relationship
     sbc = relationship("SBC", back_populates="users",foreign_keys=[sbc_id])
-    expenses = relationship("Expense", back_populates="requester") 
+    expenses = relationship("Expense", back_populates="requester", foreign_keys="[Expense.requester_id]")
     notifications = relationship("Notification", back_populates="recipient") 
 
 class Account(Base):
@@ -518,7 +518,9 @@ class Caisse(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), unique=True, nullable=False)
-    balance = Column(Float, default=0.0)
+    
+    balance = Column(Float, default=0.0) # Available Cash
+    reserved_balance = Column(Float, default=0.0) # <-- NEW: Committed Cash (Drafts/Pending)
     
     # Relationships
     user = relationship("User", backref="caisse")
@@ -592,25 +594,58 @@ class Expense(Base):
     __tablename__ = "expenses"
     
     id = Column(Integer, primary_key=True, index=True)
-    project_id = Column(Integer, ForeignKey("internal_projects.id"))  # Changez "projects.id" en "internal_projects.id"
-    exp_type = Column(String(50))
-    beneficiary = Column(String(255))
-    amount = Column(Float)
+    
+    # Core Data
+    project_id = Column(Integer, ForeignKey("internal_projects.id"))
+    exp_type = Column(String(50)) # Can be linked to ExpenseType name or ID
+    amount = Column(Float, nullable=False)
     remark = Column(Text)
-    attachment = Column(String(500))
+    attachment = Column(String(500)) # Digital attachment (Receipt scan)
+    
+    # Links
     act_id = Column(Integer, ForeignKey("service_acceptances.id"), nullable=True)   
-    status = Column(String(50))
     requester_id = Column(Integer, ForeignKey("users.id"))
+    
+    # --- NEW: Beneficiary Link (For 'Acknowledge' button) ---
+    # If NULL, it's an external vendor. If SET, it's a system user (PM/SBC).
+    beneficiary_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    beneficiary = Column(String(255)) # Name string (Snapshot)
+    
+    # Status & Workflow
+    status = Column(Enum(ExpenseStatus), default=ExpenseStatus.DRAFT)
+    rejection_reason = Column(String(500), nullable=True)
+    
+    # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    rejection_reason = Column(String(500), nullable=True)
-    approved_l1_at = Column(DateTime, nullable=True)
-    approved_l2_at = Column(DateTime, nullable=True)
-    sbc_confirmation_date = Column(DateTime, nullable=True)
-
-    # Relations
-       # C'est elle qui permet de faire "exp.act.act_number"
-    act = relationship("ServiceAcceptance") 
-    internal_project = relationship("InternalProject", back_populates="expenses")
-    requester = relationship("User", back_populates="expenses")
     
+    # --- NEW: Workflow Tracking ---
+    l1_approver_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    l1_at = Column(DateTime, nullable=True) # Renamed from approved_l1_at for consistency
+
+    l2_approver_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    l2_at = Column(DateTime, nullable=True)
+
+    payment_confirmed_at = Column(DateTime, nullable=True) # When PD clicks "Confirm Payment"
+    acknowledged_at = Column(DateTime, nullable=True) # When Beneficiary clicks "Acknowledge"
+    
+    # --- NEW: Document Control ---
+    signed_doc_url = Column(String(500), nullable=True) # The physical signed PDF scan
+    is_signed_copy_uploaded = Column(Boolean, default=False) # Helper flag for the 24h reminder
+    
+    # Relationships
+    act = relationship("ServiceAcceptance", back_populates="expenses")
+    internal_project = relationship("InternalProject", back_populates="expenses")
+    requester = relationship("User", foreign_keys=[requester_id], back_populates="expenses")
+    
+    # New Relationship helpers
+    l1_approver = relationship("User", foreign_keys=[l1_approver_id])
+    l2_approver = relationship("User", foreign_keys=[l2_approver_id])
+    beneficiary_user = relationship("User", foreign_keys=[beneficiary_user_id])
+
+class ExpenseType(Base):
+    __tablename__ = "expense_types"
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), unique=True, nullable=False)
+
+

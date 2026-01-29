@@ -297,3 +297,46 @@ def generate_act_pdf(act):
     
     buffer.seek(0)
     return buffer
+def generate_expense_pdf(expense):
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4)
+    elements = []
+    styles = getSampleStyleSheet()
+
+    # Title
+    elements.append(Paragraph(f"PIECE DE CAISSE (Voucher) - {expense.id}", styles['Title']))
+    elements.append(Spacer(1, 0.5*cm))
+
+    # Info Table
+    data = [
+        ["Date Request:", expense.created_at.strftime("%d/%m/%Y"), "Project:", expense.internal_project.name],
+        ["Type:", expense.exp_type, "Reference:", expense.act.act_number if expense.act_id else "N/A"],
+        ["Beneficiary:", expense.beneficiary, "Amount:", f"{expense.amount:,.2f} MAD"]
+    ]
+    t = Table(data, colWidths=[4*cm, 5*cm, 4*cm, 5*cm])
+    t.setStyle(TableStyle([('GRID', (0,0), (-1,-1), 0.5, colors.grey), ('FONTNAME', (0,0), (-1,-1), 'Helvetica-Bold', 0, 0)]))
+    elements.append(t)
+    elements.append(Spacer(1, 1*cm))
+
+    # Remarks
+    elements.append(Paragraph(f"<b>Object / Remark:</b> {expense.remark or 'N/A'}", styles['Normal']))
+    elements.append(Spacer(1, 2*cm))
+
+    # SIGNATURE BLOCKS
+    sig_data = [
+        ["Requester (PM)", "Approval (PD/Admin)", "Beneficiary (Received By)"],
+        ["\n\n_________________\n" + expense.requester.first_name, 
+         "\n\n_________________\nValidated", 
+         "\n\n_________________\nSignature & Date"]
+    ]
+    sig_table = Table(sig_data, colWidths=[6*cm, 6*cm, 6*cm])
+    sig_table.setStyle(TableStyle([
+        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ('LINEABOVE', (0,1), (-1,1), 0.5, colors.black),
+    ]))
+    elements.append(sig_table)
+
+    doc.build(elements)
+    buffer.seek(0)
+    return buffer

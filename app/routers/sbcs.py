@@ -11,6 +11,7 @@ router = APIRouter(prefix="/api/sbcs", tags=["SBC Management"])
 
 @router.post("/", response_model=schemas.SBCResponse)
 def create_new_sbc(
+    background_tasks: BackgroundTasks, # <--- Import this
     # Use Form(...) for text fields because we are uploading files
     sbc_code: Optional[str] = Form(None),
     short_name: str = Form(...),
@@ -29,7 +30,7 @@ def create_new_sbc(
     tax_file: Optional[UploadFile] = File(None),
     
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user)
+    current_user: models.User = Depends(auth.get_current_user),
 ):
     # Consolidate form data into a dict for CRUD
     form_data = {
@@ -47,7 +48,7 @@ def create_new_sbc(
         "tax_reg_end_date": tax_reg_end_date
     }
     
-    return crud.create_sbc(db, form_data, contract_file, tax_file, current_user.id)
+    return crud.create_sbc(db, form_data, contract_file, tax_file, current_user.id,background_tasks)
 
 @router.get("/pending", response_model=List[schemas.SBCResponse])
 def get_pending_sbcs_list(
