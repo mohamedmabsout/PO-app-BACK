@@ -83,11 +83,14 @@ class RefillRequestStatus(str, enum.Enum):
 
 class ExpenseStatus(str, enum.Enum):
     DRAFT = "DRAFT"
-    SUBMITTED = "SUBMITTED" # Après check balance OK
-    PENDING_L1 = "PENDING_L1"
-    APPROVED_L1 = "APPROVED_L1"
-    PENDING_L2 = "PENDING_L2"
-    APPROVED_L2 = "APPROVED_L2"
-    PAID = "PAID"           # Confirm Payment OK (Attachment Mandatory)
-    RECEIVED = "RECEIVED"   # Confirm Reception (Final)
+    SUBMITTED = "SUBMITTED"     # PM submitted (Reserved)
+    PENDING_L1 = "PENDING_L1"   # Wait PD
+    APPROVED_L1 = "APPROVED_L1" # PD Approved
+    PENDING_L2 = "PENDING_L2"   # Wait Admin
+    APPROVED_L2 = "APPROVED_L2" # Admin Approved (Ready for Payment)
+    PAID = "PAID"               # PD Confirmed Payment (Deducted)
+    ACKNOWLEDGED = "ACKNOWLEDGED" # Beneficiary confirmed receipt
     REJECTED = "REJECTED"
+class TransactionStatus(str, enum.Enum):
+    PENDING = "PENDING"
+    COMPLETED = "COMPLETED"

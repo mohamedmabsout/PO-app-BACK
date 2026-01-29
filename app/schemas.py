@@ -224,6 +224,9 @@ class MergedPOBase(BaseModel):
     internal_control: int
     line_amount_hw: float
     publish_date: FormattedDate
+    unit_price: Optional[float] = None # <--- REQUIRED FOR EDIT CALCULATION
+    requested_qty: Optional[float] = None # <--- USEFUL TOO
+
     category: Optional[str] = None
     total_ac_amount: Optional[float] = None
     accepted_ac_amount: Optional[float] = None
@@ -454,7 +457,7 @@ class BCItemResponse(BCItemCreate):
     unit_price_sbc: float
     line_amount_sbc: float
     applied_tax_rate: float
-    merged_po: Optional[MergedPOSimple] = None 
+    merged_po: Optional[MergedPOBase] = None 
     qc_validation_status: Optional[str] = None
     pm_validation_status: Optional[str] = None
     global_status: Optional[str] = None
@@ -463,7 +466,6 @@ class BCItemResponse(BCItemCreate):
     postponed_until: Optional[datetime] = None
     act_id: Optional[int] = None
     
-    merged_po: Optional[MergedPOSimple] = None 
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -579,6 +581,12 @@ class BulkValidationPayload(BaseModel):
     item_ids: List[int]
     action: str
     comment: Optional[str] = None
+
+class BCInfo(BaseModel):
+    id: int
+    bc_number: str
+    model_config = ConfigDict(from_attributes=True)
+
 class ServiceAcceptance(BaseModel):
     id: int
     act_number: str
@@ -589,6 +597,7 @@ class ServiceAcceptance(BaseModel):
     total_amount_ht: float
     total_tax_amount: float
     total_amount_ttc: float
+    bc: Optional[BCResponse] = None # Nested BC object
 
     model_config = ConfigDict(from_attributes=True)
 class ServiceAcceptanceList(BaseModel):
@@ -598,6 +607,21 @@ class ServiceAcceptanceList(BaseModel):
     bc: BCResponse # Nested schema
     creator: UserInfo     # Nested schema
     items: List[BCItemResponse] # Nested schema
+    model_config = ConfigDict(from_attributes=True)
+
+class ServiceAcceptanceItemDetail(BaseModel):
+    id: int
+    quantity_sbc: float
+    unit_price_sbc: float
+    line_amount_sbc: float
+    applied_tax_rate: float
+    # Nested PO details for description
+    merged_po: Optional[MergedPOSimple] = None 
+    
+    model_config = ConfigDict(from_attributes=True)
+
+class ServiceAcceptanceDetail(ServiceAcceptance): # Inherits basic fields
+    items: List[ServiceAcceptanceItemDetail] = []
     model_config = ConfigDict(from_attributes=True)
 class SBCKpiSummary(BaseModel):
     total_bc_value: float
@@ -692,21 +716,67 @@ class FundRequestDetail(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 PositiveFloat = Annotated[float, Field(gt=0)]
 
+class ProjectSimple(BaseModel):
+    id: int
+    name: str
+    
+    model_config = ConfigDict(from_attributes=True)
+
+
+
+
+class ExpenseTypeSchema(BaseModel):
+    id: int
+    name: str
+    model_config = ConfigDict(from_attributes=True)
+
+class ExpenseTypeCreate(BaseModel):
+    name: str
 class ExpenseBase(BaseModel):
     project_id: int
     exp_type: str
-    beneficiary: str
-    remark: str
-    amount: PositiveFloat # type: ignore
+    beneficiary: Optional[str] = None # Optional because it might be auto-filled from ACT
+    remark: Optional[str] = None
+    amount: float # type: ignore
     attachment: str | None = None
     act_id: Optional[int] = None 
+    
+    # New flag for Draft vs Submit immediately
+    is_draft: bool = False 
 
 class ExpenseCreate(ExpenseBase):
 
     pass
-class ExpenseResponse(ExpenseCreate):
+class ExpenseResponse(BaseModel):
     id: int
-    act_id: Optional[int] = None  # Pour inclure les détails
+    project_id: int
+    internal_project: Optional[ProjectSimple] = None 
+    
+    exp_type: str
+    amount: float
+    status: str
+    
+    beneficiary: str
+    beneficiary_user_id: Optional[int] = None
+    
+    requester: Optional[UserBase] = None
+    
+    created_at: datetime
+    updated_at: datetime
+    
+    # Workflow info
+    l1_approver: Optional[UserInfo] = None
+    l1_at: Optional[datetime] = None
+    l2_approver: Optional[UserInfo] = None
+    l2_at: Optional[datetime] = None
+    
+    payment_confirmed_at: Optional[datetime] = None
+    acknowledged_at: Optional[datetime] = None
+    
+    is_signed_copy_uploaded: bool
+    
+    rejection_reason: Optional[str] = None
+    act_id: Optional[int] = None
     
     class Config:
         from_attributes = True
@@ -717,11 +787,6 @@ class ExpenseUpdate(BaseModel):
     remark: str | None = None
     amount: PositiveFloat | None = None # type: ignore
     attachment: str | None = None
-class ProjectSimple(BaseModel):
-    id: int
-    name: str
-    
-    model_config = ConfigDict(from_attributes=True)
 
 class CaisseStats(BaseModel):
     balance: float
@@ -772,6 +837,16 @@ class InternalControlUpdate(BaseModel):
          user_id: int
     user_name: str
     balance: float
+
+    class Config:
+        from_attributes = True
+
+class PayableActResponse(BaseModel):
+    id: int
+    act_number: str
+    total_amount_ht: float
+    sbc_name: str
+    created_at: datetime
 
     class Config:
         from_attributes = True

@@ -1,307 +1,295 @@
 # app/routers/expenses.py
 from datetime import datetime
 import io
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, status
+from fastapi.responses import StreamingResponse, Response
 from fastapi.temp_pydantic_v1_params import Body
 import pandas as pd
 from sqlalchemy.orm import Session
 from typing import List
+
 from .. import crud, models, schemas, auth
 from ..dependencies import get_current_user, get_db
-from fastapi.responses import StreamingResponse
+from ..utils.pdf_generator import generate_expense_pdf # Import the new PDF generator
+
 router = APIRouter(prefix="/api/expenses", tags=["expenses"])
 
 
+# --- HELPER: Role Checker ---
 def require_roles(user, roles):
-    # Récupère la valeur du rôle de l'utilisateur (pas l'enum lui-même)
-    if isinstance(user.role, models.UserRole):
-        user_role_str = user.role.value.upper().strip()
-    else:
-        user_role_str = str(user.role).upper().strip()
+    user_role_str = str(user.role).upper().strip() if not isinstance(user.role, str) else user.role.upper().strip()
     
-    # On prépare la liste des rôles autorisés en majuscules
     allowed_roles = []
     for r in roles:
-        if isinstance(r, models.UserRole):
-            allowed_roles.append(r.value.upper().strip())
-        else:
-            allowed_roles.append(str(r).upper().strip())
-    
-    # LOGIQUE SPÉCIFIQUE : Si on autorise le "PROJECT DIRECTOR", on autorise aussi "PD"
-    if "PROJECT DIRECTOR" in allowed_roles and "PD" not in allowed_roles:
-        allowed_roles.append("PD")
-    if "PD" in allowed_roles and "PROJECT DIRECTOR" not in allowed_roles:
-        allowed_roles.append("PROJECT DIRECTOR")
-    
-    print(f"DEBUG - User role: '{user_role_str}'")
-    print(f"DEBUG - Allowed roles: {allowed_roles}")
-    
+        r_str = str(r).upper().strip() if not isinstance(r, str) else r.upper().strip()
+        allowed_roles.append(r_str)
+        # Handle PD variations
+        if r_str == "PD": allowed_roles.append("PROJECT DIRECTOR")
+        if r_str == "PROJECT DIRECTOR": allowed_roles.append("PD")
+
     if user_role_str not in allowed_roles:
         raise HTTPException(
             status_code=403, 
-            detail=f"Action interdite pour le rôle : {user_role_str}. Rôles autorisés: {allowed_roles}"
+            detail=f"Forbidden. Your role '{user_role_str}' is not in {allowed_roles}"
         )
 
-@router.post("/", response_model=schemas.ExpenseOut)
-def post_expense(
+
+# ==========================
+# 1. CREATE & LIST
+# ==========================
+
+@router.post("/", response_model=schemas.ExpenseResponse)
+def create_expense(
     payload: schemas.ExpenseCreate,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
 ):
+    """
+    Create Expense (Draft or Submitted). 
+    Money is moved to 'Reserved' immediately.
+    """
+    # Allowed: PMs, Coordinators, Admins, PDs
     require_roles(current_user, [models.UserRole.PM, models.UserRole.COORDINATEUR, models.UserRole.ADMIN, models.UserRole.PD])
-    return crud.create_expense(db, current_user, payload)
+    try:
+        return crud.create_expense(db, payload, current_user.id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
-@router.get("/my-requests", response_model=list[schemas.ExpenseOut])
+@router.get("/my-requests", response_model=List[schemas.ExpenseResponse])
 def get_my_requests(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
 ):
+    """Returns expenses created by the logged-in user."""
     return crud.list_my_requests(db, current_user)
 
 
-@router.get("/pending-l1", response_model=list[schemas.ExpenseOut])
-def get_pending_l1(
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user),
-):
-    # On autorise le PD ou l'Admin
-    require_roles(current_user, ["PD", "ADMIN", "PROJECT DIRECTOR"])
-    return crud.list_pending_l1(db)
 
-@router.post("/{id}/approve-l1")
-def approve_l1(
-    background_tasks: BackgroundTasks,
-    id: int, 
-    db: Session = Depends(get_db), 
+@router.get("/wallets-summary")
+def get_wallets_summary(
+    db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
-    # On vérifie que l'utilisateur est soit PD, soit ADMIN
-    require_roles(current_user, ["PD", "ADMIN"])
+    """Admin view of all wallets."""
+    require_roles(current_user, [models.UserRole.ADMIN, models.UserRole.PD])
+    return crud.get_all_wallets_summary(db)
+
+
+@router.post("/run-compliance-checks")
+def run_daily_checks(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user),
+    background_tasks: BackgroundTasks = BackgroundTasks()
+):
+    """Admin trigger for 24h reminders."""
+    require_roles(current_user, [models.UserRole.ADMIN])
+    count = crud.check_missing_expense_uploads(db, background_tasks)
+    return {"message": f"Sent {count} reminders."}
+
+
+@router.get("/export/excel")
+def export_expenses(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    df = crud.get_expenses_export_dataframe(db)
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        df.to_excel(writer, index=False, sheet_name='Expenses')
+    output.seek(0)
     
-    # Appel de la logique de validation avec l'ID de l'approbateur
-    expense = crud.approve_expense_l1(db, id, current_user.id, background_tasks) 
+    return StreamingResponse(
+        output,
+        media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        headers={'Content-Disposition': 'attachment; filename="Expenses_Export.xlsx"'}
+    )
+
+
+# ==========================
+# 5. LISTS (FILTERED)
+# ==========================
+
+@router.get("/pending-l1", response_model=List[schemas.ExpenseResponse])
+def get_pending_l1(db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
+    require_roles(current_user, ["PD", "ADMIN"])
+    return db.query(models.Expense).filter(models.Expense.status == models.ExpenseStatus.SUBMITTED).all()
+
+@router.get("/pending-l2", response_model=List[schemas.ExpenseResponse])
+def get_pending_l2(db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
+    require_roles(current_user, ["ADMIN"])
+    return db.query(models.Expense).filter(models.Expense.status == models.ExpenseStatus.PENDING_L1).all()
+
+@router.get("/pending-payment", response_model=List[schemas.ExpenseResponse])
+def get_pending_payment(db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
+    require_roles(current_user, ["PD", "ADMIN"])
+    # "APPROVED_L2" means Admin validated, now waiting for PD to pay
+    return db.query(models.Expense).filter(models.Expense.status == models.ExpenseStatus.APPROVED_L2).all()
+
+@router.get("/{id}", response_model=schemas.ExpenseResponse)
+def get_expense_details(
+    id: int, 
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """Get single expense details."""
+    expense = db.query(models.Expense).get(id)
     if not expense:
         raise HTTPException(status_code=404, detail="Expense not found")
+    
+    # Security: PM sees own, PD/Admin sees all, SBC sees if beneficiary
+    is_owner = expense.requester_id == current_user.id
+    is_admin_pd = current_user.role in [models.UserRole.ADMIN, models.UserRole.PD]
+    is_beneficiary = expense.beneficiary_user_id == current_user.id
+
+    if not (is_owner or is_admin_pd or is_beneficiary):
+        raise HTTPException(status_code=403, detail="Not authorized to view this expense.")
+        
     return expense
-@router.get("/pending-l2", response_model=list[schemas.ExpenseOut])
-def get_pending_l2(
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user),
-):
-    require_roles(current_user, [models.UserRole.ADMIN, models.UserRole.CEO])
-    return crud.list_pending_l2(db)
 
 
-@router.post("/{id}/approve-l2", response_model=schemas.ExpenseOut)
-def post_approve_l2(
-    id: int,
+# ==========================
+# 2. APPROVAL WORKFLOW
+# ==========================
+
+@router.post("/{id}/submit")
+def submit_expense(
+    id: int, 
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
+    background_tasks: BackgroundTasks = BackgroundTasks() # For Emails
 ):
-    require_roles(current_user, [models.UserRole.ADMIN, models.UserRole.CEO])
+    """Move from DRAFT to SUBMITTED."""
+    expense = db.query(models.Expense).get(id)
+    if not expense: raise HTTPException(404, "Not found")
+    if expense.requester_id != current_user.id: raise HTTPException(403, "Not owner")
+    
     try:
-        exp = crud.approve_l2(db, id, current_user)
-        if not exp:
-            raise HTTPException(404, "Expense not found")
-        return exp
+        return crud.submit_expense(db, id, background_tasks)
     except ValueError as e:
-        msg = str(e)
-        code = 400 if "Insufficient" in msg else 400
-        raise HTTPException(code, msg)
+        raise HTTPException(400, str(e))
 
 
-@router.post("/{id}/reject", response_model=schemas.ExpenseOut)
-def post_reject(
+@router.post("/{id}/approve-l1", response_model=schemas.ExpenseResponse)
+def approve_l1(
+    id: int, 
+    db: Session = Depends(get_db), 
+    current_user: models.User = Depends(auth.get_current_user),
+    background_tasks: BackgroundTasks = BackgroundTasks()
+):
+    """PD Approval"""
+    require_roles(current_user, [models.UserRole.PD, models.UserRole.ADMIN])
+    try:
+        return crud.approve_expense_l1(db, id, current_user.id, background_tasks)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.post("/{id}/approve-l2", response_model=schemas.ExpenseResponse)
+def approve_l2(
+    id: int, 
+    db: Session = Depends(get_db), 
+    current_user: models.User = Depends(auth.get_current_user),
+):
+    """Admin Approval"""
+    require_roles(current_user, [models.UserRole.ADMIN])
+    try:
+        return crud.approve_expense_l2(db, id, current_user.id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.post("/{id}/reject", response_model=schemas.ExpenseResponse)
+def reject_expense(
     id: int,
     payload: schemas.ExpenseReject,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
 ):
-    require_roles(current_user, [models.UserRole.PD, models.UserRole.ADMIN, models.UserRole.CEO,models.UserRole.PM])
-    exp = crud.reject_expense(db, id, current_user, payload.reason)
-    if not exp:
-        raise HTTPException(404, "Expense not found")
-    return exp
-# @router.post("/{id}/confirm-payment")
-# def confirm_payment(
-    # id: int,
-    # payload: schemas.ConfirmPaymentRequest,  # Corps de la requête
-   #  db: Session = Depends(get_db),
-   #  current_user: models.User = Depends(get_current_user)
-# ):
-   #  expense = db.query(models.Expense).filter(models.Expense.id == id).first()
+    """Reject at any stage. Money returns to Balance."""
+    require_roles(current_user, [models.UserRole.PD, models.UserRole.ADMIN])
     
-   #  if not expense:
-       #  raise HTTPException(404, "Dépense non trouvée.")
+    # We use a custom delete logic if it's draft, or reject logic if submitted
+    # But standard reject is fine for audit trail
+    # Note: You need to implement reject_expense in crud to handle refunding 'reserved_balance'
+    # For now assuming you have it or will add it.
     
-    # if not payload.attachment:
-        # raise HTTPException(400, "L'attachement est obligatoire pour confirmer le paiement.")
+    # Simple implementation:
+    exp = db.query(models.Expense).get(id)
+    if not exp: raise HTTPException(404, "Not found")
     
-    # Mise à jour du statut
-   #  expense.status = "PAID"
-    # expense.attachment = payload.attachment
-    # expense.updated_at = datetime.utcnow()
-    
-    # try:
-       #  db.commit()
-        # db.refresh(expense)
-        # return {"message": "Paiement confirmé avec succès", "expense": expense}
-    # except Exception as e:
-        # db.rollback()
-        # raise HTTPException(500, f"Erreur lors de la confirmation: {str(e)}")
-
-@router.get("/stats")
-def get_expense_stats(
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user)
-):
-    # Cette fonction renvoie le solde de la caisse (balance)
-    return crud.get_caisse_stats(db, current_user)
-
-@router.get("/payable-acts")
-def get_acts_for_expense(
-    project_id: int,
-    db: Session = Depends(get_db)
-):
-    # Renvoie les ACT approuvés mais non payés pour un projet donné
-    return crud.get_payable_acts(db, project_id)
-
-# app/routers/expenses.py
-@router.post("/{id}/submit")
-def submit_to_pd(
-    id: int, 
-    background_tasks: BackgroundTasks, # 1. Indispensable
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user)
-):
-    # 2. On passe BIEN les 3 arguments au CRUD
-    exp = crud.submit_expense(db, id, background_tasks) 
-    
-    if not exp:
-        raise HTTPException(status_code=404, detail="Dépense non trouvée")
-    return exp # 3. Le serveur doit renvoyer l'objet ici
-    
-@router.get("/export/excel")
-def export_expenses_to_excel(
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user)
-):
-    # Optionnel: Restreindre l'export aux Admin/PD
-    # require_roles(current_user, ["ADMIN", "PD"])
-
-    df = crud.get_expenses_export_dataframe(db)
-    
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df.to_excel(writer, index=False, sheet_name='Petty Cash Details')
+    # Refund logic (simplified here, ideally move to CRUD)
+    caisse = db.query(models.Caisse).filter(models.Caisse.user_id == exp.requester_id).first()
+    if caisse:
+        caisse.reserved_balance -= exp.amount
+        caisse.balance += exp.amount
         
-    output.seek(0)
-    
-    headers = {
-        'Content-Disposition': 'attachment; filename="Extraction_Petty_Cash.xlsx"'
-    }
-    return StreamingResponse(
-        output, 
-        media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        headers=headers
-    )
-@router.get("/pending-payment", response_model=List[schemas.ExpenseOut])
-def get_pending_payments(
-    db: Session = Depends(get_db), 
+    exp.status = models.ExpenseStatus.REJECTED
+    exp.rejection_reason = payload.reason
+    db.commit()
+    return exp
+
+
+# ==========================
+# 3. PAYMENT & CLOSURE
+# ==========================
+
+@router.get("/{id}/pdf")
+def get_payment_voucher_pdf(
+    id: int,
+    db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
-    # AJOUTEZ "PM" ICI dans les rôles autorisés
-    require_roles(current_user, ["ADMIN", "PD", "PROJECT DIRECTOR", "PM"]) 
+    """Generate the Payment Voucher PDF for physical signature."""
+    expense = db.query(models.Expense).get(id)
+    if not expense: raise HTTPException(404, "Not found")
     
-    return db.query(models.Expense).filter(models.Expense.status == "PENDING_PAYMENT").all()
+    # Only allow if Approved L2 (Ready for payment)
+    if expense.status not in [models.ExpenseStatus.APPROVED_L2, models.ExpenseStatus.PAID, models.ExpenseStatus.ACKNOWLEDGED]:
+        raise HTTPException(400, "Expense must be approved by Admin (L2) before generating voucher.")
+
+    pdf_buffer = generate_expense_pdf(expense)
+    
+    return StreamingResponse(
+        pdf_buffer,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename=Voucher_{expense.id}.pdf"}
+    )
+
 
 @router.post("/{id}/confirm-payment")
 def confirm_payment(
     id: int, 
-    payload: dict = Body(...), 
+    payload: dict = Body(...), # Expects {"attachment": "url"}
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
-    # Security: Ensure only the PM can confirm
-    require_roles(current_user, ["PM", "ADMIN"])
-
-    expense = db.query(models.Expense).get(id)
+    """PD confirms cash handover. Money leaves Reserved forever."""
+    require_roles(current_user, [models.UserRole.PD, models.UserRole.ADMIN])
     
-    # 🔒 Mandatory attachment check
-    attachment = payload.get("attachment")
-    if not attachment or attachment == "":
-        raise HTTPException(status_code=400, detail="Attachment is mandatory for payment confirmation")
-
-    # Update logic
-    expense.status = "PAID"
-    expense.attachment = attachment
-    expense.paid_at = datetime.now()
+    attachment = payload.get("attachment") # Optional now, but triggers reminders if missing
     
-    db.commit()
-    return {"message": "Payment confirmed successfully"}
-@router.get("/wallets-summary", response_model=None) # ✅ Ajoutez response_model=None
-def get_wallets_summary(
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user)
-):
-    # Votre logique de récupération des caisses...
-    return crud.get_all_wallets_summary(db)
+    try:
+        crud.confirm_expense_payment(db, id, attachment)
+        return {"message": "Payment confirmed. Reserved funds deducted."}
+    except Exception as e:
+        raise HTTPException(400, str(e))
 
-@router.post("/{expense_id}/confirm-receipt")
-def confirm_expense_receipt(
-    expense_id: int,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user)
-):
-    # 1. Get Expense
-    expense = db.query(models.Expense).get(expense_id)
-    if not expense: raise HTTPException(404, "Expense not found")
 
-    # 2. Security Check: Is this expense really for this SBC?
-    # We verify the link: Expense -> ACT -> BC -> SBC ID must match User SBC ID
-    if not expense.act_id:
-        raise HTTPException(400, "This expense is not linked to an Acceptance/SBC.")
-    
-    # We need to fetch the related SBC ID to verify ownership
-    # (Assuming relationships are set up in models)
-    sbc_id_of_expense = expense.act.bc.sbc_id
-    
-    if current_user.role != "SBC" or current_user.sbc_id != sbc_id_of_expense:
-        raise HTTPException(403, "You are not authorized to confirm this expense.")
-
-    # 3. Update Status
-    if expense.sbc_confirmation_date:
-        raise HTTPException(400, "Already confirmed.")
-        
-    expense.sbc_confirmation_date = datetime.now()
-    db.commit()
-    
-    return {"message": "Receipt confirmed successfully"}
-@router.put("/{id}", response_model=schemas.ExpenseOut)
-def update_expense_endpoint(
+@router.post("/{id}/acknowledge")
+def acknowledge_receipt(
     id: int,
-    payload: schemas.ExpenseCreate, # On réutilise le schéma de création pour la modification
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
-    # Appel de la fonction CRUD pour mettre à jour
-    db_expense = crud.update_expense(db, id, payload, current_user.id)
-    
-    if not db_expense:
-        raise HTTPException(status_code=404, detail="Dépense non trouvée")
-        
-    return db_expense
-@router.get("/{id}", response_model=schemas.ExpenseOut) # Route GET simple
-def get_expense(
-    id: int, 
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user)
-):
-    # Chercher la dépense par son ID
-    expense = db.query(models.Expense).filter(models.Expense.id == id).first()
-    
-    if not expense:
-        raise HTTPException(status_code=404, detail="Dépense introuvable")
-    
-    return expense
+    """Beneficiary (SBC or PM) confirms receipt."""
+    try:
+        crud.acknowledge_payment(db, id, current_user.id)
+        return {"message": "Receipt acknowledged."}
+    except ValueError as e:
+        raise HTTPException(403, str(e))
+
+
+# ==========================
+# 4. ADMIN & STATS
+# ==========================

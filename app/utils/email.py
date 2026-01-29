@@ -1,5 +1,7 @@
 # In utils/email.py or similar
 
+from typing import List
+from fastapi import BackgroundTasks
 from fastapi_mail import MessageSchema, MessageType
 from ..config import conf 
 from fastapi_mail import FastMail, MessageSchema, MessageType
@@ -26,5 +28,20 @@ async def send_bc_status_email(bc, recipient_email, status, background_tasks):
         subtype=MessageType.html
     )
 
+    fm = FastMail(conf)
+    background_tasks.add_task(fm.send_message, message)
+def send_email_background(
+    background_tasks: BackgroundTasks,
+    subject: str,
+    email_to: List[str],
+    body: str
+):
+    message = MessageSchema(
+        subject=subject,
+        recipients=email_to,
+        body=body,
+        subtype=MessageType.html
+    )
+    
     fm = FastMail(conf)
     background_tasks.add_task(fm.send_message, message)
