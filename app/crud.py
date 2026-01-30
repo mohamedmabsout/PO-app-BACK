@@ -3660,12 +3660,12 @@ def generate_act_record(db: Session, bc_id: int, creator_id: int, item_ids: List
         
         # B. Compare with what is stored on the BC Line
         # Use a small epsilon for float comparison
-        if abs(item.applied_tax_rate - current_statutory_rate) > 0.001:
-            raise ValueError(
-                f"Tax Rate Mismatch for item '{item.merged_po.po_id}': "
-                f"BC has {item.applied_tax_rate*100:.0f}%, but the current valid rate for {current_year}, {category} is {current_statutory_rate*100:.0f}%. "
-                "The BC must be updated to reflect current tax laws before acceptance."
-            )
+        # if abs(item.applied_tax_rate - current_statutory_rate) > 0.001:
+        #     raise ValueError(
+        #         f"Tax Rate Mismatch for item '{item.merged_po.po_id}': "
+        #         f"BC has {item.applied_tax_rate*100:.0f}%, but the current valid rate for {current_year}, {category} is {current_statutory_rate*100:.0f}%. "
+        #         "The BC must be updated to reflect current tax laws before acceptance."
+        #     )
         
         # C. Ensure consistency within the selected batch (all items must share the rate)
         if validated_tax_rate is None:
