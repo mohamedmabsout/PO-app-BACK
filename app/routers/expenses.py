@@ -1,6 +1,9 @@
 # app/routers/expenses.py
 from datetime import datetime
 import io
+import os
+import shutil
+import logging
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, status
 from fastapi.responses import StreamingResponse, Response
 from fastapi.temp_pydantic_v1_params import Body
@@ -11,6 +14,8 @@ from typing import List
 from .. import crud, models, schemas, auth
 from ..dependencies import get_current_user, get_db
 from ..utils.pdf_generator import generate_expense_pdf # Import the new PDF generator
+from fastapi import UploadFile, File, Form
+from fastapi.responses import FileResponse
 
 router = APIRouter(prefix="/api/expenses", tags=["expenses"])
 
@@ -118,13 +123,30 @@ def get_pending_l1(db: Session = Depends(get_db), current_user: models.User = De
 @router.get("/pending-l2", response_model=List[schemas.ExpenseResponse])
 def get_pending_l2(db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
     require_roles(current_user, ["ADMIN"])
-    return db.query(models.Expense).filter(models.Expense.status == models.ExpenseStatus.PENDING_L1).all()
+    return db.query(models.Expense).filter(models.Expense.status == models.ExpenseStatus.PENDING_L2).all()
 
 @router.get("/pending-payment", response_model=List[schemas.ExpenseResponse])
 def get_pending_payment(db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
     require_roles(current_user, ["PD", "ADMIN"])
     # "APPROVED_L2" means Admin validated, now waiting for PD to pay
     return db.query(models.Expense).filter(models.Expense.status == models.ExpenseStatus.APPROVED_L2).all()
+@router.get("/paid-history", response_model=List[schemas.ExpenseResponse])
+def get_paid_history(
+    db: Session = Depends(get_db), 
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """
+    Returns expenses that are PAID or ACKNOWLEDGED.
+    Used by PDs/Admins to review history and upload missing files.
+    """
+    require_roles(current_user, [models.UserRole.PD, models.UserRole.ADMIN])
+    
+    return db.query(models.Expense).filter(
+        models.Expense.status.in_([
+            models.ExpenseStatus.PAID, 
+            models.ExpenseStatus.ACKNOWLEDGED
+        ])
+    ).order_by(models.Expense.updated_at.desc()).all()
 
 @router.get("/{id}", response_model=schemas.ExpenseResponse)
 def get_expense_details(
@@ -147,6 +169,57 @@ def get_expense_details(
         
     return expense
 
+
+@router.get("/attachment/{filename}")
+def get_expense_attachment(
+    filename: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    # Security: Ensure user has access (simplified for now to PD/Admin/Owner)
+    # In production, check if filename belongs to an expense user can see
+    
+    file_path = f"uploads/expenses/{filename}"
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File not found on server")
+        
+    return FileResponse(file_path)
+
+@router.get("/{id}/download-receipt")
+def download_expense_receipt(
+    id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """
+    Download the receipt (Signed Doc or Initial Attachment) by Expense ID.
+    Useful when the frontend knows the ID but not the exact filename.
+    """
+    expense = db.query(models.Expense).get(id)
+    if not expense:
+        raise HTTPException(status_code=404, detail="Expense not found")
+
+    # Security Check (Optional but recommended)
+    is_owner = expense.requester_id == current_user.id
+    is_admin_pd = current_user.role in [models.UserRole.ADMIN, models.UserRole.PD, models.UserRole.PM]
+    
+    if not (is_owner or is_admin_pd):
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    # Logic: Look for the Signed Copy first (Payment Proof), then the Initial Attachment
+    # Note: crud.confirm_expense_payment updates 'signed_doc_url'
+    filename = expense.signed_doc_url or expense.attachment
+
+    if not filename:
+        raise HTTPException(status_code=404, detail="No receipt file uploaded for this expense.")
+
+    # Construct path
+    file_path = os.path.join("uploads/expenses", filename)
+
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File record exists but file not found on server.")
+
+    return FileResponse(file_path, filename=filename)
 
 # ==========================
 # 2. APPROVAL WORKFLOW
@@ -187,6 +260,7 @@ def approve_l1(
 
 @router.post("/{id}/approve-l2", response_model=schemas.ExpenseResponse)
 def approve_l2(
+    background_tasks: BackgroundTasks,
     id: int, 
     db: Session = Depends(get_db), 
     current_user: models.User = Depends(auth.get_current_user),
@@ -194,11 +268,9 @@ def approve_l2(
     """Admin Approval"""
     require_roles(current_user, [models.UserRole.ADMIN])
     try:
-        return crud.approve_expense_l2(db, id, current_user.id)
+        return crud.approve_expense_l2(db, id, current_user.id, background_tasks)
     except ValueError as e:
         raise HTTPException(400, str(e))
-
-
 @router.post("/{id}/reject", response_model=schemas.ExpenseResponse)
 def reject_expense(
     id: int,
@@ -209,25 +281,30 @@ def reject_expense(
     """Reject at any stage. Money returns to Balance."""
     require_roles(current_user, [models.UserRole.PD, models.UserRole.ADMIN])
     
-    # We use a custom delete logic if it's draft, or reject logic if submitted
-    # But standard reject is fine for audit trail
-    # Note: You need to implement reject_expense in crud to handle refunding 'reserved_balance'
-    # For now assuming you have it or will add it.
-    
-    # Simple implementation:
     exp = db.query(models.Expense).get(id)
-    if not exp: raise HTTPException(404, "Not found")
+    if not exp:
+        raise HTTPException(status_code=404, detail="Expense not found")
     
-    # Refund logic (simplified here, ideally move to CRUD)
+    # 1. REFUND LOGIC (With Safety Checks for None)
     caisse = db.query(models.Caisse).filter(models.Caisse.user_id == exp.requester_id).first()
+    
     if caisse:
-        caisse.reserved_balance -= exp.amount
-        caisse.balance += exp.amount
+        # Treat None as 0.0 to prevent TypeError
+        current_reserved = caisse.reserved_balance if caisse.reserved_balance is not None else 0.0
+        current_balance = caisse.balance if caisse.balance is not None else 0.0
         
+        # Apply Refund
+        caisse.reserved_balance = current_reserved - exp.amount
+        caisse.balance = current_balance + exp.amount
+        
+    # 2. Update Status
     exp.status = models.ExpenseStatus.REJECTED
     exp.rejection_reason = payload.reason
+    
     db.commit()
-    return exp
+    db.refresh(exp) # Refresh to get updated data
+    
+    return exp # <--- CRITICAL: MUST RETURN THE OBJECT
 
 
 # ==========================
@@ -260,22 +337,32 @@ def get_payment_voucher_pdf(
 @router.post("/{id}/confirm-payment")
 def confirm_payment(
     id: int, 
-    payload: dict = Body(...), # Expects {"attachment": "url"}
+    # Use File(None) to make it optional, but correct type
+    file: UploadFile = File(None), 
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
-    """PD confirms cash handover. Money leaves Reserved forever."""
     require_roles(current_user, [models.UserRole.PD, models.UserRole.ADMIN])
     
-    attachment = payload.get("attachment") # Optional now, but triggers reminders if missing
-    
+    filename = None
+    if file:
+        # Define storage path
+        upload_dir = "uploads/expenses"
+        os.makedirs(upload_dir, exist_ok=True) # Create folder if not exists
+        
+        # Save file with unique name
+        filename = f"EXP_{id}_{file.filename}"
+        file_path = os.path.join(upload_dir, filename)
+        
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
     try:
-        crud.confirm_expense_payment(db, id, attachment)
-        return {"message": "Payment confirmed. Reserved funds deducted."}
+        # Update DB with filename
+        crud.confirm_expense_payment(db, id, filename)
+        return {"message": "Payment confirmed", "filename": filename}
     except Exception as e:
         raise HTTPException(400, str(e))
-
-
 @router.post("/{id}/acknowledge")
 def acknowledge_receipt(
     id: int,
@@ -289,7 +376,42 @@ def acknowledge_receipt(
     except ValueError as e:
         raise HTTPException(403, str(e))
 
-
-# ==========================
-# 4. ADMIN & STATS
-# ==========================
+@router.put("/{id}", response_model=schemas.ExpenseResponse)
+def update_expense(
+    id: int,
+    payload: schemas.ExpenseCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user),
+    background_tasks: BackgroundTasks = BackgroundTasks()
+):
+    """
+    Edit a DRAFT expense.
+    Handles financial adjustments (refunds/deductions) automatically.
+    """
+    require_roles(current_user, [models.UserRole.PM, models.UserRole.ADMIN])
+    
+    try:
+        # Calls the updated CRUD function
+        updated_exp = crud.update_expense(db, id, payload, current_user.id)
+        
+        # If the user decided to Submit immediately during the edit
+        if not payload.is_draft:
+            # We can trigger the notification manually here or rely on crud
+            # Let's send the PD notification
+            pd_emails = crud.get_emails_by_role(db, models.UserRole.PD)
+            crud.send_notification_email(
+                background_tasks,
+                pd_emails,
+                "Expense Submitted (Edited)",
+                "",
+                {
+                    "message": f"PM {current_user.first_name} has edited and submitted an expense.",
+                    "details": {"Amount": f"{updated_exp.amount} MAD"},
+                    "link": "/expenses?tab=l1"
+                }
+            )
+            
+        return updated_exp
+        
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))

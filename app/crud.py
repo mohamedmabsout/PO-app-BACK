@@ -27,7 +27,9 @@ import secrets
 from .config import conf
 from datetime import datetime, timedelta
 from sqlalchemy import func,or_
- 
+from fastapi import UploadFile, File, Form
+from fastapi.responses import FileResponse
+
 
 logger = logging.getLogger(__name__)
 
@@ -3996,10 +3998,12 @@ def get_caisse_stats(db: Session, user: models.User):
             models.Transaction.type == models.TransactionType.DEBIT,
             models.Transaction.created_at >= month_start
         ).scalar() or 0.0
+    reserved = wallet.reserved_balance if wallet and wallet.reserved_balance else 0.0
 
     # 4. Retourner le dictionnaire final
     return {
         "balance": float(wallet.balance),
+        "reserved":float(reserved),
         "pending_in": float(pending_total),
         "spent_month": float(spent_month)
     }
@@ -4207,7 +4211,7 @@ def get_all_wallets_summary(db: Session):
             "user_name": f"{pm.first_name} {pm.last_name}",
             "balance": balance,
             "pending_in": pending_items[0] or 0.0, # Just show requested for now, or use pending_in for gap
-             # Let's show the GAP (Money expected but not yet received)
+        "reserved": wallet.reserved_balance if wallet else 0.0, # <--- ADD THIS
             "pending_in": pending_in
         })
         
@@ -4433,13 +4437,13 @@ def create_expense(db: Session, payload: schemas.ExpenseCreate, user_id: int):
     db.refresh(db_expense)
     return db_expense
 
+
 def list_my_requests(db: Session, current_user: models.User):
     """
-    Règle de visibilité CORRIGÉE :
-    - Un PM ne voit que ses propres dépenses (Draft inclus).
-    - Un PD ou Admin voit :
-        • Ses PROPRES dépenses (Draft inclus)
-        • Les dépenses des AUTRES à partir de PENDING_L1 (pas leurs Drafts)
+    Returns expenses where:
+    1. User is Admin/PD: All non-drafts (plus their own drafts).
+    2. User is PM (Requester): Everything they created (including Drafts).
+    3. User is SBC (Beneficiary): Only items assigned to them that are SUBMITTED or later (No Drafts).
     """
     query = db.query(models.Expense).options(
         joinedload(models.Expense.internal_project),
@@ -4448,17 +4452,28 @@ def list_my_requests(db: Session, current_user: models.User):
     
     role_str = str(current_user.role).upper()
     
+    # --- 1. ADMIN / PD View ---
     if "ADMIN" in role_str or "PD" in role_str or "PROJECT DIRECTOR" in role_str:
-        # ✅ Le PD et l'Admin voient tout, mais on EXCLUT les brouillons (DRAFT)
-        # car un brouillon n'appartient qu'à celui qui l'écrit.
-        # Ils voient tout à partir de PENDING_L1, PENDING_L2, PAID, etc.
+        # See my own requests (even drafts) OR others' requests (if submitted)
         query = query.filter(or_(
             models.Expense.requester_id == current_user.id,
-            models.Expense.status != "DRAFT"
+            models.Expense.status != models.ExpenseStatus.DRAFT
         ))
+    
+    # --- 2. PM / SBC View ---
     else:
-        # ✅ Le PM ne voit que ce qu'il a créé (Brouillons inclus)
-        query = query.filter(models.Expense.requester_id == current_user.id)
+        query = query.filter(
+            or_(
+                # Case A: I am the Creator (PM) -> See everything (Drafts included)
+                models.Expense.requester_id == current_user.id,
+                
+                # Case B: I am the Beneficiary (SBC) -> See only if NOT Draft
+                and_(
+                    models.Expense.beneficiary_user_id == current_user.id,
+                    models.Expense.status != models.ExpenseStatus.DRAFT
+                )
+            )
+        )
     
     return query.order_by(models.Expense.created_at.desc()).all()
 
@@ -4758,24 +4773,35 @@ def list_pending_payment(db: Session):
 
 def confirm_expense_payment(db: Session, expense_id: int, signed_file_path: str = None):
     """
-    PD confirms they handed over the cash. 
-    Money leaves 'Reserved' permanently.
+    PD confirms payment OR uploads a missing file later.
     """
     expense = db.query(models.Expense).get(expense_id)
+    if not expense:
+        raise ValueError("Expense not found")
+
     caisse = db.query(models.Caisse).filter(models.Caisse.user_id == expense.requester_id).first()
     
-    # 1. Financial Deduction from system
-    caisse.reserved_balance -= expense.amount
-    
-    # 2. Update Status
-    expense.status = "PAID"
-    expense.payment_confirmed_at = datetime.now()
-    
+    # 1. Financial Deduction (Only if first time paying)
+    # We check if it was already paid/acknowledged to avoid double deduction
+    if expense.status not in [models.ExpenseStatus.PAID, models.ExpenseStatus.ACKNOWLEDGED]:
+        if caisse:
+            caisse.reserved_balance -= expense.amount
+        expense.payment_confirmed_at = datetime.now()
+
+    # 2. Update File Info
     if signed_file_path:
-        expense.signed_doc_url = signed_file_path
+        expense.attachment = signed_file_path # Use the correct column name
         expense.is_signed_copy_uploaded = True
     else:
-        expense.is_signed_copy_uploaded = False # This triggers the 24h reminders
+        # Only set to False if it wasn't already uploaded
+        if not expense.attachment:
+            expense.is_signed_copy_uploaded = False 
+    
+    # 3. Status Logic (The Fix)
+    # ONLY set to PAID if it is NOT currently ACKNOWLEDGED.
+    # This prevents the SBC from having to re-acknowledge.
+    if expense.status != models.ExpenseStatus.ACKNOWLEDGED:
+        expense.status = models.ExpenseStatus.PAID
     
     # 2. Notification au PM pour confirmer que tout est en ordre
     create_notification(
@@ -4885,29 +4911,71 @@ def update_bon_de_commande(db: Session, bc_id: int, bc_data: schemas.BCCreate, u
 # app/crud.py
 
 def update_expense(db: Session, expense_id: int, payload: schemas.ExpenseCreate, user_id: int):
-    # 1. Chercher la dépense existante
+    # 1. Fetch existing
     db_expense = db.query(models.Expense).filter(models.Expense.id == expense_id).first()
-    
     if not db_expense:
         return None
 
-    # 2. Sécurité : vérifier que seul le propriétaire (ou admin) peut modifier un brouillon
-    if db_expense.requester_id != user_id:
-        # Optionnel : lever une erreur ici ou retourner None
-        return None
+    # 2. Security Check
+    if db_expense.requester_id != user_id and not (user.role == models.UserRole.ADMIN):
+        raise ValueError("Not authorized to edit this expense")
 
-    # 3. Mettre à jour les champs
+    if db_expense.status != models.ExpenseStatus.DRAFT:
+        raise ValueError("Only Draft expenses can be edited.")
+
+    # --- 3. CONSISTENCY CHECK (THE FIX) ---
+    
+    # If Project is changing
+    if payload.project_id != db_expense.project_id:
+        # And we are dealing with Acceptance PP
+        if payload.exp_type == "ACCEPTANCE_PP":
+            # If the user didn't provide a new ACT ID, but kept the old amount, that's invalid.
+            # Or if they provided an ACT ID, we must verify it belongs to the NEW project.
+            
+            if payload.act_id:
+                # Verify ownership
+                act = db.query(models.ServiceAcceptance).get(payload.act_id)
+                if not act or act.bc.project_id != payload.project_id:
+                    raise ValueError(f"The selected Acceptance (ACT) does not belong to the new Project ID {payload.project_id}.")
+            else:
+                # If they changed project but didn't select a new ACT, force clear data
+                # (Ideally the frontend handles this, but backend must be safe)
+                if payload.amount > 0:
+                     raise ValueError("You changed the project. Please select a valid Acceptance for this new project.")
+
+    # 4. Handle Financial Reversal (Refund old amount to Reserved/Balance)
+    # ... (Keep your existing refund logic here) ...
+    caisse = db.query(models.Caisse).filter(models.Caisse.user_id == user_id).first()
+    caisse.reserved_balance -= db_expense.amount
+    caisse.balance += db_expense.amount
+
+    # 5. Apply Updates
     db_expense.project_id = payload.project_id
     db_expense.exp_type = payload.exp_type
     db_expense.beneficiary = payload.beneficiary
-    db_expense.amount = payload.amount
     db_expense.remark = payload.remark
     db_expense.act_id = payload.act_id
-    db_expense.updated_at = datetime.now() # Si vous avez ce champ
+    
+    # 6. Apply New Financials
+    # Re-check balance for new amount
+    if caisse.balance < payload.amount:
+        raise ValueError("Insufficient balance for the updated amount.")
+        
+    db_expense.amount = payload.amount
+    caisse.balance -= payload.amount
+    caisse.reserved_balance += payload.amount
+
+    # 7. Handle Status Change (Draft -> Submitted)
+    if not payload.is_draft:
+        db_expense.status = models.ExpenseStatus.SUBMITTED
+    
+    db_expense.updated_at = datetime.now()
 
     db.commit()
     db.refresh(db_expense)
     return db_expense
+
+
 def get_grouped_history(db: Session, page: int = 1, limit: int = 10):
     """
     Returns Transactions grouped by their Parent Request.

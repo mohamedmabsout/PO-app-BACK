@@ -755,7 +755,7 @@ class ExpenseResponse(BaseModel):
     exp_type: str
     amount: float
     status: str
-    
+    remark: Optional[str] = None
     beneficiary: str
     beneficiary_user_id: Optional[int] = None
     
@@ -771,9 +771,11 @@ class ExpenseResponse(BaseModel):
     l2_at: Optional[datetime] = None
     
     payment_confirmed_at: Optional[datetime] = None
-    acknowledged_at: Optional[datetime] = None
+    signed_doc_url: Optional[str] = None 
+    attachment: Optional[str] = None
     
     is_signed_copy_uploaded: bool
+    acknowledged_at: Optional[datetime] = None
     
     rejection_reason: Optional[str] = None
     act_id: Optional[int] = None
@@ -790,6 +792,7 @@ class ExpenseUpdate(BaseModel):
 
 class CaisseStats(BaseModel):
     balance: float
+    reserved: float
     pending_in: float
     spent_month: float
 
