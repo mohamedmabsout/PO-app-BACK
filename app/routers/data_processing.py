@@ -488,7 +488,7 @@ def approve_l1(
     current_user: models.User = Depends(auth.get_current_user),
 ):
     # Check if PD
-    bc = crud.approve_bc_l1(db, bc_id, current_user.id)
+    bc = crud.approve_bc_l1(db, bc_id, current_user.id,background_tasks)
 
     # FIND ADMINS
     admins = db.query(models.User).filter(models.User.role == "Admin").all()
