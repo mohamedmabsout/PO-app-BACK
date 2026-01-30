@@ -3662,7 +3662,7 @@ def generate_act_record(db: Session, bc_id: int, creator_id: int, item_ids: List
         # Use a small epsilon for float comparison
         if abs(item.applied_tax_rate - current_statutory_rate) > 0.001:
             raise ValueError(
-                f"Tax Rate Mismatch for item '{item.merged_po.po_no}': "
+                f"Tax Rate Mismatch for item '{item.merged_po.po_id}': "
                 f"BC has {item.applied_tax_rate*100:.0f}%, but the current valid rate for {current_year} is {current_statutory_rate*100:.0f}%. "
                 "The BC must be updated to reflect current tax laws before acceptance."
             )
