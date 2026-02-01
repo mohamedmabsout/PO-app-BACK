@@ -500,7 +500,14 @@ class ServiceAcceptance(Base):
     total_tax_amount = Column(Float, default=0.0) 
     total_amount_ttc = Column(Float, default=0.0)
     applied_tax_rate = Column(Float, default=0.0) # Store the rate used (e.g. 0.20)
-    expenses = relationship("Expense", back_populates="act")
+    expense_id = Column(Integer, ForeignKey("expenses.id"), nullable=True)
+    
+    # Update relationship
+    expense = relationship(
+        "Expense", 
+        back_populates="acts", 
+        foreign_keys=[expense_id]
+    )
 class ItemRejectionHistory(Base):
     __tablename__ = "item_rejection_history"
     id = Column(Integer, primary_key=True)
@@ -603,7 +610,7 @@ class Expense(Base):
     attachment = Column(String(500)) # Digital attachment (Receipt scan)
     
     # Links
-    act_id = Column(Integer, ForeignKey("service_acceptances.id"), nullable=True)   
+    # act_id = Column(Integer, ForeignKey("service_acceptances.id"), nullable=True)   
     requester_id = Column(Integer, ForeignKey("users.id"))
     
     # --- NEW: Beneficiary Link (For 'Acknowledge' button) ---
@@ -634,7 +641,11 @@ class Expense(Base):
     is_signed_copy_uploaded = Column(Boolean, default=False) # Helper flag for the 24h reminder
     
     # Relationships
-    act = relationship("ServiceAcceptance", back_populates="expenses")
+    acts = relationship(
+        "ServiceAcceptance", 
+        back_populates="expense", 
+        foreign_keys="[ServiceAcceptance.expense_id]"
+    )
     internal_project = relationship("InternalProject", back_populates="expenses")
     requester = relationship("User", foreign_keys=[requester_id], back_populates="expenses")
     

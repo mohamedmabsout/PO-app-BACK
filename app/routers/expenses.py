@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, status
 from fastapi.responses import StreamingResponse, Response
 from fastapi.temp_pydantic_v1_params import Body
 import pandas as pd
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from typing import List
 
 from .. import crud, models, schemas, auth
@@ -45,6 +45,7 @@ def require_roles(user, roles):
 
 @router.post("/", response_model=schemas.ExpenseResponse)
 def create_expense(
+    background_tasks: BackgroundTasks,
     payload: schemas.ExpenseCreate,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
@@ -56,7 +57,7 @@ def create_expense(
     # Allowed: PMs, Coordinators, Admins, PDs
     require_roles(current_user, [models.UserRole.PM, models.UserRole.COORDINATEUR, models.UserRole.ADMIN, models.UserRole.PD])
     try:
-        return crud.create_expense(db, payload, current_user.id)
+        return crud.create_expense(db, payload, current_user.id, background_tasks)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -147,6 +148,30 @@ def get_paid_history(
             models.ExpenseStatus.ACKNOWLEDGED
         ])
     ).order_by(models.Expense.updated_at.desc()).all()
+
+@router.get("/my-reserved-breakdown", response_model=List[schemas.ExpenseResponse])
+def get_my_reserved_breakdown(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """
+    Returns the list of individual expenses currently contributing 
+    to the user's reserved_balance.
+    """
+    reserved_statuses = [
+        models.ExpenseStatus.DRAFT,
+        models.ExpenseStatus.SUBMITTED,
+        models.ExpenseStatus.PENDING_L2, # Note: includes PENDING_L1/APPROVED_L1 depending on your enum usage
+        models.ExpenseStatus.APPROVED_L2
+    ]
+    
+    return db.query(models.Expense).options(
+        joinedload(models.Expense.internal_project)
+    ).filter(
+        models.Expense.requester_id == current_user.id,
+        models.Expense.status.in_(reserved_statuses)
+    ).order_by(models.Expense.created_at.desc()).all()
+
 
 @router.get("/{id}", response_model=schemas.ExpenseResponse)
 def get_expense_details(
@@ -359,7 +384,7 @@ def confirm_payment(
 
     try:
         # Update DB with filename
-        crud.confirm_expense_payment(db, id, filename)
+        crud.confirm_expense_payment(db, id, filename, current_user.id,background_tasks=BackgroundTasks())
         return {"message": "Payment confirmed", "filename": filename}
     except Exception as e:
         raise HTTPException(400, str(e))

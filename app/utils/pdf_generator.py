@@ -310,14 +310,14 @@ def generate_expense_pdf(expense):
     elements.append(Spacer(1, 0.5*cm))
     project_name_para = Paragraph(expense.internal_project.name, style_cell_bold)
     beneficiary_para = Paragraph(expense.beneficiary, style_cell_bold)
+    act_numbers = ", ".join([act.act_number for act in expense.acts])
 
     # Info Table
     data = [
-        [Paragraph("Date Request:", style_cell), expense.created_at.strftime("%d/%m/%Y"), Paragraph("Project:", style_cell), project_name_para],
-        [Paragraph("Type:", style_cell), expense.exp_type, Paragraph("Reference:", style_cell), expense.act.act_number if expense.act_id else "N/A"],
-        [Paragraph("Beneficiary:", style_cell), beneficiary_para, Paragraph("Amount:", style_cell), f"{expense.amount:,.2f} MAD"]
+        ["Date Request:", expense.created_at.strftime("%d/%m/%Y"), "Project:", expense.internal_project.name],
+        ["Type:", expense.exp_type, "ACT References:", Paragraph(act_numbers, styles['Normal'])],
+        ["Beneficiary:", expense.beneficiary, "Total Amount:", f"{expense.amount:,.2f} MAD"]
     ]
-
     t = Table(data, colWidths=[3*cm, 3.5*cm, 2.5*cm, 9.5*cm])
     t.setStyle(TableStyle([
         ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
