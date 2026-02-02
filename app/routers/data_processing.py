@@ -14,7 +14,7 @@ from app import database
 from app.core.security import is_admin, is_pd, is_pd_or_admin, is_pm
 from ..dependencies import get_current_user, get_db
 from .. import crud, models, auth, schemas
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from xlsxwriter.utility import xl_col_to_name
 from ..utils.pdf_generator import generate_bc_pdf  # Import the function
 from fastapi.responses import FileResponse
@@ -441,20 +441,30 @@ def list_bcs(
     # Pass the search term to your existing CRUD function
     return crud.get_bcs_by_status(db, status_enum, search_term=search)
 
-@router.get("/bc/all", response_model=List[schemas.BCResponse])  # Use your schema
+@router.get("/bc/all", response_model=List[schemas.BCResponse])
 def read_all_bcs(
-    background_tasks: BackgroundTasks ,  # <-- Add this parameter
     search: Optional[str] = None,
     status_filter: Optional[str] = None, 
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
+    """
+    Liste tous les BCs avec recherche et filtres.
+    La vérification des rejets se fait de manière synchrone.
+    """
+    # Vérification synchrone sans BackgroundTasks
     try:
-        crud.check_rejections_and_notify(db, background_tasks)
+        crud.check_rejections_sync(db)
     except Exception as e:
-        print(f"Error in background check: {e}")
-
-    return crud.get_all_bcs(db, current_user, search=search, status_filter=status_filter)  # <-- Pass status_filter
+        print(f"⚠️ Erreur lors de la vérification des rejets: {e}")
+        # On continue quand même pour ne pas bloquer la requête
+    
+    return crud.get_all_bcs(
+        db, 
+        current_user, 
+        search=search, 
+        status_filter=status_filter
+    )
 
 @router.get("/bc/ready-for-acceptance", response_model=List[schemas.BCResponse])
 def list_bcs_ready_for_act(
@@ -833,3 +843,22 @@ def get_history_grouped(
     db: Session = Depends(get_db)
 ):
     return crud.get_grouped_history(db, page, limit)
+
+@router.get("/bc/all", response_model=List[schemas.BCResponse])
+def read_all_bcs(
+    search: Optional[str] = None,
+    status_filter: Optional[str] = None, 
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """
+    Liste tous les BCs disponibles pour l'utilisateur connecté.
+    
+    ✅ CORRECTION: BackgroundTasks retiré pour éviter l'erreur 500
+    """
+    return crud.get_all_bcs(
+        db, 
+        current_user, 
+        search=search, 
+        status_filter=status_filter
+    )

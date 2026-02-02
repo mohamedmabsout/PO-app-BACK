@@ -2765,45 +2765,53 @@ def get_bcs_by_status(db: Session, status: models.BCStatus, search_term: Optiona
 
         )
     return query.all()
-def get_all_bcs(db: Session, current_user: models.User, search: Optional[str] = None, status_filter: Optional[str] = None): # <-- NEW ARGUMENT:
-    query = db.query(models.BonDeCommande).options(
-        joinedload(models.BonDeCommande.sbc),
-        joinedload(models.BonDeCommande.internal_project),
-        joinedload(models.BonDeCommande.creator) 
-    )
-    query = query.join(models.InternalProject)
 
-    # Apply role-based filtering
-    if current_user.role == models.UserRole.PM: 
-        query = query.filter(
-            or_(
-                models.BonDeCommande.creator_id == current_user.id,
-                models.InternalProject.project_manager_id == current_user.id
+def get_all_bcs(
+    db: Session, 
+    current_user, 
+    search: Optional[str] = None, 
+    status_filter: Optional[str] = None
+):
+    '''Récupère tous les BCs selon les permissions de l'utilisateur'''
+    
+    try:
+        # Query de base
+        query = db.query(models.BC)
+        
+        # Filtre par rôle (si nécessaire)
+        if current_user.role == "PM":
+            # Les PMs voient seulement leurs BCs
+            query = query.filter(models.BC.creator_id == current_user.id)
+        
+        elif current_user.role == "SBC":
+            # Les SBCs voient seulement leurs BCs
+            query = query.filter(models.BC.sbc_id == current_user.id)
+        
+        # Si pas admin, filtrer selon les droits
+        # Les PD et ADMIN voient tout
+        
+        # Appliquer les filtres optionnels
+        if search:
+            query = query.filter(
+                models.BC.bc_number.ilike(f"%{search}%")
             )
-        )
-    elif current_user.role == models.UserRole.SBC:
-        # SBCs see BCs where they are the subcontractor
-        if not current_user.sbc_id:
-            return [] # This SBC user is not linked to an SBC profile, return nothing
-        query = query.filter(
-            or_(models.BonDeCommande.sbc_id == current_user.sbc_id,
-            models.BonDeCommande.status != models.BCStatus.DRAFT) # SBCs cannot see DRAFT BCs
-        )
-
-    # Apply search filter
-    if search:
-        search_term = f"%{search}%"
-        # The joins are already handled by the options, but we can add them here for clarity if needed.
-        query = query.filter(
-            (models.BonDeCommande.bc_number.ilike(search_term)) |
-            (models.SBC.short_name.ilike(search_term)) |
-            (models.InternalProject.name.ilike(search_term))
-        )
-    if status_filter:
-        query = query.filter(models.BonDeCommande.status == status_filter)
-
-    # Order by newest first and execute
-    return query.order_by(models.BonDeCommande.created_at.desc()).all()
+        
+        if status_filter:
+            query = query.filter(models.BC.status == status_filter)
+        
+        # Récupérer les résultats avec les relations
+        bcs = query.options(
+            joinedload(models.BC.internal_project)
+                .joinedload(models.InternalProject.project_manager),
+            joinedload(models.BC.sbc),
+            joinedload(models.BC.creator)
+        ).order_by(models.BC.created_at.desc()).all()
+        
+        return bcs
+        
+    except Exception as e:
+        print(f"❌ Erreur get_all_bcs: {e}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
     
 def reject_bc(db: Session, bc_id: int, reason: str, rejector_id: int):
@@ -5143,8 +5151,8 @@ def get_all_sbcs(db: Session, search: Optional[str] = None):
     
     return query.order_by(models.SBC.created_at.desc()).all()
 
-
-
+def send_notification(bc):
+    raise NotImplementedError
 
 
 
