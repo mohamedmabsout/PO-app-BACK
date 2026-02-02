@@ -850,11 +850,15 @@ class InternalControlUpdate(BaseModel):
     identifiers: List[str] # List of PO IDs or Site Codes
     set_to_value: int # 0 or 1
 
-    class ConfirmPaymentRequest(BaseModel):
+
+
+
+
+class ConfirmPaymentRequest(BaseModel):
      attachment: str
 
-     class WalletSummary(BaseModel):
-         user_id: int
+class WalletSummary(BaseModel):
+    user_id: int
     user_name: str
     balance: float
 

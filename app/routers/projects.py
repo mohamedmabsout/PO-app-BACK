@@ -1,6 +1,6 @@
 # in app/routers/projects.py
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks
 from sqlalchemy.orm import Session, joinedload,Query
 from sqlalchemy import func
 from typing import List, Optional
@@ -222,11 +222,12 @@ def assign_site_to_internal_project(
 
 @router.post("/assign-sites-bulk")
 def assign_sites_bulk(
+    background_tasks: BackgroundTasks,
     payload: schemas.BulkSiteAssignment,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_admin)
 ):
-    result = crud.bulk_assign_sites(db, payload.site_ids, payload.internal_project_id, current_user)
+    result = crud.bulk_assign_sites(db, payload.site_ids, payload.internal_project_id, current_user,background_tasks)
     
     if result["updated"] == 0 and result["skipped"] > 0:
         return {"message": "Warning: No sites updated. All selected sites are already assigned to other projects.", "details": result}
