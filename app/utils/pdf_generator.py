@@ -302,24 +302,33 @@ def generate_expense_pdf(expense):
     doc = SimpleDocTemplate(buffer, pagesize=A4)
     elements = []
     styles = getSampleStyleSheet()
-
+    # Define a custom style for table cells (smaller font if needed)
+    style_cell = ParagraphStyle('CellStyle', parent=styles['Normal'], fontSize=9, leading=11)
+    style_cell_bold = ParagraphStyle('CellStyleBold', parent=styles['Normal'], fontSize=9, leading=11, fontName='Helvetica-Bold')
     # Title
-    elements.append(Paragraph(f"PIECE DE CAISSE (Voucher) - {expense.id}", styles['Title']))
+    elements.append(Paragraph(f"PIECE DE CAISSE (Expense) - {expense.id}", styles['Title']))
     elements.append(Spacer(1, 0.5*cm))
+    project_name_para = Paragraph(expense.internal_project.name, style_cell_bold)
+    beneficiary_para = Paragraph(expense.beneficiary, style_cell_bold)
+    act_numbers = ", ".join([act.act_number for act in expense.acts])
 
     # Info Table
     data = [
         ["Date Request:", expense.created_at.strftime("%d/%m/%Y"), "Project:", expense.internal_project.name],
-        ["Type:", expense.exp_type, "Reference:", expense.act.act_number if expense.act_id else "N/A"],
-        ["Beneficiary:", expense.beneficiary, "Amount:", f"{expense.amount:,.2f} MAD"]
+        ["Type:", expense.exp_type, "ACT References:", Paragraph(act_numbers, styles['Normal'])],
+        ["Beneficiary:", expense.beneficiary, "Total Amount:", f"{expense.amount:,.2f} MAD"]
     ]
-    t = Table(data, colWidths=[4*cm, 5*cm, 4*cm, 5*cm])
-    t.setStyle(TableStyle([('GRID', (0,0), (-1,-1), 0.5, colors.grey), ('FONTNAME', (0,0), (-1,-1), 'Helvetica-Bold', 0, 0)]))
+    t = Table(data, colWidths=[3*cm, 3.5*cm, 2.5*cm, 9.5*cm])
+    t.setStyle(TableStyle([
+        ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
+        ('VALIGN', (0,0), (-1,-1), 'TOP'), # Align to top so wrapped text looks good
+        ('PADDING', (0,0), (-1,-1), 6),    # Add padding
+    ]))
     elements.append(t)
     elements.append(Spacer(1, 1*cm))
 
     # Remarks
-    elements.append(Paragraph(f"<b>Object / Remark:</b> {expense.remark or 'N/A'}", styles['Normal']))
+    elements.append(Paragraph(f"<b>Remark:</b> {expense.remark or 'N/A'}", styles['Normal']))
     elements.append(Spacer(1, 2*cm))
 
     # SIGNATURE BLOCKS

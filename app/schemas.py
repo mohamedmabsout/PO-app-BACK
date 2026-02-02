@@ -739,14 +739,23 @@ class ExpenseBase(BaseModel):
     remark: Optional[str] = None
     amount: float # type: ignore
     attachment: str | None = None
-    act_id: Optional[int] = None 
-    
-    # New flag for Draft vs Submit immediately
+    act_ids: List[int] = [] 
     is_draft: bool = False 
+
 
 class ExpenseCreate(ExpenseBase):
 
     pass
+
+class ServiceAcceptanceMini(BaseModel):
+    id: int
+    act_number: str
+    total_amount_ht: float
+    created_at: datetime
+    
+    model_config = ConfigDict(from_attributes=True)
+
+
 class ExpenseResponse(BaseModel):
     id: int
     project_id: int
@@ -755,7 +764,7 @@ class ExpenseResponse(BaseModel):
     exp_type: str
     amount: float
     status: str
-    
+    remark: Optional[str] = None
     beneficiary: str
     beneficiary_user_id: Optional[int] = None
     
@@ -771,15 +780,25 @@ class ExpenseResponse(BaseModel):
     l2_at: Optional[datetime] = None
     
     payment_confirmed_at: Optional[datetime] = None
-    acknowledged_at: Optional[datetime] = None
+    signed_doc_url: Optional[str] = None 
+    attachment: Optional[str] = None
     
     is_signed_copy_uploaded: bool
+    acknowledged_at: Optional[datetime] = None
     
     rejection_reason: Optional[str] = None
-    act_id: Optional[int] = None
-    
-    class Config:
-        from_attributes = True
+    act_ids: List[int] = [] 
+    acts: List[ServiceAcceptanceMini] = [] # <--- Add this to see the batch
+
+    # Add a validator to populate act_ids from the 'acts' relationship
+    @field_validator("act_ids", mode="before")
+    @classmethod
+    def extract_act_ids(cls, v, info):
+        # If the input is the ORM model, 'acts' is a list of ServiceAcceptance objects
+        if hasattr(info.data, 'acts'):
+            return [act.id for act in info.data.acts]
+        return v
+
 
 class ExpenseUpdate(BaseModel):
     exp_type: str | None = None
@@ -790,6 +809,7 @@ class ExpenseUpdate(BaseModel):
 
 class CaisseStats(BaseModel):
     balance: float
+    reserved: float
     pending_in: float
     spent_month: float
 
@@ -840,12 +860,13 @@ class InternalControlUpdate(BaseModel):
 
     class Config:
         from_attributes = True
-
+        
 class PayableActResponse(BaseModel):
     id: int
     act_number: str
     total_amount_ht: float
     sbc_name: str
+    sbc_id: Optional[int] = None # <--- Allow None to prevent crashes
     created_at: datetime
 
     class Config:

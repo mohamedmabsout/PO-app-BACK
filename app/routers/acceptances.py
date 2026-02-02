@@ -391,6 +391,7 @@ def export_act_details(
 @router.get("/payable-acts", response_model=List[PayableActResponse])
 def get_acts_for_expense(
     project_id: int,
+    current_expense_id: Optional[int] = None, # <--- ADD THIS
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
@@ -404,7 +405,7 @@ def get_acts_for_expense(
     if current_user.role == models.UserRole.SBC:
          raise HTTPException(status_code=403, detail="Not authorized")
 
-    acts = crud.get_payable_acts(db, project_id)
+    acts = crud.get_payable_acts(db, project_id,current_expense_id)
     
     if not acts:
         return []
