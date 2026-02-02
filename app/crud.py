@@ -2571,7 +2571,91 @@ def create_sbc(db: Session, form_data: dict, contract_file, tax_file, creator_id
     )
     return new_sbc
 
-    return new_sbc
+def update_sbc(db: Session, sbc_id: int, form_data: dict, contract_file, tax_file, updater_id: int, background_tasks: BackgroundTasks):
+    db_sbc = db.query(models.SBC).get(sbc_id)
+    if not db_sbc:
+        raise ValueError("SBC not found")
+
+    # --- DATA CLEANING HELPER ---
+    def clean_val(key):
+        val = form_data.get(key)
+        # Convert empty strings or whitespace-only strings to None (NULL)
+        if isinstance(val, str) and not val.strip():
+            return None
+        return val
+    new_type = clean_val('sbc_type')
+    if new_type:
+        db_sbc.sbc_type = new_type
+    
+    # Logic for ICE/RC: Only required if type is ENTREPRISE
+    # If switching to PP, we might want to clear them
+    if db_sbc.sbc_type == "PP":
+        db_sbc.ice = None
+        db_sbc.rc = None
+    else:
+        db_sbc.ice = clean_val('ice')
+        db_sbc.rc = clean_val('rc')
+
+    # 2. Uniqueness Validation
+    email = clean_val('email')
+    phone = clean_val('phone_1')
+
+    if email and email != db_sbc.email:
+        if db.query(models.SBC).filter(models.SBC.email == email).first():
+            raise ValueError(f"An SBC with the email '{email}' already exists.")
+            
+    if phone and phone != db_sbc.phone_1:
+        if db.query(models.SBC).filter(models.SBC.phone_1 == phone).first():
+            raise ValueError(f"An SBC with the phone number '{phone}' already exists.")
+
+    # 3. Handle Files (unchanged logic)
+    code = db_sbc.sbc_code
+    if contract_file:
+        db_sbc.contract_filename = save_upload_file(contract_file, code, "Contract")
+        db_sbc.contract_upload_date = datetime.now()
+        db_sbc.has_contract_attachment = True
+
+    if tax_file:
+        db_sbc.tax_reg_filename = save_upload_file(tax_file, code, "TaxReg")
+        db_sbc.tax_reg_upload_date = datetime.now()
+        db_sbc.has_tax_regularization = True
+
+    # 4. Update Fields with cleaned values
+    db_sbc.short_name = clean_val('short_name')
+    db_sbc.name = clean_val('name')
+    db_sbc.sbc_type = clean_val('sbc_type')
+    db_sbc.ceo_name = clean_val('ceo_name')
+    db_sbc.email = email
+    db_sbc.phone_1 = phone
+    db_sbc.rib = clean_val('rib')
+    db_sbc.bank_name = clean_val('bank_name')
+    db_sbc.ice = clean_val('ice')
+    db_sbc.rc = clean_val('rc')
+    
+    # --- CRITICAL FIX FOR THE DATE ERROR ---
+    db_sbc.tax_reg_end_date = clean_val('tax_reg_end_date')
+    db_sbc.start_date = clean_val('start_date')
+
+    db.commit()
+    db.refresh(db_sbc)
+
+
+    # 5. Notification
+    admin_emails = get_emails_by_role(db, UserRole.ADMIN)
+    send_notification_email(
+        background_tasks,
+        admin_emails,
+        "SBC Profile Updated",
+        "",
+        {
+            "message": f"The profile for SBC '{db_sbc.short_name}' has been updated.",
+            "details": {"SBC Name": db_sbc.name, "Status": db_sbc.status},
+            "link": f"/configuration/sbc/view/{db_sbc.id}"
+        }
+    )
+
+    return db_sbc
+
 def get_pending_sbcs(db: Session):
     return db.query(models.SBC).filter(
         models.SBC.status == models.SBCStatus.UNDER_APPROVAL
@@ -2783,12 +2867,14 @@ def get_all_bcs(db: Session, current_user: models.User, search: Optional[str] = 
             )
         )
     elif current_user.role == models.UserRole.SBC:
+        sbcId=query.with_entities(models.BonDeCommande.sbc_id).filter(models.BonDeCommande.id==models.BonDeCommande.id).first()[0]
+        # print("Applying SBC filter for BC retrieval, the selected sbc_id is:", current_user.sbc_id,"for the bc_id:", sbcId)
         # SBCs see BCs where they are the subcontractor
         if not current_user.sbc_id:
             return [] # This SBC user is not linked to an SBC profile, return nothing
         query = query.filter(
-            or_(models.BonDeCommande.sbc_id == current_user.sbc_id,
-            models.BonDeCommande.status != models.BCStatus.DRAFT) # SBCs cannot see DRAFT BCs
+         models.BonDeCommande.sbc_id == current_user.sbc_id,
+            models.BonDeCommande.status != models.BCStatus.DRAFT # SBCs cannot see DRAFT BCs
         )
 
     # Apply search filter

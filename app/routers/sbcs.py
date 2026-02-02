@@ -273,12 +273,15 @@ def get_sbc_by_id(
 @router.put("/{sbc_id}", response_model=schemas.SBCResponse)
 def update_sbc(
     sbc_id: int,
+    background_tasks: BackgroundTasks,
+
     short_name: Optional[str] = Form(None),
     name: Optional[str] = Form(None),
     ceo_name: Optional[str] = Form(None),
     email: Optional[str] = Form(None),
     rib: Optional[str] = Form(None),
     bank_name: Optional[str] = Form(None),
+    sbc_type: Optional[str] = Form(None),
     tax_reg_end_date: Optional[str] = Form(None),
     contract_file: Optional[UploadFile] = File(None),
     tax_file: Optional[UploadFile] = File(None),
@@ -294,9 +297,12 @@ def update_sbc(
             "email": email,
             "rib": rib,
             "bank_name": bank_name,
+            "sbc_type": sbc_type,
+
             "tax_reg_end_date": tax_reg_end_date,
         },
         contract_file,
         tax_file,
-        current_user.id
+        current_user.id,
+        background_tasks
     )
