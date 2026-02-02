@@ -306,3 +306,25 @@ def update_sbc(
         current_user.id,
         background_tasks
     )
+
+
+
+@router.get("/my-bc-items/{bc_id}", response_model=List[schemas.BCItemResponse])
+def get_my_bc_item_details(
+    bc_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    # 1. Security check: Does this BC belong to the logged-in SBC?
+    bc = db.query(models.BonDeCommande).filter(
+        models.BonDeCommande.id == bc_id,
+        models.BonDeCommande.sbc_id == current_user.sbc_id
+    ).first()
+    
+    if not bc:
+        raise HTTPException(status_code=404, detail="Bon de Commande not found or access denied.")
+
+    # 2. Return items with joined MergedPO data
+    return db.query(models.BCItem).options(
+        joinedload(models.BCItem.merged_po)
+    ).filter(models.BCItem.bc_id == bc_id).all()
