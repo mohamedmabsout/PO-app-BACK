@@ -2558,6 +2558,7 @@ def create_sbc(db: Session, form_data: dict, contract_file, tax_file, creator_id
     db.commit()
     db.refresh(new_sbc)
     admin_emails = get_emails_by_role(db, UserRole.ADMIN)
+    
     send_notification_email(
         background_tasks,
         admin_emails,
@@ -2565,7 +2566,7 @@ def create_sbc(db: Session, form_data: dict, contract_file, tax_file, creator_id
         "",
         {
             "message": "A new subcontractor has been registered and requires validation.",
-            "details": {"SBC Name": new_sbc.name, "SBC Code": new_sbc.sbc_code, "Creator": f"User ID {creator_id}"},
+            "details": {"SBC Name": new_sbc.name, "SBC Code": new_sbc.sbc_code, "Creator": f"User  {creator_id}"},
             "link": "/sbc/approve"
         }
     )
