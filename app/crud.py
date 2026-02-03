@@ -2807,7 +2807,7 @@ def approve_bc_l1(db: Session, bc_id: int, approver_id: int, background_tasks: B
     bc.approver_l1_id = approver_id
     bc.approved_l1_at = datetime.now()
     db.commit()
-    pd_user = db.query(models.User).get(pd_id)
+    pd_user = db.query(models.User).get(approver_id)
     pd_name = f"{pd_user.first_name} {pd_user.last_name}" if pd_user else "N/A"
 
     admin_emails = get_emails_by_role(db, UserRole.ADMIN)
@@ -3569,7 +3569,9 @@ def check_system_state_notifications(db: Session, user: models.User):
                 "priority": "Medium",
                 "badgeBg": "warning",
                 "link": "/users/targets",
-                "action": "Set Targets"
+                "action": "Set Targets",
+                "created_at": datetime.now(),
+                "type": "TODO"
             })
 
     return virtual_todos
@@ -4721,22 +4723,23 @@ def confirm_expense_payment(db: Session, expense_id: int, filename: str, pd_id: 
 
     return expense
 
-def acknowledge_payment(db: Session, expense_id: int, user_id: int):
-    """
-    Step 5: Beneficiary Acknowledges.
-    Action: Final Closure, Notify PD/Admin.
-    """
+def acknowledge_payment(db: Session, expense_id: int, user_id: int, background_tasks: BackgroundTasks):
     expense = db.query(models.Expense).get(expense_id)
+    if not expense:
+        raise ValueError("Expense not found")
+        
     expense.status = models.ExpenseStatus.ACKNOWLEDGED
     expense.acknowledged_at = datetime.now()
 
-    # NOTIFY PD THAT FILE IS CLOSED
-    if expense.l1_approver:
+    # Create Notification for PD
+    if expense.l1_approver_id:
         create_notification(
-            db, recipient_id=expense.l1_approver_id, type=NotificationType.APP,
-            module="Expenses",
+            db, 
+            recipient_id=expense.l1_approver_id, 
+            type=models.NotificationType.APP,
+            module=models.NotificationModule.EXP, # <--- Ensure this Enum exists in Python
             title="Expense Fully Acknowledged",
-            message=f"Beneficiary {expense.beneficiary} has confirmed receiving funds for Expense #{expense.id}.",
+            message=f"Beneficiary {expense.beneficiary} confirmed receipt for Expense #{expense.id}.",
             link=f"/expenses/details/{expense.id}"
         )
     

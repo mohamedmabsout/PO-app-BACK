@@ -1,4 +1,5 @@
 # backend/app/routers/notifications.py
+import datetime
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from sqlalchemy import func
@@ -108,7 +109,7 @@ def get_notification_widget_data(
             "title": v["title"],
             "desc": v["desc"],
             "link": v["link"],
-            "time": v["created_at"],
+            "time": v.get("created_at", datetime.now()),
             "is_virtual": True
         })
 
