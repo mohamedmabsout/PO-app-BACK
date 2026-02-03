@@ -35,6 +35,8 @@ app.include_router(sbcs.router)
 app.include_router(notifications.router)
 app.include_router(expenses.router)
 logging.basicConfig(level=logging.INFO)
+# Exemple dans main.py
+
 
 logger = logging.getLogger(__name__)
 

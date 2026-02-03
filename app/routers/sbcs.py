@@ -273,12 +273,15 @@ def get_sbc_by_id(
 @router.put("/{sbc_id}", response_model=schemas.SBCResponse)
 def update_sbc(
     sbc_id: int,
+    background_tasks: BackgroundTasks,
+
     short_name: Optional[str] = Form(None),
     name: Optional[str] = Form(None),
     ceo_name: Optional[str] = Form(None),
     email: Optional[str] = Form(None),
     rib: Optional[str] = Form(None),
     bank_name: Optional[str] = Form(None),
+    sbc_type: Optional[str] = Form(None),
     tax_reg_end_date: Optional[str] = Form(None),
     contract_file: Optional[UploadFile] = File(None),
     tax_file: Optional[UploadFile] = File(None),
@@ -296,12 +299,15 @@ def update_sbc(
             "email": email,
             "rib": rib,
             "bank_name": bank_name,
+            "sbc_type": sbc_type,
+
             "tax_reg_end_date": tax_reg_end_date,
             "ice": ice,
              "rc": rc,
         },
         contract_file,
         tax_file,
+<<<<<<< HEAD
         current_user.id
     )
 
@@ -318,3 +324,30 @@ def get_sbc_by_id(
         raise HTTPException(status_code=404, detail="SBC not found")
 
     return sbc
+=======
+        current_user.id,
+        background_tasks
+    )
+
+
+
+@router.get("/my-bc-items/{bc_id}", response_model=List[schemas.BCItemResponse])
+def get_my_bc_item_details(
+    bc_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    # 1. Security check: Does this BC belong to the logged-in SBC?
+    bc = db.query(models.BonDeCommande).filter(
+        models.BonDeCommande.id == bc_id,
+        models.BonDeCommande.sbc_id == current_user.sbc_id
+    ).first()
+    
+    if not bc:
+        raise HTTPException(status_code=404, detail="Bon de Commande not found or access denied.")
+
+    # 2. Return items with joined MergedPO data
+    return db.query(models.BCItem).options(
+        joinedload(models.BCItem.merged_po)
+    ).filter(models.BCItem.bc_id == bc_id).all()
+>>>>>>> cdc97da93bf920dd4de90a7f01e79dff7b7d1ea2
