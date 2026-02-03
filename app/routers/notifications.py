@@ -1,5 +1,5 @@
 # backend/app/routers/notifications.py
-import datetime
+from datetime import datetime
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from sqlalchemy import func
