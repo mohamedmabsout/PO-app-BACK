@@ -388,6 +388,7 @@ def confirm_payment(
         return {"message": "Payment confirmed", "filename": filename}
     except Exception as e:
         raise HTTPException(400, str(e))
+    
 @router.post("/{id}/acknowledge")
 def acknowledge_receipt(
     id: int,

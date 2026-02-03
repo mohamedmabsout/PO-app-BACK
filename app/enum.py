@@ -94,3 +94,11 @@ class ExpenseStatus(str, enum.Enum):
 class TransactionStatus(str, enum.Enum):
     PENDING = "PENDING"
     COMPLETED = "COMPLETED"
+
+class NotificationModule(str, enum.Enum):
+    BC = "BC"                 # Purchase Orders
+    EXP = "EXP"               # Expenses / Petty Cash
+    CAISSE = "CAISSE"         # Fund Requests / Refills
+    ACCEPTANCE = "ACCEPTANCE" # ACT / Work Validation
+    DISPATCH = "DISPATCH"     # Site Assignments
+    SYSTEM = "SYSTEM"         # SBC Approval, Targets, Compliance

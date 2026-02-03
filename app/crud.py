@@ -13,7 +13,7 @@ import sqlalchemy as sa
 from sqlalchemy import func, case, extract, and_,distinct,union_all
 from sqlalchemy.sql.functions import coalesce # More explicit import
 from sqlalchemy.orm import aliased
-from .enum import ProjectType, UserRole, SBCStatus, BCStatus, NotificationType, BCType,AssignmentStatus, ValidationState, ItemGlobalStatus, SBCType,TransactionType,TransactionStatus
+from .enum import ProjectType, UserRole, SBCStatus, BCStatus, NotificationType, BCType,AssignmentStatus, ValidationState, ItemGlobalStatus, SBCType,TransactionType,TransactionStatus,NotificationModule
 import pandas as pd
 import io
 import re
@@ -2557,6 +2557,8 @@ def create_sbc(db: Session, form_data: dict, contract_file, tax_file, creator_id
     db.add(new_sbc)
     db.commit()
     db.refresh(new_sbc)
+    creator_user = db.query(models.User).get(creator_id)
+    creator_full_name = f"{creator_user.first_name} {creator_user.last_name}" if creator_user else "System"
     admin_emails = get_emails_by_role(db, UserRole.ADMIN)
     
     send_notification_email(
@@ -2566,8 +2568,12 @@ def create_sbc(db: Session, form_data: dict, contract_file, tax_file, creator_id
         "",
         {
             "message": "A new subcontractor has been registered and requires validation.",
-            "details": {"SBC Name": new_sbc.name, "SBC Code": new_sbc.sbc_code, "Creator": f"User  {creator_id}"},
-            "link": "/sbc/approve"
+            "details": {
+                "SBC Name": new_sbc.name, 
+                "SBC Code": new_sbc.sbc_code, 
+                "Creator": creator_full_name  # <-- Use the name here
+            },
+            "link": "/configuration/sbc/approve"
         }
     )
     return new_sbc
@@ -2639,7 +2645,6 @@ def update_sbc(db: Session, sbc_id: int, form_data: dict, contract_file, tax_fil
 
     db.commit()
     db.refresh(db_sbc)
-
 
     # 5. Notification
     admin_emails = get_emails_by_role(db, UserRole.ADMIN)
@@ -2802,6 +2807,9 @@ def approve_bc_l1(db: Session, bc_id: int, approver_id: int, background_tasks: B
     bc.approver_l1_id = approver_id
     bc.approved_l1_at = datetime.now()
     db.commit()
+    pd_user = db.query(models.User).get(pd_id)
+    pd_name = f"{pd_user.first_name} {pd_user.last_name}" if pd_user else "N/A"
+
     admin_emails = get_emails_by_role(db, UserRole.ADMIN)
     send_notification_email(
         background_tasks,
@@ -2810,7 +2818,7 @@ def approve_bc_l1(db: Session, bc_id: int, approver_id: int, background_tasks: B
         "",
         {
             "message": "A BC has passed L1 validation and is now pending final Admin approval.",
-            "details": {"BC Number": bc.bc_number, "L1 Approver": f"User ID {approver_id}"},
+            "details": {"BC Number": bc.bc_number, "L1 Approver": f"{pd_name}"},
             "link": f"/bcs/{bc.id}"
         }
     )
@@ -3463,6 +3471,7 @@ def create_notification(
     db: Session, 
     recipient_id: int, 
     type: models.NotificationType, 
+    module: models.NotificationModule,
     title: str, 
     message: str, 
     link: str = None
@@ -3470,6 +3479,7 @@ def create_notification(
     notif = models.Notification(
         recipient_id=recipient_id,
         type=type,
+        module=module,
         title=title,
         message=message,
         link=link
@@ -4711,7 +4721,7 @@ def confirm_expense_payment(db: Session, expense_id: int, filename: str, pd_id: 
 
     return expense
 
-def acknowledge_payment(db: Session, expense_id: int, user_id: int, background_tasks: BackgroundTasks):
+def acknowledge_payment(db: Session, expense_id: int, user_id: int):
     """
     Step 5: Beneficiary Acknowledges.
     Action: Final Closure, Notify PD/Admin.
@@ -4823,7 +4833,7 @@ def submit_expense(db: Session, expense_id: int, background_tasks: BackgroundTas
     expense = db.query(models.Expense).filter(models.Expense.id == expense_id).first()
     if not expense:
         return None
-
+    
     # 2. Changer le statut pour le mettre dans le workflow du PD
     expense.status = "PENDING_L1"
     expense.submitted_at = datetime.utcnow() # Traçabilité

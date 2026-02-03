@@ -7,7 +7,7 @@ import sqlalchemy as sa
 from .enum import (
     ProjectType, UserRole, SBCStatus, BCStatus, NotificationType, BCType,
     AssignmentStatus, ValidationState, ItemGlobalStatus, SBCType,
-    FundRequestStatus, TransactionType, TransactionStatus, ExpenseStatus
+    FundRequestStatus, TransactionType, TransactionStatus, ExpenseStatus, NotificationModule
 )
 from .database import Base
  # <--- AJOUTER CET IMPORT
@@ -470,6 +470,8 @@ class Notification(Base):
     recipient_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     
     type = Column(Enum(NotificationType), nullable=False)
+    module = Column(Enum(NotificationModule), nullable=False) # <--- NEW
+
     title = Column(String(255), nullable=False)
     message = Column(Text, nullable=False)
     

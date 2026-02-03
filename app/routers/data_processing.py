@@ -461,22 +461,33 @@ def list_bcs_ready_for_act(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
-    # Security: Only Admin/PD/SBC
-    
-    query = db.query(models.BonDeCommande).options(
+    # 1. Start the query and join InternalProject so we can check the project manager
+    query = db.query(models.BonDeCommande).join(
+        models.InternalProject, models.BonDeCommande.project_id == models.InternalProject.id
+    ).options(
         joinedload(models.BonDeCommande.sbc),
         joinedload(models.BonDeCommande.internal_project),
-        # Load items to check if they are already fully accepted? 
-        # Or just show the BC and let the user drill down.
         joinedload(models.BonDeCommande.items)
     ).filter(
         models.BonDeCommande.status == models.BCStatus.APPROVED
     )
 
-    if current_user.role == "PM":
-        query = query.filter(models.BonDeCommande.creator_id == current_user.id)
-    elif current_user.role == "SBC":
+    # 2. Apply Visibility Security
+    if current_user.role == models.UserRole.PM:
+        # THE FIX: PM sees BC if they created it OR if they are the PM of the project
+        query = query.filter(
+            or_(
+                models.BonDeCommande.creator_id == current_user.id,
+                models.InternalProject.project_manager_id == current_user.id
+            )
+        )
+    elif current_user.role == models.UserRole.SBC:
+        # SBC only sees their own assigned BCs
+        if not current_user.sbc_id:
+            return []
         query = query.filter(models.BonDeCommande.sbc_id == current_user.sbc_id)
+
+    # Note: ADMIN and PD roles will see all approved BCs as no specific filter is applied to them
 
     return query.order_by(models.BonDeCommande.approved_l2_at.desc()).all()
 
