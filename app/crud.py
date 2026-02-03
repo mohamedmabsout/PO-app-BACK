@@ -4700,12 +4700,18 @@ def confirm_expense_payment(db: Session, expense_id: int, filename: str, pd_id: 
     expense.payment_confirmed_at = datetime.now()
     if filename:
         expense.attachment = filename
+        expense.signed_doc_url = filename # <--- THIS was likely missing
         expense.is_signed_copy_uploaded = True
+    else:
+        # If no filename provided now, only set to False if the column is currently empty
+        if not expense.signed_doc_url and not expense.attachment:
+            expense.is_signed_copy_uploaded = False
 
     # NOTIFY BENEFICIARY (TO ACKNOWLEDGE)
     if expense.beneficiary_user_id:
         create_notification(
             db, recipient_id=expense.beneficiary_user_id, type=NotificationType.TODO,
+            module=models.NotificationModule.EXP,
             title="Confirm Receipt of Funds",
             message=f"A payment of {expense.amount} MAD has been marked as paid to you. Please acknowledge.",
             link=f"/expenses/details/{expense.id}"
