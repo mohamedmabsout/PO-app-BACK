@@ -397,7 +397,7 @@ def acknowledge_receipt(
 ):
     """Beneficiary (SBC or PM) confirms receipt."""
     try:
-        crud.acknowledge_payment(db, id, current_user.id)
+        crud.acknowledge_payment(db, id, current_user.id, background_tasks=BackgroundTasks())
         return {"message": "Receipt acknowledged."}
     except ValueError as e:
         raise HTTPException(403, str(e))
