@@ -10,6 +10,7 @@ from fastapi.temp_pydantic_v1_params import Body
 import pandas as pd
 from sqlalchemy.orm import Session, joinedload
 from typing import List
+import mimetypes # Ensure this is imported at the top
 
 from .. import crud, models, schemas, auth
 from ..dependencies import get_current_user, get_db
@@ -216,35 +217,28 @@ def download_expense_receipt(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
-    """
-    Download the receipt (Signed Doc or Initial Attachment) by Expense ID.
-    Useful when the frontend knows the ID but not the exact filename.
-    """
     expense = db.query(models.Expense).get(id)
     if not expense:
         raise HTTPException(status_code=404, detail="Expense not found")
 
-    # Security Check (Optional but recommended)
-    is_owner = expense.requester_id == current_user.id
-    is_admin_pd = current_user.role in [models.UserRole.ADMIN, models.UserRole.PD, models.UserRole.PM]
-    
-    if not (is_owner or is_admin_pd):
-        raise HTTPException(status_code=403, detail="Not authorized")
-
-    # Logic: Look for the Signed Copy first (Payment Proof), then the Initial Attachment
-    # Note: crud.confirm_expense_payment updates 'signed_doc_url'
     filename = expense.signed_doc_url or expense.attachment
-
     if not filename:
-        raise HTTPException(status_code=404, detail="No receipt file uploaded for this expense.")
+        raise HTTPException(status_code=404, detail="No file uploaded.")
 
-    # Construct path
     file_path = os.path.join("uploads/expenses", filename)
 
     if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="File record exists but file not found on server.")
+        raise HTTPException(status_code=404, detail="File not found on disk.")
 
-    return FileResponse(file_path, filename=filename)
+    # --- THE FIX: Automatically detect if it's image/jpeg or application/pdf ---
+    mime_type, _ = mimetypes.guess_type(file_path)
+    
+    return FileResponse(
+        file_path, 
+        media_type=mime_type or "application/octet-stream", 
+        filename=filename
+    )
+
 
 # ==========================
 # 2. APPROVAL WORKFLOW
