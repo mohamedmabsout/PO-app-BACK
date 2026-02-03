@@ -4734,6 +4734,7 @@ def acknowledge_payment(db: Session, expense_id: int, user_id: int):
     if expense.l1_approver:
         create_notification(
             db, recipient_id=expense.l1_approver_id, type=NotificationType.APP,
+            module="Expenses",
             title="Expense Fully Acknowledged",
             message=f"Beneficiary {expense.beneficiary} has confirmed receiving funds for Expense #{expense.id}.",
             link=f"/expenses/details/{expense.id}"
