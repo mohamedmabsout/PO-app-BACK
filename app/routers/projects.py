@@ -204,6 +204,7 @@ def assign_site_to_internal_project(
                 db, 
                 recipient_id=target_project.project_manager_id,
                 type=models.NotificationType.TODO,
+                module=models.NotificationModule.DISPATCH,
                 title="New Site Assignments",
                 message=f"{current_user.first_name} has assigned {updated_rows} new sites to project '{target_project.name}'. Please review.",
                 link="/projects/approvals"

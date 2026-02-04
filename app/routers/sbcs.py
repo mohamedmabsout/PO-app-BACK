@@ -5,50 +5,46 @@ from typing import List, Optional
 from .. import crud, schemas, auth, models
 from ..dependencies  import get_db,require_admin
 from ..config import conf
-
+from fastapi.responses import FileResponse
+import os
 import secrets
 router = APIRouter(prefix="/api/sbcs", tags=["SBC Management"])
 
 @router.post("/", response_model=schemas.SBCResponse)
 def create_new_sbc(
-    background_tasks: BackgroundTasks, # <--- Import this
-    # Use Form(...) for text fields because we are uploading files
-    sbc_code: Optional[str] = Form(None),
+    background_tasks: BackgroundTasks,
     short_name: str = Form(...),
     name: str = Form(...),
-    start_date: Optional[str] = Form(None),
+    sbc_type: str = Form(...),
+    sbc_code: Optional[str] = Form(None),
     ceo_name: Optional[str] = Form(None),
     email: Optional[str] = Form(None),
+    phone_1: Optional[str] = Form(None),
+    phone_2: Optional[str] = Form(None),
+    address: Optional[str] = Form(None),
+    city: Optional[str] = Form(None),
     rib: Optional[str] = Form(None),
     bank_name: Optional[str] = Form(None),
     ice: Optional[str] = Form(None),
     rc: Optional[str] = Form(None),
+    contract_ref: Optional[str] = Form(None),
     tax_reg_end_date: Optional[str] = Form(None),
-    sbc_type: Optional[str] = Form(None),
-    # Files
+    start_date: Optional[str] = Form(None),
     contract_file: Optional[UploadFile] = File(None),
     tax_file: Optional[UploadFile] = File(None),
-    
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
 ):
-    # Consolidate form data into a dict for CRUD
     form_data = {
-        "sbc_code": sbc_code,
-        "sbc_type": sbc_type,
-        "short_name": short_name,
-        "name": name,
-        "start_date": start_date,
-        "ceo_name": ceo_name,
-        "email": email,
-        "rib": rib,
-        "bank_name": bank_name,
-        "ice": ice,
-        "rc": rc,
-        "tax_reg_end_date": tax_reg_end_date
+        "short_name": short_name, "name": name, "sbc_type": sbc_type,
+        "sbc_code": sbc_code, "ceo_name": ceo_name, "email": email,
+        "phone_1": phone_1, "phone_2": phone_2, "address": address, "city": city,
+        "rib": rib, "bank_name": bank_name, "ice": ice, "rc": rc,
+        "contract_ref": contract_ref, "tax_reg_end_date": tax_reg_end_date,
+        "start_date": start_date
     }
-    
-    return crud.create_sbc(db, form_data, contract_file, tax_file, current_user.id,background_tasks)
+    return crud.create_sbc(db, form_data, contract_file, tax_file, current_user.id, background_tasks)
+
 
 @router.get("/pending", response_model=List[schemas.SBCResponse])
 def get_pending_sbcs_list(
@@ -274,39 +270,35 @@ def get_sbc_by_id(
 def update_sbc(
     sbc_id: int,
     background_tasks: BackgroundTasks,
-
     short_name: Optional[str] = Form(None),
     name: Optional[str] = Form(None),
+    sbc_type: Optional[str] = Form(None),
     ceo_name: Optional[str] = Form(None),
     email: Optional[str] = Form(None),
+    phone_1: Optional[str] = Form(None),
+    phone_2: Optional[str] = Form(None),
+    address: Optional[str] = Form(None),
+    city: Optional[str] = Form(None),
     rib: Optional[str] = Form(None),
     bank_name: Optional[str] = Form(None),
-    sbc_type: Optional[str] = Form(None),
+    ice: Optional[str] = Form(None),
+    rc: Optional[str] = Form(None),
+    contract_ref: Optional[str] = Form(None),
     tax_reg_end_date: Optional[str] = Form(None),
     contract_file: Optional[UploadFile] = File(None),
     tax_file: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
 ):
-    return crud.update_sbc(
-        db, sbc_id,
-        {
-            "short_name": short_name,
-            "name": name,
-            "ceo_name": ceo_name,
-            "email": email,
-            "rib": rib,
-            "bank_name": bank_name,
-            "sbc_type": sbc_type,
-
-            "tax_reg_end_date": tax_reg_end_date,
-        },
-        contract_file,
-        tax_file,
-        current_user.id,
-        background_tasks
-    )
-
+    # Pack into dict
+    form_data = {
+        "short_name": short_name, "name": name, "sbc_type": sbc_type,
+        "ceo_name": ceo_name, "email": email, "phone_1": phone_1,
+        "phone_2": phone_2, "address": address, "city": city,
+        "rib": rib, "bank_name": bank_name, "ice": ice, "rc": rc,
+        "contract_ref": contract_ref, "tax_reg_end_date": tax_reg_end_date
+    }
+    return crud.update_sbc(db, sbc_id, form_data, contract_file, tax_file, current_user.id, background_tasks)
 
 
 @router.get("/my-bc-items/{bc_id}", response_model=List[schemas.BCItemResponse])
@@ -328,3 +320,18 @@ def get_my_bc_item_details(
     return db.query(models.BCItem).options(
         joinedload(models.BCItem.merged_po)
     ).filter(models.BCItem.bc_id == bc_id).all()
+
+@router.get("/download-doc/{filename}")
+def download_sbc_document(filename: str):
+    # Path to your docs
+    file_path = os.path.join("uploads", "sbc_docs", filename)
+    
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File not found on server")
+    
+    # Return the file with explicit PDF media type
+    return FileResponse(
+        path=file_path, 
+        media_type='application/pdf', 
+        filename=filename
+    )

@@ -408,8 +408,19 @@ class SBCResponse(BaseModel):
     id: int
     short_name: str
     sbc_code: str
+    sbc_type: str
     status: str
     name: str
+    city: Optional[str] = None
+    phone_1: Optional[str] = None
+    phone_2: Optional[str] = None
+    contract_ref: Optional[str] = None
+    # Metadata
+    created_at: Optional[datetime] = None 
+    # Use the name of the relationship in models.py (creator)
+    creator: Optional[UserInfo] = None 
+    
+
     ceo_name: Optional[str] = None
     email: Optional[str] = None
     rib: Optional[str] = None
@@ -422,14 +433,13 @@ class SBCResponse(BaseModel):
     activity_sector: Optional[str] = None
     phone_number: Optional[str] = None
     address: Optional[str] = None
-    created_at: Optional[datetime] = None 
-    created_by: Optional[UserInfo] = None
     has_contract_attachment: bool
     contract_upload_date: Optional[datetime] = None
     has_tax_regularization: bool
     tax_reg_upload_date: Optional[datetime] = None
     tax_reg_end_date: Optional[date] = None
     model_config = ConfigDict(from_attributes=True)
+
 class MergedPOSimple(BaseModel):
     id: int
 

@@ -357,11 +357,9 @@ class SBC(Base):
     ice = Column(String(50), nullable=True) # Identifiant Commun de l'Entreprise
     rc = Column(String(50), nullable=True)  
     # --- METADATA & APPROVALS ---
-    created_at = Column(DateTime, server_default=func.now()) # "Date creation"
+    created_at = Column(DateTime, default=datetime.now) 
     
-    # "Creator of the SBC (RAF)"
     creator_id = Column(Integer, ForeignKey("users.id"))
-    
     # "Approver L1 (PD)"
     approver_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     sbc_type = Column(Enum(SBCType), nullable=False)

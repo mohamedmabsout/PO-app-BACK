@@ -27,7 +27,7 @@ import secrets
 from .config import conf
 from datetime import datetime, timedelta
 from sqlalchemy import func,or_
-from fastapi import UploadFile, File, Form
+from fastapi import UploadFile, File, Form,HTTPException
 from fastapi.responses import FileResponse
 
 
@@ -528,6 +528,7 @@ def process_po_file_background(file_path: str, history_id: int, user_id: int):
             db, 
             recipient_id=user_id,
             type=models.NotificationType.APP,
+            module=models.NotificationModule.SYSTEM,
             title="Acceptance Import Complete",
             message=f"File processed successfully. {processed_count} Merged POs updated.",
             link="/site-dispatcher"
@@ -599,6 +600,7 @@ def process_acceptance_file_background(file_path: str, history_id: int, user_id:
             db, 
             recipient_id=user_id,
             type=models.NotificationType.APP,
+            module=models.NotificationModule.SYSTEM,
             title="Acceptance Import Complete",
             message=f"File processed successfully. {updated_count} Merged POs updated.",
             link="/site-dispatcher"
@@ -2483,80 +2485,76 @@ def generate_sbc_code(db: Session):
     next_id = (last.id + 1) if last else 1
     return f"SBC-{str(next_id).zfill(3)}"
 
+
 def save_upload_file(upload_file, sbc_code, doc_type):
-    """Saves file to disk and returns path"""
     if not upload_file: return None
     
-    # Create dir if not exists
-    Path(UPLOAD_DIR).mkdir(parents=True, exist_ok=True)
+    # Ensure directory exists
+    target_dir = os.path.join("uploads", "sbc_docs")
+    os.makedirs(target_dir, exist_ok=True)
     
-    # Filename: SBC-001_Contract.pdf
+    # CLEAN THE CODE HERE TOO
+    clean_code = str(sbc_code).strip().replace(" ", "_")
+    
     ext = upload_file.filename.split('.')[-1]
-    filename = f"{sbc_code}_{doc_type}.{ext}"
-    file_path = os.path.join(UPLOAD_DIR, filename)
+    filename = f"{clean_code}_{doc_type}.{ext}"
+    file_path = os.path.join(target_dir, filename)
     
+    upload_file.file.seek(0)
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(upload_file.file, buffer)
         
     return filename
 
-def create_sbc(db: Session, form_data: dict, contract_file, tax_file, creator_id: int, background_tasks: BackgroundTasks):
-    # 1. Handle Code
-    email = form_data.get('email')
-    phone = form_data.get('phone_1')
-    if email and db.query(models.SBC).filter(models.SBC.email == email).first():
-        raise ValueError(f"An SBC with the email '{email}' already exists.")
-    if phone and db.query(models.SBC).filter(models.SBC.phone_1 == phone).first():
-        raise ValueError(f"An SBC with the phone number '{phone}' already exists.")
-
-    code = form_data.get('sbc_code')
-    if not code:
-        code = generate_sbc_code(db)
-        
-    # 2. Handle Files
+def create_sbc(db: Session, form_data: dict, contract_file, tax_file, creator_id: int,background_tasks: BackgroundTasks):
+    # Ensure code exists
+    raw_code = form_data.get('sbc_code') or generate_sbc_code(db)
+    code = raw_code.strip() 
     
     contract_fname = save_upload_file(contract_file, code, "Contract")
     tax_fname = save_upload_file(tax_file, code, "TaxReg")
-    # 3. Create Entity
+
     new_sbc = models.SBC(
         sbc_code=code,
-        creator_id=creator_id,
-        status=models.SBCStatus.UNDER_APPROVAL, # Always start here
-        sbc_type=form_data.get('sbc_type'), # Get from form data
-
-        # Identity
+        creator_id=creator_id, # Set here
+        created_at=datetime.now(), # Explicitly set here to be safe
+        status=models.SBCStatus.UNDER_APPROVAL,
+        sbc_type=form_data.get('sbc_type'),
         short_name=form_data.get('short_name'),
         name=form_data.get('name'),
-        start_date=form_data.get('start_date'),
-        
-        # Contact
         ceo_name=form_data.get('ceo_name'),
-        phone_1=form_data.get('phone_1'),
         email=form_data.get('email'),
-        
-        # Financial
+        phone_1=form_data.get('phone_1'),
+        phone_2=form_data.get('phone_2'),
+        address=form_data.get('address'),
+        city=form_data.get('city'),
         rib=form_data.get('rib'),
         bank_name=form_data.get('bank_name'),
         ice=form_data.get('ice'),
         rc=form_data.get('rc'),
-        # Contract
         contract_ref=form_data.get('contract_ref'),
-        # We store the DATE of upload if file exists
+        # Dates
+        start_date=datetime.now().date(),
         contract_upload_date=datetime.now() if contract_fname else None,
         has_contract_attachment=True if contract_fname else False,
-                contract_filename=contract_fname, # Save it!
-
-        # Tax
+        contract_filename=contract_fname,
         tax_reg_upload_date=datetime.now() if tax_fname else None,
         has_tax_regularization=True if tax_fname else False,
-        tax_reg_end_date=form_data.get('tax_reg_end_date'),
-                tax_reg_filename=tax_fname # Save it!
-
+        tax_reg_filename=tax_fname
     )
-    
+
+    # Handle tax date string conversion
+    tax_date_str = form_data.get('tax_reg_end_date')
+    if tax_date_str and tax_date_str not in ["null", "undefined", ""]:
+        try:
+            new_sbc.tax_reg_end_date = datetime.strptime(tax_date_str, "%Y-%m-%d").date()
+        except Exception as e:
+            print(f"Date conversion error: {e}")
+
     db.add(new_sbc)
     db.commit()
     db.refresh(new_sbc)
+
     creator_user = db.query(models.User).get(creator_id)
     creator_full_name = f"{creator_user.first_name} {creator_user.last_name}" if creator_user else "System"
     admin_emails = get_emails_by_role(db, UserRole.ADMIN)
@@ -2578,73 +2576,43 @@ def create_sbc(db: Session, form_data: dict, contract_file, tax_file, creator_id
     )
     return new_sbc
 
-def update_sbc(db: Session, sbc_id: int, form_data: dict, contract_file, tax_file, updater_id: int, background_tasks: BackgroundTasks):
-    db_sbc = db.query(models.SBC).get(sbc_id)
-    if not db_sbc:
-        raise ValueError("SBC not found")
 
-    # --- DATA CLEANING HELPER ---
-    def clean_val(key):
+def update_sbc(db: Session, sbc_id: int, form_data: dict, contract_file=None, tax_file=None, user_id=None, background_tasks=None):
+    sbc = db.query(models.SBC).get(sbc_id)
+    if not sbc: return None
+
+    # Helper to only update if value is provided, preserving existing data if "null/undefined" strings come from JS
+    def get_valid(key):
         val = form_data.get(key)
-        # Convert empty strings or whitespace-only strings to None (NULL)
-        if isinstance(val, str) and not val.strip():
-            return None
-        return val
-    new_type = clean_val('sbc_type')
-    if new_type:
-        db_sbc.sbc_type = new_type
+        if val in [None, "", "null", "undefined"]: return getattr(sbc, key)
+        return str(val).strip()
+
+    # Apply all fields
+    fields = ['short_name', 'name', 'sbc_type', 'ceo_name', 'email', 'phone_1', 
+              'phone_2', 'address', 'city', 'rib', 'bank_name', 'ice', 'rc', 'contract_ref']
     
-    # Logic for ICE/RC: Only required if type is ENTREPRISE
-    # If switching to PP, we might want to clear them
-    if db_sbc.sbc_type == "PP":
-        db_sbc.ice = None
-        db_sbc.rc = None
-    else:
-        db_sbc.ice = clean_val('ice')
-        db_sbc.rc = clean_val('rc')
+    for field in fields:
+        setattr(sbc, field, get_valid(field))
 
-    # 2. Uniqueness Validation
-    email = clean_val('email')
-    phone = clean_val('phone_1')
+    # Special handling for Date
+    reg_date = form_data.get('tax_reg_end_date')
+    if reg_date and reg_date not in ["", "null", "undefined"]:
+        try:
+            sbc.tax_reg_end_date = datetime.strptime(reg_date.split('T')[0], "%Y-%m-%d").date()
+        except: pass
 
-    if email and email != db_sbc.email:
-        if db.query(models.SBC).filter(models.SBC.email == email).first():
-            raise ValueError(f"An SBC with the email '{email}' already exists.")
-            
-    if phone and phone != db_sbc.phone_1:
-        if db.query(models.SBC).filter(models.SBC.phone_1 == phone).first():
-            raise ValueError(f"An SBC with the phone number '{phone}' already exists.")
-
-    # 3. Handle Files (unchanged logic)
-    code = db_sbc.sbc_code
+    # Files
     if contract_file:
-        db_sbc.contract_filename = save_upload_file(contract_file, code, "Contract")
-        db_sbc.contract_upload_date = datetime.now()
-        db_sbc.has_contract_attachment = True
-
+        sbc.contract_filename = save_upload_file(contract_file, sbc.sbc_code, "Contract")
+        sbc.has_contract_attachment = True
+        sbc.contract_upload_date = datetime.now()
     if tax_file:
-        db_sbc.tax_reg_filename = save_upload_file(tax_file, code, "TaxReg")
-        db_sbc.tax_reg_upload_date = datetime.now()
-        db_sbc.has_tax_regularization = True
-
-    # 4. Update Fields with cleaned values
-    db_sbc.short_name = clean_val('short_name')
-    db_sbc.name = clean_val('name')
-    db_sbc.sbc_type = clean_val('sbc_type')
-    db_sbc.ceo_name = clean_val('ceo_name')
-    db_sbc.email = email
-    db_sbc.phone_1 = phone
-    db_sbc.rib = clean_val('rib')
-    db_sbc.bank_name = clean_val('bank_name')
-    db_sbc.ice = clean_val('ice')
-    db_sbc.rc = clean_val('rc')
-    
-    # --- CRITICAL FIX FOR THE DATE ERROR ---
-    db_sbc.tax_reg_end_date = clean_val('tax_reg_end_date')
-    db_sbc.start_date = clean_val('start_date')
+        sbc.tax_reg_filename = save_upload_file(tax_file, sbc.sbc_code, "TaxReg")
+        sbc.has_tax_regularization = True
+        sbc.tax_reg_upload_date = datetime.now()
 
     db.commit()
-    db.refresh(db_sbc)
+    db.refresh(sbc)
 
     # 5. Notification
     admin_emails = get_emails_by_role(db, UserRole.ADMIN)
@@ -2654,13 +2622,13 @@ def update_sbc(db: Session, sbc_id: int, form_data: dict, contract_file, tax_fil
         "SBC Profile Updated",
         "",
         {
-            "message": f"The profile for SBC '{db_sbc.short_name}' has been updated.",
-            "details": {"SBC Name": db_sbc.name, "Status": db_sbc.status},
-            "link": f"/configuration/sbc/view/{db_sbc.id}"
+            "message": f"The profile for SBC '{sbc.short_name}' has been updated.",
+            "details": {"SBC Name": sbc.name, "Status": sbc.status},
+            "link": f"/configuration/sbc/view/{sbc.id}"
         }
     )
 
-    return db_sbc
+    return sbc
 
 def get_pending_sbcs(db: Session):
     return db.query(models.SBC).filter(
@@ -3060,6 +3028,7 @@ def bulk_assign_sites(db: Session, site_ids: List[int], target_project_id: int, 
                 db, 
                 recipient_id=target_project.project_manager_id,
                 type=models.NotificationType.TODO,
+                module=models.NotificationModule.DISPATCH,
                 title="Bulk Site Assignment",
                 message=f"{admin_user.first_name} has assigned {result_count} PO lines (across {len(valid_site_ids)} sites) to project '{target_project.name}'. Please review.",
                 link="/projects/approvals"
@@ -3126,6 +3095,7 @@ def auto_approve_old_assignments(db: Session):
             db,
             recipient_id=pm_id,
             type=models.NotificationType.APP, # 'APP' type for status updates
+            mmodule=models.NotificationModule.DISPATCH,
             title="Auto-Approval Notice",
             message=f"{count} sites assigned to '{project_name}' were auto-approved due to inactivity (>7 days).",
             link="/projects/list" # Link to their project list to see the new sites
@@ -3150,6 +3120,7 @@ def auto_approve_old_assignments(db: Session):
             db,
             recipient_id=admin.id,
             type=models.NotificationType.SYSTEM,
+            module=models.NotificationModule.SYSTEM,
             title="System Auto-Approval",
             message=f"System auto-approved {total_approved} overdue site assignments.",
             link=None
@@ -3224,6 +3195,7 @@ def process_assignment_review(db: Session, merged_po_ids: List[int], action: str
                 db,
                 recipient_id=admin.id,
                 type=notif_type,
+                module=models.NotificationModule.DISPATCH,
                 title=f"Site Assignment {action_text}",
                 message=f"PM {pm_user.first_name} {pm_user.last_name} has {action.lower()}ed {count} sites.",
                 link="/site-dispatcher" # Link them back to dispatcher to see results
@@ -3349,7 +3321,14 @@ def bulk_assign_projects_only(db: Session, file_contents: bytes):
     }
 
 def get_sbc_by_id(db: Session, sbc_id: int):
-    return db.query(models.SBC).filter(models.SBC.id == sbc_id).first()
+    sbc = db.query(models.SBC).options(
+        joinedload(models.SBC.creator)
+    
+    ).filter(models.SBC.id == sbc_id).first()
+    if not sbc:
+        raise HTTPException(status_code=404, detail="SBC not found")
+    return sbc
+
 def get_bcs_export_dataframe(db: Session, search: Optional[str] = None):
     # 1. Reuse the existing query logic to filter BCs based on search
     query = db.query(models.BonDeCommande).options(
@@ -3827,6 +3806,7 @@ def check_rejections_and_notify(db: Session, background_tasks: BackgroundTasks =
         for admin in admins:
             create_notification(
                 db, recipient_id=admin.id, type=models.NotificationType.SYSTEM,
+                module=models.NotificationModule.SYSTEM,
                 title="Permanent Rejection Alert",
                 message=f"Item {item.id} has reached 5 rejections.",
                 link=f"/configuration/acceptance/workflow/{item.bc_id}"
@@ -3861,6 +3841,7 @@ def check_rejections_and_notify(db: Session, background_tasks: BackgroundTasks =
                 # 1. App Notification
                 create_notification(
                     db, recipient_id=rejector.id, type=models.NotificationType.TODO,
+                    module=models.NotificationModule.ACCEPTANCE,
                     title="Rejection Period Ended",
                     message=f"Item {item.id} is ready for re-inspection (3 weeks passed).",
                     link=f"/configuration/acceptance/workflow/{item.bc_id}"
@@ -4583,6 +4564,7 @@ def create_expense(db: Session, payload: schemas.ExpenseCreate, user_id: int,bac
         for pd in pds:
             create_notification(
                 db, recipient_id=pd.id, type=NotificationType.TODO,
+                module=models.NotificationModule.EXP,
                 title="Expense L1 Approval Required",
                 message=f"PM {db_expense.requester.first_name} submitted an expense of {final_amount} MAD.",
                 link=f"/expenses/details/{db_expense.id}"
@@ -4614,6 +4596,7 @@ def approve_expense_l1(db: Session, expense_id: int, pd_id: int, background_task
     for admin in admins:
         create_notification(
             db, recipient_id=admin.id, type=NotificationType.TODO,
+            module=models.NotificationModule.EXP,
             title="Expense L2 Finance Approval",
             message=f"Expense #{expense.id} passed L1. Please validate for payment.",
             link=f"/expenses/details/{expense.id}"
@@ -4645,6 +4628,7 @@ def approve_expense_l2(db: Session, expense_id: int, admin_id: int, background_t
     if pd:
         create_notification(
             db, recipient_id=pd.id, type=NotificationType.TODO,
+            module=models.NotificationModule.EXP,
             title="Proceed with Payment",
             message=f"Expense #{expense.id} is fully approved. Print voucher and pay beneficiary.",
             link=f"/expenses/details/{expense.id}"
@@ -4769,6 +4753,7 @@ def reject_expense(db: Session, expense_id: int, reason: str, rejector_id: int, 
     # NOTIFY PM
     create_notification(
         db, recipient_id=expense.requester_id, type=NotificationType.ALERT,
+        module=models.NotificationModule.EXP,
         title="Expense Rejected",
         message=f"Your expense for {expense.amount} MAD was rejected. Reason: {reason}",
         link=f"/expenses/details/{expense.id}"
@@ -4861,6 +4846,7 @@ def submit_expense(db: Session, expense_id: int, background_tasks: BackgroundTas
             db,
             recipient_id=pd.id,
             type=models.NotificationType.TODO,
+            module=models.NotificationModule.EXPENSES,
             title="Nouvelle dépense à valider 📝",
             message=f"Le PM {expense.requester.first_name} a soumis une dépense de {expense.amount} MAD pour le projet {expense.internal_project.name}.",
             link="/expenses?tab=l1",
