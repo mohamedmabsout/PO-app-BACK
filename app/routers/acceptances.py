@@ -105,6 +105,33 @@ def upload_and_process_acceptances(
         db.commit()
         raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
 
+
+
+@router.get("/payable-acts", response_model=List[PayableActResponse])
+def get_acts_for_expense(
+    project_id: int,
+    current_expense_id: Optional[int] = None, # <--- ADD THIS
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """
+    Returns Approved 'Personne Physique' ACTs for a specific project
+    that are NOT currently linked to an active expense.
+    """
+    # Allowed: PMs (to create requests), PDs/Admins (for visibility)
+    # We don't strictly enforce require_roles here as it's a read-only helper, 
+    # but generally only internal staff should access it.
+    if current_user.role == models.UserRole.SBC:
+         raise HTTPException(status_code=403, detail="Not authorized")
+
+    acts = crud.get_payable_acts(db, project_id,current_expense_id)
+    
+    if not acts:
+        return []
+        
+    return acts
+
+
 @router.get("/bc/{id}/acts", status_code=status.HTTP_200_OK)
 def get_acts_for_bc(
     id: int,
@@ -387,27 +414,3 @@ def export_act_details(
     filename = f"ACT_Details_{act.act_number}.xlsx"
     headers = {'Content-Disposition': f'attachment; filename="{filename}"'}
     return StreamingResponse(output, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', headers=headers)
-
-@router.get("/payable-acts", response_model=List[PayableActResponse])
-def get_acts_for_expense(
-    project_id: int,
-    current_expense_id: Optional[int] = None, # <--- ADD THIS
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user)
-):
-    """
-    Returns Approved 'Personne Physique' ACTs for a specific project
-    that are NOT currently linked to an active expense.
-    """
-    # Allowed: PMs (to create requests), PDs/Admins (for visibility)
-    # We don't strictly enforce require_roles here as it's a read-only helper, 
-    # but generally only internal staff should access it.
-    if current_user.role == models.UserRole.SBC:
-         raise HTTPException(status_code=403, detail="Not authorized")
-
-    acts = crud.get_payable_acts(db, project_id,current_expense_id)
-    
-    if not acts:
-        return []
-        
-    return acts

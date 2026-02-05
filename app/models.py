@@ -7,7 +7,7 @@ import sqlalchemy as sa
 from .enum import (
     ProjectType, UserRole, SBCStatus, BCStatus, NotificationType, BCType,
     AssignmentStatus, ValidationState, ItemGlobalStatus, SBCType,
-    FundRequestStatus, TransactionType, TransactionStatus, ExpenseStatus, NotificationModule
+    FundRequestStatus, TransactionType, TransactionStatus, ExpenseStatus, NotificationModule, InvoiceStatus
 )
 from .database import Base
  # <--- AJOUTER CET IMPORT
@@ -490,7 +490,9 @@ class ServiceAcceptance(Base):
     
     created_at = Column(DateTime, server_default=func.now())
     creator_id = Column(Integer, ForeignKey("users.id")) # The PD
-    
+    invoice_id = Column(Integer, ForeignKey("invoices.id"), nullable=True)
+    invoice = relationship("Invoice", back_populates="acts")
+
     items = relationship("BCItem", back_populates="act")
     bc = relationship("BonDeCommande") # Optional backref
     file_path = Column(String(500), nullable=True)
@@ -660,3 +662,28 @@ class ExpenseType(Base):
     name = Column(String(100), unique=True, nullable=False)
 
 
+class Invoice(Base):
+    __tablename__ = "invoices"
+    id = Column(Integer, primary_key=True, index=True)
+    invoice_number = Column(String(100), unique=True, index=True) # SBC's own INV number
+    sbc_id = Column(Integer, ForeignKey("sbcs.id"), nullable=False)
+    
+    category = Column(String(50)) # 'Service' or 'Transport'
+    status = Column(Enum(InvoiceStatus), default=InvoiceStatus.SUBMITTED)
+    
+    total_amount_ht = Column(Float, default=0.0)
+    total_tax_amount = Column(Float, default=0.0)
+    total_amount_ttc = Column(Float, default=0.0)
+    
+    payment_receipt_filename = Column(String(255), nullable=True) # Confirms bank transfer
+    rejection_reason = Column(Text, nullable=True)
+    
+    created_at = Column(DateTime, server_default=func.now())
+    submitted_at = Column(DateTime, nullable=True)
+    verified_at = Column(DateTime, nullable=True) # When RAF validates physical paper
+    paid_at = Column(DateTime, nullable=True)
+
+    # Relationships
+    sbc = relationship("SBC")
+    # One Invoice covers Many ACTs
+    acts = relationship("ServiceAcceptance", back_populates="invoice")

@@ -161,9 +161,9 @@ def generate_bc_pdf(bc):
     # ==========================
     if is_standard:
         totals_data = [
-            ["Total HT:", f"{bc.total_amount_ht:,.2f} MAD"],
-            ["Total TVA:", f"{bc.total_tax_amount:,.2f} MAD"],
-            [Paragraph("<b>TOTAL TTC:</b>", style_bold), Paragraph(f"<b>{bc.total_amount_ttc:,.2f} MAD</b>", style_bold)]
+            # ["Total HT:", f"{bc.total_amount_ht:,.2f} MAD"],
+            # ["Total TVA:", f"{bc.total_tax_amount:,.2f} MAD"],
+            [Paragraph("<b>TOTAL HT:</b>", style_bold), Paragraph(f"<b>{bc.total_amount_ht:,.2f} MAD</b>", style_bold)]
         ]
     else:
         totals_data = [["Net à Payer:", f"{bc.total_amount_ht:,.2f} MAD"]]
@@ -280,18 +280,6 @@ def generate_act_pdf(act):
     p.drawString(380, y, "Total HT:")
     p.drawRightString(540, y, format_currency(act.total_amount_ht))
     
-    # Tax
-    y -= 20
-    tax_percent = (act.applied_tax_rate or 0.0) * 100
-    p.drawString(380, y, f"Tax ({tax_percent:.0f}%):")
-    p.drawRightString(540, y, format_currency(act.total_tax_amount))
-    
-    # Total TTC
-    y -= 25
-    p.setFont("Helvetica-Bold", 12)
-    p.drawString(380, y, "Total TTC:")
-    p.drawRightString(540, y, format_currency(act.total_amount_ttc))
-    
     p.showPage()
     p.save()
     
@@ -345,6 +333,104 @@ def generate_expense_pdf(expense):
         ('LINEABOVE', (0,1), (-1,1), 0.5, colors.black),
     ]))
     elements.append(sig_table)
+
+    doc.build(elements)
+    buffer.seek(0)
+    return buffer
+
+
+def generate_invoice_pdf(invoice):
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=10*mm, leftMargin=10*mm, topMargin=10*mm, bottomMargin=10*mm)
+    elements = []
+    styles = getSampleStyleSheet()
+    
+    # Custom Styles
+    style_h = ParagraphStyle('Header', parent=styles['Normal'], fontSize=8, leading=10)
+    style_title = ParagraphStyle('Title', parent=styles['Normal'], fontSize=16, leading=20, fontName='Helvetica-Bold', alignment=TA_CENTER)
+
+    # --- 1. TOP HEADER (Bill To vs Supplier) ---
+    bill_to = [
+        [
+            Paragraph(f"<b>Bill To:</b> {escape(SIB_NAME)}", style_h), 
+            Paragraph(f"<b>Supplier:</b> {escape(invoice.sbc.name or 'Unknown SBC')}", style_h)
+        ],
+        [
+            Paragraph(f"SIB Tax ID: {escape(SIB_IF)}", style_h), 
+            Paragraph(f"Supplier Tel: {escape(str(invoice.sbc.phone_1 or '-'))}", style_h)
+        ],
+        [
+            Paragraph(f"Address: {escape(SIB_ADDRESS)}", style_h), 
+            # Use 'or "-"' to prevent the NoneType crash
+            Paragraph(f"Address: {escape(invoice.sbc.address or '-')}", style_h)
+        ],
+        [
+            Paragraph("", style_h), 
+            # THE FIX FOR YOUR SPECIFIC ERROR:
+            Paragraph(f"Bank: {escape(invoice.sbc.bank_name or '-')}", style_h) 
+        ],
+        [
+            Paragraph("", style_h), 
+            Paragraph(f"RIB: {escape(invoice.sbc.rib or '-')}", style_h)
+        ],
+    ]
+    t_top = Table(bill_to, colWidths=[9.5*cm, 9.5*cm])
+    elements.append(t_top)
+    elements.append(Spacer(1, 1*cm))
+    
+    elements.append(Paragraph("Invoice / Tax Invoice", style_title))
+    elements.append(Spacer(1, 0.5*cm))
+
+    # --- 2. INVOICE INFO ---
+    inv_info = [
+        [f"Invoice NO: {invoice.invoice_number}"],
+        [f"PO Type: {invoice.category.upper()}"],
+        [f"Invoice Date: {invoice.created_at.strftime('%Y-%m-%d')}"]
+    ]
+    t_info = Table(inv_info, colWidths=[19*cm])
+    t_info.setStyle(TableStyle([('ALIGN', (0,0), (-1,-1), 'CENTER')]))
+    elements.append(t_info)
+    elements.append(Spacer(1, 0.5*cm))
+
+    # --- 3. ITEMS TABLE (Aggregated from all ACTs) ---
+    headers = ["BC Num", "PO Line", "Item Description", "Qty", "Tax Rate", "Unit Price", "Amount (HT)"]
+    data = [headers]
+    
+    for act in invoice.acts:
+        for item in act.items:
+            # Ensure description is a string before escaping
+            raw_desc = item.merged_po.item_description or "No Description"
+            clean_desc = escape(str(raw_desc))
+            
+            data.append([
+                act.bc.bc_number,
+                item.merged_po.po_line_no,
+                Paragraph(clean_desc[:100], style_h), 
+                item.quantity_sbc,
+                f"{int(item.applied_tax_rate * 100)}%",
+                f"{item.unit_price_sbc:,.2f}",
+                f"{item.line_amount_sbc:,.2f}"
+            ])
+
+    t_items = Table(data, colWidths=[2.5*cm, 1.5*cm, 7*cm, 1*cm, 1.5*cm, 2.5*cm, 3*cm])
+    t_items.setStyle(TableStyle([
+        ('GRID', (0,0), (-1,-1), 0.5, colors.black),
+        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+        ('BACKGROUND', (0,0), (-1,0), colors.whitesmoke),
+        ('FONTSIZE', (0,0), (-1,-1), 7),
+        ('ALIGN', (3,0), (-1,-1), 'RIGHT'),
+    ]))
+    elements.append(t_items)
+
+    # --- 4. TOTALS ---
+    totals = [
+        ["", "Invoice Amount (Excl. Tax):", f"{invoice.total_amount_ht:,.2f}"],
+        ["", f"TVA {int((invoice.total_tax_amount/invoice.total_amount_ht)*100) if invoice.total_amount_ht > 0 else 20}%:", f"{invoice.total_tax_amount:,.2f}"],
+        ["", "Total Amount (Incl. Tax):", f"{invoice.total_amount_ttc:,.2f} MAD"]
+    ]
+    t_tot = Table(totals, colWidths=[10*cm, 6*cm, 3*cm])
+    t_tot.setStyle(TableStyle([('FONTNAME', (1,2), (2,2), 'Helvetica-Bold'), ('ALIGN', (1,0), (2,2), 'RIGHT')]))
+    elements.append(t_tot)
 
     doc.build(elements)
     buffer.seek(0)

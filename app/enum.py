@@ -102,3 +102,13 @@ class NotificationModule(str, enum.Enum):
     ACCEPTANCE = "ACCEPTANCE" # ACT / Work Validation
     DISPATCH = "DISPATCH"     # Site Assignments
     SYSTEM = "SYSTEM"         # SBC Approval, Targets, Compliance
+    FACTURATION = "FACTURATION"
+
+
+class InvoiceStatus(str, enum.Enum):
+    DRAFT = "DRAFT"
+    SUBMITTED = "SUBMITTED"   # Pending RAF Verification
+    VERIFIED = "VERIFIED"     # Pending Payment
+    PAID = "PAID"             # Payment confirmation uploaded
+    ACKNOWLEDGED = "ACKNOWLEDGED" # SBC confirmed receipt
+    REJECTED = "REJECTED"

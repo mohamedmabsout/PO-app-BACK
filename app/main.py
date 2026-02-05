@@ -14,7 +14,7 @@ from  .dependencies import get_db
 from . import crud, models, schemas
 import os
 from fastapi.staticfiles import StaticFiles
-from app.routers import expenses
+from app.routers import expenses, facturation
 models.Base.metadata.create_all(bind=engine, checkfirst=True)
 
 app=FastAPI()
@@ -34,6 +34,7 @@ app.include_router(export.router)
 app.include_router(sbcs.router)
 app.include_router(notifications.router)
 app.include_router(expenses.router)
+app.include_router(facturation.router)  # <-- NEW: Include CRUD router for testing purposes
 logging.basicConfig(level=logging.INFO)
 
 logger = logging.getLogger(__name__)

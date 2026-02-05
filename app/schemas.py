@@ -879,9 +879,38 @@ class PayableActResponse(BaseModel):
     id: int
     act_number: str
     total_amount_ht: float
+    total_amount_ttc: float
+    category: str
+    project_name: Optional[str] = None
     sbc_name: str
     sbc_id: Optional[int] = None # <--- Allow None to prevent crashes
     created_at: datetime
 
     class Config:
         from_attributes = True
+
+
+class InvoiceCreate(BaseModel):
+    act_ids: List[int]
+    invoice_number: str # The custom number from the SBC
+    sbc_id: Optional[int] = None # Optional: taken from token if SBC
+
+class InvoiceListItem(BaseModel):
+    id: int
+    invoice_number: str
+    category: str
+    status: str
+    total_amount_ht: float
+    total_amount_ttc: float
+    created_at: datetime
+    sbc_name: Optional[str] = None # For RAF view
+
+    class Config:
+        from_attributes = True
+
+class InvoiceDetail(InvoiceListItem):
+    acts: List[ServiceAcceptance] = []
+    payment_receipt_filename: Optional[str] = None
+    rejection_reason: Optional[str] = None
+    verified_at: Optional[datetime] = None
+    paid_at: Optional[datetime] = None

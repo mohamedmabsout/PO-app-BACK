@@ -5249,3 +5249,242 @@ def get_grouped_history(db: Session, page: int = 1, limit: int = 10):
         "page": page,
         "pages": (total_reqs + limit - 1) // limit
     }
+
+
+
+def verify_invoice_physical(db: Session, invoice_id: int, raf_id: int):
+    """RAF confirms they received the signed paper folder."""
+    inv = db.query(models.Invoice).get(invoice_id)
+    inv.status = models.InvoiceStatus.VERIFIED
+    inv.verified_at = datetime.now()
+    
+    # Notify SBC
+    create_notification(db, inv.sbc.users[0].id, NotificationType.APP, NotificationModule.FACTURATION, 
+                        "Invoice Verified", f"Your invoice {inv.invoice_number} has been verified by RAF.")
+    db.commit()
+    return inv
+
+def pay_invoice_bulk(db: Session, invoice_ids: list, receipt_filename: str, raf_id: int):
+    """RAF pays multiple invoices at once."""
+    invoices = db.query(models.Invoice).filter(models.Invoice.id.in_(invoice_ids)).all()
+    for inv in invoices:
+        inv.status = models.InvoiceStatus.PAID
+        inv.paid_at = datetime.now()
+        inv.payment_receipt_filename = receipt_filename
+    db.commit()
+
+# Fix for the missing function error and the VAT calculation
+def get_invoice_by_id(db: Session, invoice_id: int):
+    return db.query(models.Invoice).options(
+        joinedload(models.Invoice.sbc),
+        joinedload(models.Invoice.acts).joinedload(models.ServiceAcceptance.bc),
+        joinedload(models.Invoice.acts).joinedload(models.ServiceAcceptance.items).joinedload(models.BCItem.merged_po)
+    ).filter(models.Invoice.id == invoice_id).first()
+
+def create_invoice_bundle(db: Session, sbc_id: int, act_ids: List[int], inv_number: str):
+    # 1. Fetch and Validate ACTs first
+    acts = db.query(models.ServiceAcceptance).filter(models.ServiceAcceptance.id.in_(act_ids)).all()
+    if not acts:
+        raise ValueError("No ACTs found")
+
+    # 2. Check for Mixed SBCs/Projects (Security)
+    first_act_category = acts[0].items[0].merged_po.category
+    for a in acts:
+        if a.invoice_id:
+            # Check if linked to an ACTIVE invoice
+            existing_parent = db.query(models.Invoice).get(a.invoice_id)
+            if existing_parent and existing_parent.status != models.InvoiceStatus.REJECTED:
+                # If we are re-submitting the SAME invoice number, it's okay. Otherwise, block.
+                if existing_parent.invoice_number != inv_number:
+                    raise ValueError(f"ACT {a.act_number} is already locked in Invoice {existing_parent.invoice_number}")
+
+    # 3. Summing logic
+    total_ht = sum(a.total_amount_ht for a in acts)
+    total_tax = sum(a.total_tax_amount for a in acts)
+    total_ttc = total_ht + total_tax
+
+    # 4. Handle Database Object (Upsert Logic)
+    # Search for an existing invoice with this number
+    invoice_obj = db.query(models.Invoice).filter(models.Invoice.invoice_number == inv_number).first()
+
+    if invoice_obj:
+        # Check if we are allowed to overwrite it
+        if invoice_obj.status not in [models.InvoiceStatus.SUBMITTED, models.InvoiceStatus.DRAFT, models.InvoiceStatus.REJECTED]:
+             raise ValueError(f"Invoice {inv_number} cannot be modified (Status: {invoice_obj.status})")
+        
+        # Reset old links from this specific invoice so we can re-assign them
+        db.query(models.ServiceAcceptance).filter(models.ServiceAcceptance.invoice_id == invoice_obj.id).update({"invoice_id": None})
+        
+        # Update existing fields
+        invoice_obj.sbc_id = sbc_id
+        invoice_obj.category = first_act_category
+        invoice_obj.total_amount_ht = total_ht
+        invoice_obj.total_tax_amount = total_tax
+        invoice_obj.total_amount_ttc = total_ttc
+        invoice_obj.status = models.InvoiceStatus.SUBMITTED
+        invoice_obj.submitted_at = datetime.now()
+    else:
+        # Create a brand new object ONLY ONCE
+        invoice_obj = models.Invoice(
+            invoice_number=inv_number,
+            sbc_id=sbc_id,
+            category=first_act_category,
+            total_amount_ht=total_ht,
+            total_tax_amount=total_tax,
+            total_amount_ttc=total_ttc,
+            status=models.InvoiceStatus.SUBMITTED,
+            submitted_at=datetime.now()
+        )
+        db.add(invoice_obj)
+
+    # 5. Save to get ID
+    db.flush()
+
+    # 6. Re-link current ACTs to the invoice
+    for a in acts:
+        a.invoice_id = invoice_obj.id
+    
+    db.commit()
+    db.refresh(invoice_obj)
+    return invoice_obj
+
+def get_invoices_by_sbc(db: Session, sbc_id: int):
+    return db.query(models.Invoice).filter(models.Invoice.sbc_id == sbc_id).order_by(models.Invoice.created_at.desc()).all()
+
+def get_all_invoices(db: Session):
+    # Joinedload SBC name for RAF list
+    return db.query(models.Invoice).options(joinedload(models.Invoice.sbc)).order_by(models.Invoice.submitted_at.desc()).all()
+
+def mark_invoice_paid(db: Session, invoice_id: int, filename: str):
+    inv = db.query(models.Invoice).get(invoice_id)
+    inv.status = models.InvoiceStatus.PAID
+    inv.paid_at = datetime.now()
+    inv.payment_receipt_filename = filename
+    
+    # Notify SBC
+    create_notification(db, inv.sbc.users[0].id, NotificationType.APP, NotificationModule.FACTURATION,
+                        "Payment Confirmed", f"Invoice {inv.invoice_number} has been paid. View receipt in portal.")
+    db.commit()
+    return inv
+
+def reject_invoice(db: Session, invoice_id: int, reason: str):
+    inv = db.query(models.Invoice).get(invoice_id)
+    
+    # UNLINK ACTS so they can be reused
+    db.query(models.ServiceAcceptance).filter(models.ServiceAcceptance.invoice_id == invoice_id).update({"invoice_id": None})
+    
+    inv.status = models.InvoiceStatus.REJECTED
+    inv.rejection_reason = reason
+    db.commit()
+    return inv
+
+def get_payable_acts_for_sbc_invoicing(db: Session, sbc_id: int):
+    """
+    Returns ACTs belonging to an SBC that are ready to be included in a Facture.
+    Logic:
+    1. Parent BC must be APPROVED.
+    2. Parent BC Type must be STANDARD (Entreprise).
+    3. ACT must NOT be linked to an active Invoice (unless REJECTED).
+    4. ACT must NOT be linked to an active Expense (unless REJECTED).
+    """
+
+    # 1. Subquery for ACTs locked in Invoices
+    locked_by_invoice = db.query(models.ServiceAcceptance.id).join(
+        models.Invoice, models.ServiceAcceptance.invoice_id == models.Invoice.id
+    ).filter(
+        models.Invoice.status != models.InvoiceStatus.REJECTED
+    ).scalar_subquery()
+
+    # 2. Subquery for ACTs locked in Expenses (Safety check)
+    locked_by_expense = db.query(models.ServiceAcceptance.id).join(
+        models.Expense, models.ServiceAcceptance.expense_id == models.Expense.id
+    ).filter(
+        models.Expense.status != models.ExpenseStatus.REJECTED
+    ).scalar_subquery()
+
+    # 3. Main Query
+    query = db.query(models.ServiceAcceptance).join(
+        models.BonDeCommande
+    ).filter(
+        models.BonDeCommande.sbc_id == sbc_id,
+        models.BonDeCommande.status == models.BCStatus.APPROVED,
+        models.BonDeCommande.bc_type == models.BCType.STANDARD, # Entreprise only
+        models.ServiceAcceptance.id.notin_(locked_by_invoice),
+        models.ServiceAcceptance.id.notin_(locked_by_expense)
+    )
+
+    results = query.all()
+
+    payable_acts = []
+    for act in results:
+        # We need the category from the MergedPO line to support the 
+        # "Transport vs Service" frontend filtering logic.
+        # Assuming all items in one ACT share the same category as per your rules.
+        category = "Service"
+        if act.items and act.items[0].merged_po:
+            category = act.items[0].merged_po.category
+
+        payable_acts.append({
+            "id": act.id,
+            "act_number": act.act_number,
+            "total_amount_ht": act.total_amount_ht,
+            "total_amount_ttc": act.total_amount_ttc,
+            "category": category, 
+            "sbc_id": sbc_id,
+            "sbc_name": act.bc.sbc.name if act.bc.sbc else "Unknown", # <--- ADDED THIS
+
+            "project_name": act.bc.internal_project.name,
+            "created_at": act.created_at
+        })
+    return payable_acts
+
+
+def notify_raf_new_invoice(db: Session, invoice: models.Invoice, background_tasks: BackgroundTasks):
+    """
+    Sends both System and Email notifications to all RAF users
+    when a new invoice bundle is generated.
+    """
+    # 1. Fetch all RAF users
+    raf_users = db.query(models.User).filter(
+        models.User.role == models.UserRole.RAF, 
+        models.User.is_active == True
+    ).all()
+    
+    if not raf_users:
+        return
+
+    raf_emails = [u.email for u in raf_users if u.email]
+    
+    # 2. Loop through and create In-App Notifications (TODOs)
+    for raf in raf_users:
+        create_notification(
+            db=db,
+            recipient_id=raf.id,
+            type=models.NotificationType.TODO,
+            module=models.NotificationModule.FACTURATION,
+            title="Facture verification required",
+            message=f"SBC {invoice.sbc.short_name} has submitted Invoice {invoice.invoice_number} ({invoice.total_amount_ttc:,.2f} MAD).",
+            link=f"/raf/facturation/verify/{invoice.id}"
+        )
+    
+    # Commit the DB notifications
+    db.commit()
+
+    # 3. Trigger the Email Notification via Background Tasks
+    if raf_emails:
+        send_notification_email(
+            background_tasks=background_tasks,
+            recipients=raf_emails,
+            subject=f"New Billing Submission: {invoice.invoice_number}",
+            template_name="", # Placeholder for future templates
+            context={
+                "message": f"A new payment bundle has been generated by {invoice.sbc.name} and is waiting for your physical verification.",
+                "details": {
+                    "Invoice Number": invoice.invoice_number,
+                    "Total Amount": f"{invoice.total_amount_ttc:,.2f} MAD",
+                    "Category": invoice.category,
+                    "SBC": invoice.sbc.short_name
+                },
+                "link": f"/raf/facturation/verify/{invoice.id}"
+            }
+        )
