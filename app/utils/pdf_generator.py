@@ -218,73 +218,143 @@ def generate_bc_pdf(bc):
     buffer.seek(0)
     return buffer
 
+
 def format_currency(value):
-    """Helper to format currency with 'MAD' suffix"""
     return f"{value:,.2f} MAD"
 
 def generate_act_pdf(act):
     buffer = io.BytesIO()
-    p = canvas.Canvas(buffer, pagesize=A4)
-    width, height = A4
     
-    # --- HEADER ---
-    p.setFont("Helvetica-Bold", 16)
-    p.drawString(50, height - 50, "Service Acceptance Certificate")
-    
-    p.setFont("Helvetica", 10)
-    p.drawString(50, height - 80, f"ACT Number: {act.act_number}")
-    p.drawString(50, height - 95, f"Date: {act.created_at.strftime('%Y-%m-%d')}")
-    p.drawString(50, height - 110, f"BC Reference: {act.bc.bc_number}")
-    
-    # --- TABLE HEADER ---
-    y = height - 160
-    p.setFillColorRGB(0.9, 0.9, 0.9) # Light gray background
-    p.rect(40, y-5, 515, 20, fill=1, stroke=0)
-    p.setFillColorRGB(0, 0, 0) # Back to black text
+    # 1. Setup Document
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=10 * mm,
+        leftMargin=10 * mm,
+        topMargin=10 * mm,
+        bottomMargin=20 * mm
+    )
 
-    p.setFont("Helvetica-Bold", 9)
-    p.drawString(50, y, "Item Description")
-    p.drawRightString(380, y, "Qty")       # Right-aligned
-    p.drawRightString(460, y, "Unit Price") # Right-aligned
-    p.drawRightString(540, y, "Total")      # Right-aligned
+    elements = []
+    styles = getSampleStyleSheet()
     
-    # --- ITEMS ---
-    y -= 25
-    p.setFont("Helvetica", 9)
+    # Custom Styles
+    style_normal = styles["Normal"]
+    style_normal.fontSize = 8
+    
+    style_bold = ParagraphStyle(
+        'Bold', parent=styles['Normal'], fontSize=8, fontName='Helvetica-Bold'
+    )
+    style_title = ParagraphStyle(
+        'Title', parent=styles['Normal'], fontSize=16, leading=20, fontName='Helvetica-Bold', alignment=TA_CENTER
+    )
+    style_footer = ParagraphStyle(
+        'Footer', parent=styles['Normal'], fontSize=7, alignment=TA_CENTER, textColor=colors.grey
+    )
+
+    # ==========================
+    # 1. HEADER SECTION
+    # ==========================
+    logo_path = "logo.png" 
+    if os.path.exists(logo_path):
+        logo = Image(logo_path, width=3.5*cm, height=1.5*cm)
+    else:
+        logo = Paragraph(f"<b>{SIB_NAME}</b>", style_bold)
+
+    header_data = [
+        [logo, Paragraph("<b>SERVICE ACCEPTANCE CERTIFICATE</b>", style_title)],
+        ["", Paragraph(f"<b>ACT Number:</b> {act.act_number}", style_bold)],
+        ["", Paragraph(f"<b>Date:</b> {act.created_at.strftime('%Y-%m-%d')}", style_normal)],
+        ["", Paragraph(f"<b>BC Reference:</b> {act.bc.bc_number}", style_normal)]
+    ]
+    
+    t_header = Table(header_data, colWidths=[10*cm, 9*cm])
+    t_header.setStyle(TableStyle([
+        ('VALIGN', (0,0), (-1,-1), 'TOP'),
+        ('ALIGN', (1,0), (1,-1), 'RIGHT'),
+    ]))
+    elements.append(t_header)
+    elements.append(Spacer(1, 1*cm))
+
+    # ==========================
+    # 2. ITEMS TABLE (With Site Code & Wrapping)
+    # ==========================
+    # Table Columns: Site, Description, Qty, Price, Total
+    headers = [
+        Paragraph("<b>Site Code</b>", style_bold),
+        Paragraph("<b>Item Description</b>", style_bold),
+        Paragraph("<b>Qty</b>", style_bold),
+        Paragraph("<b>Unit Price</b>", style_bold),
+        Paragraph("<b>Total</b>", style_bold)
+    ]
+    
+    data = [headers]
     
     for item in act.items:
-        # Simple text truncation
-        desc = item.merged_po.item_description
-        if len(desc) > 60: desc = desc[:57] + "..."
-            
-        p.drawString(50, y, desc)
-        p.drawRightString(380, y, f"{item.quantity_sbc:.2f}")
-        p.drawRightString(460, y, format_currency(item.unit_price_sbc))
-        p.drawRightString(540, y, format_currency(item.line_amount_sbc))
+        # We use Paragraph for the description to allow automatic text wrapping
+        desc_wrapped = Paragraph(escape(item.merged_po.item_description or "-"), style_normal)
         
-        y -= 20
-        
-        if y < 100: # New page logic
-            p.showPage()
-            y = height - 50
+        row = [
+            Paragraph(escape(item.merged_po.site_code or "-"), style_normal),
+            desc_wrapped,
+            f"{item.quantity_sbc:.2f}",
+            format_currency(item.unit_price_sbc),
+            format_currency(item.line_amount_sbc)
+        ]
+        data.append(row)
 
-    # --- FOOTER (TOTALS) ---
-    y -= 20
-    p.setLineWidth(1)
-    p.line(40, y+10, 555, y+10)
+    # Define specific column widths (Description gets the most space)
+    # Total width is roughly 19cm
+    col_widths = [4.5*cm, 7.5*cm, 1.5*cm, 3*cm, 3.5*cm]
     
-    p.setFont("Helvetica-Bold", 10)
+    t_items = Table(data, colWidths=col_widths, repeatRows=1)
+    t_items.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), colors.whitesmoke),
+        ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
+        ('VALIGN', (0,0), (-1,-1), 'TOP'),
+        ('ALIGN', (2,0), (-1,-1), 'RIGHT'), # Align numbers to the right
+        ('FONTSIZE', (0,0), (-1,-1), 8),
+    ]))
+    elements.append(t_items)
+
+    # ==========================
+    # 3. TOTALS SECTION
+    # ==========================
+    totals_data = [
+        [Paragraph("<b>TOTAL HT:</b>", style_bold), Paragraph(f"<b>{format_currency(act.total_amount_ht)}</b>", style_bold)]
+    ]
     
-    # Total HT
-    y -= 20
-    p.drawString(380, y, "Total HT:")
-    p.drawRightString(540, y, format_currency(act.total_amount_ht))
+    t_totals = Table(totals_data, colWidths=[3*cm, 4*cm])
+    t_totals.setStyle(TableStyle([
+        ('ALIGN', (0,0), (-1,-1), 'RIGHT'),
+        ('LINEABOVE', (0,0), (-1,-1), 1, colors.black),
+        ('TOPPADDING', (0,0), (-1,-1), 5),
+    ]))
     
-    p.showPage()
-    p.save()
+    # Push totals to the right
+    elements.append(Spacer(1, 0.5*cm))
+    elements.append(Table([[None, t_totals]], colWidths=[12*cm, 7*cm]))
+
+    # ==========================
+    # 4. SIB FULL FOOTER
+    # ==========================
+    def add_footer(canvas, doc):
+        canvas.saveState()
+        footer_text = f"{SIB_NAME} - {SIB_ADDRESS}<br/>" \
+                      f"RC: {SIB_RC} | IF: {SIB_IF} | ICE: {SIB_ICE} | CNSS: {SIB_CNSS} | Web: {SIB_WEB}"
+        p_footer = Paragraph(footer_text, style_footer)
+        # Use document width and wrap in bottom margin
+        w, h = p_footer.wrap(doc.width, doc.bottomMargin)
+        p_footer.drawOn(canvas, doc.leftMargin, 10 * mm)
+        canvas.restoreState()
+
+    # 5. Build PDF
+    doc.build(elements, onFirstPage=add_footer, onLaterPages=add_footer)
     
     buffer.seek(0)
     return buffer
+
+
 def generate_expense_pdf(expense):
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4)
