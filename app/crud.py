@@ -5280,60 +5280,106 @@ def pay_invoice_bulk(db: Session, invoice_ids: list, receipt_filename: str, raf_
 
 # Fix for the missing function error and the VAT calculation
 def get_invoice_by_id(db: Session, invoice_id: int):
-    return db.query(models.Invoice).options(
+    """
+    Fetches full invoice details including linked ACTs, original BCs, and Item details.
+    """
+    invoice = db.query(models.Invoice).options(
         joinedload(models.Invoice.sbc),
         joinedload(models.Invoice.acts).joinedload(models.ServiceAcceptance.bc),
         joinedload(models.Invoice.acts).joinedload(models.ServiceAcceptance.items).joinedload(models.BCItem.merged_po)
     ).filter(models.Invoice.id == invoice_id).first()
+    
+    if invoice:
+        # Hydrate sbc_name for the schema
+        invoice.sbc_name = invoice.sbc.name if invoice.sbc else "Unknown SBC"
+        
+    return invoice
+
+
+
+
 
 def create_invoice_bundle(db: Session, sbc_id: int, act_ids: List[int], inv_number: str):
-    # 1. Fetch and Validate ACTs first
-    acts = db.query(models.ServiceAcceptance).filter(models.ServiceAcceptance.id.in_(act_ids)).all()
+    """
+    Handles the creation or re-submission of an Invoice Bundle.
+    - Ensures all ACTs belong to the same SBC.
+    - Separates 'Transport' from other categories.
+    - Combines multiple non-transport categories into 'Service'.
+    - Sums HT, Tax, and TTC correctly.
+    """
+    
+    # 1. Fetch ACTs with deep loading to prevent errors
+    acts = db.query(models.ServiceAcceptance).options(
+        joinedload(models.ServiceAcceptance.items).joinedload(models.BCItem.merged_po),
+        joinedload(models.ServiceAcceptance.bc)
+    ).filter(models.ServiceAcceptance.id.in_(act_ids)).all()
+    
     if not acts:
-        raise ValueError("No ACTs found")
+        raise ValueError("No valid Acceptances selected.")
 
-    # 2. Check for Mixed SBCs/Projects (Security)
-    first_act_category = acts[0].items[0].merged_po.category
+    # 2. SBC Consistency Check
+    sbc_ids = {a.bc.sbc_id for a in acts if a.bc}
+    if len(sbc_ids) > 1:
+        raise ValueError("An invoice cannot contain Acceptances from multiple subcontractors.")
+    
+    # Ensure the provided SBC ID matches the ACTs
+    if list(sbc_ids)[0] != sbc_id:
+        raise ValueError("Subcontractor mismatch detected.")
+
+    # 3. Category Logic (The "Transport" vs "Service" rule)
+    unique_categories = set()
+    for a in acts:
+        if a.items:
+            unique_categories.add(a.items[0].merged_po.category)
+    
+    if "Transport" in unique_categories:
+        if len(unique_categories) > 1:
+            raise ValueError("Transport acceptances must be invoiced separately and cannot be mixed with other categories.")
+        final_category = "Transport"
+    else:
+        # If mixed (e.g. Service + Civil Work), name it "Service"
+        final_category = "Service" if len(unique_categories) > 1 else list(unique_categories)[0]
+
+    # 4. Usage Check (Is ACT already invoiced?)
     for a in acts:
         if a.invoice_id:
-            # Check if linked to an ACTIVE invoice
             existing_parent = db.query(models.Invoice).get(a.invoice_id)
-            if existing_parent and existing_parent.status != models.InvoiceStatus.REJECTED:
-                # If we are re-submitting the SAME invoice number, it's okay. Otherwise, block.
+            # Allow reuse only if the current invoice is Rejected or Submitted (and we are replacing it)
+            if existing_parent and existing_parent.status not in [models.InvoiceStatus.REJECTED, models.InvoiceStatus.SUBMITTED]:
                 if existing_parent.invoice_number != inv_number:
                     raise ValueError(f"ACT {a.act_number} is already locked in Invoice {existing_parent.invoice_number}")
 
-    # 3. Summing logic
+    # 5. Financial Summing (Fixes the 0% VAT bug)
     total_ht = sum(a.total_amount_ht for a in acts)
     total_tax = sum(a.total_tax_amount for a in acts)
     total_ttc = total_ht + total_tax
 
-    # 4. Handle Database Object (Upsert Logic)
-    # Search for an existing invoice with this number
+    # 6. Database Object (Upsert Logic - Fixes Duplicate Entry Crash)
     invoice_obj = db.query(models.Invoice).filter(models.Invoice.invoice_number == inv_number).first()
 
     if invoice_obj:
-        # Check if we are allowed to overwrite it
-        if invoice_obj.status not in [models.InvoiceStatus.SUBMITTED, models.InvoiceStatus.DRAFT, models.InvoiceStatus.REJECTED]:
-             raise ValueError(f"Invoice {inv_number} cannot be modified (Status: {invoice_obj.status})")
+        # Check if we are allowed to modify this existing record
+        if invoice_obj.status not in [models.InvoiceStatus.SUBMITTED, models.InvoiceStatus.REJECTED]:
+             raise ValueError(f"Invoice {inv_number} is already in process ({invoice_obj.status}) and cannot be modified.")
         
-        # Reset old links from this specific invoice so we can re-assign them
+        # Reset old links from this invoice before re-applying (Clean State)
         db.query(models.ServiceAcceptance).filter(models.ServiceAcceptance.invoice_id == invoice_obj.id).update({"invoice_id": None})
         
-        # Update existing fields
+        # Update existing record
         invoice_obj.sbc_id = sbc_id
-        invoice_obj.category = first_act_category
+        invoice_obj.category = final_category
         invoice_obj.total_amount_ht = total_ht
         invoice_obj.total_tax_amount = total_tax
         invoice_obj.total_amount_ttc = total_ttc
         invoice_obj.status = models.InvoiceStatus.SUBMITTED
         invoice_obj.submitted_at = datetime.now()
+        invoice_obj.rejection_reason = None # Clear old rejection reason
     else:
-        # Create a brand new object ONLY ONCE
+        # Create brand new record
         invoice_obj = models.Invoice(
             invoice_number=inv_number,
             sbc_id=sbc_id,
-            category=first_act_category,
+            category=final_category,
             total_amount_ht=total_ht,
             total_tax_amount=total_tax,
             total_amount_ttc=total_ttc,
@@ -5342,23 +5388,45 @@ def create_invoice_bundle(db: Session, sbc_id: int, act_ids: List[int], inv_numb
         )
         db.add(invoice_obj)
 
-    # 5. Save to get ID
-    db.flush()
+    # 7. Finalize & Re-link
+    db.flush() # Ensure we have the ID
 
-    # 6. Re-link current ACTs to the invoice
     for a in acts:
         a.invoice_id = invoice_obj.id
     
     db.commit()
     db.refresh(invoice_obj)
+    
+    # Populate sbc_name attribute for the response
+    invoice_obj.sbc_name = invoice_obj.sbc.name if invoice_obj.sbc else "Unknown"
+    
     return invoice_obj
 
 def get_invoices_by_sbc(db: Session, sbc_id: int):
-    return db.query(models.Invoice).filter(models.Invoice.sbc_id == sbc_id).order_by(models.Invoice.created_at.desc()).all()
+    """SBC View: Fetch own and populate SBC name"""
+    invoices = db.query(models.Invoice).options(
+        joinedload(models.Invoice.sbc)
+    ).filter(models.Invoice.sbc_id == sbc_id).order_by(models.Invoice.created_at.desc()).all()
+    
+    for inv in invoices:
+        inv.sbc_name = inv.sbc.name if inv.sbc else "Unknown SBC"
+        
+    return invoices
 
+    
 def get_all_invoices(db: Session):
-    # Joinedload SBC name for RAF list
-    return db.query(models.Invoice).options(joinedload(models.Invoice.sbc)).order_by(models.Invoice.submitted_at.desc()).all()
+    """RAF View: Fetch all and populate SBC name"""
+    invoices = db.query(models.Invoice).options(
+        joinedload(models.Invoice.sbc) # Ensure relationship is loaded
+    ).order_by(models.Invoice.submitted_at.desc()).all()
+    
+    for inv in invoices:
+        # Manually set the attribute so the Schema can see it
+        inv.sbc_name = inv.sbc.name if inv.sbc else "Unknown SBC"
+        
+    return invoices
+
+
 
 def mark_invoice_paid(db: Session, invoice_id: int, filename: str):
     inv = db.query(models.Invoice).get(invoice_id)
@@ -5374,12 +5442,18 @@ def mark_invoice_paid(db: Session, invoice_id: int, filename: str):
 
 def reject_invoice(db: Session, invoice_id: int, reason: str):
     inv = db.query(models.Invoice).get(invoice_id)
+    if not inv:
+        return None
     
-    # UNLINK ACTS so they can be reused
-    db.query(models.ServiceAcceptance).filter(models.ServiceAcceptance.invoice_id == invoice_id).update({"invoice_id": None})
+    # 1. UNLINK ACTS so the SBC can try again with a new submission
+    db.query(models.ServiceAcceptance).filter(
+        models.ServiceAcceptance.invoice_id == invoice_id
+    ).update({"invoice_id": None}, synchronize_session=False)
     
+    # 2. Update Status
     inv.status = models.InvoiceStatus.REJECTED
     inv.rejection_reason = reason
+    
     db.commit()
     return inv
 
@@ -5493,3 +5567,18 @@ def notify_raf_new_invoice(db: Session, invoice: models.Invoice, background_task
                 "link": f"/raf/facturation/verify/{invoice.id}"
             }
         )
+
+def acknowledge_invoice_receipt(db: Session, invoice_id: int, sbc_user_id: int):
+    """SBC confirms receipt of the bank transfer."""
+    inv = db.query(models.Invoice).get(invoice_id)
+    
+    # Security: Ensure this SBC user is the owner of the invoice
+    if inv.sbc.users[0].id != sbc_user_id:
+        raise ValueError("Unauthorized")
+
+    if inv.status != models.InvoiceStatus.PAID:
+        raise ValueError("Invoice must be in PAID status to acknowledge.")
+
+    inv.status = models.InvoiceStatus.ACKNOWLEDGED
+    db.commit()
+    return inv

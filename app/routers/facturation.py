@@ -65,7 +65,7 @@ async def generate_facture_bundle(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-@router.get("/my-invoices", response_model=List[schemas.InvoiceListItem])
+@router.get("/my-invoices", response_model=List[schemas.InvoiceDetail])
 def get_my_invoices(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
@@ -85,6 +85,19 @@ def get_all_invoices(
     if current_user.role not in [models.UserRole.RAF, models.UserRole.ADMIN]:
         raise HTTPException(status_code=403, detail="Unauthorized")
     return crud.get_all_invoices(db)
+
+@router.get("/receipt/{filename}")
+def get_payment_receipt(filename: str):
+    # Security: Ensure filename is clean to prevent path traversal
+    safe_filename = os.path.basename(filename)
+    path = f"uploads/payments/{safe_filename}"
+    
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="File not found")
+        
+    return FileResponse(path)
+
+
 
 @router.get("/{id}", response_model=schemas.InvoiceDetail)
 def get_invoice_details(id: int, db: Session = Depends(get_db)):
@@ -128,13 +141,20 @@ def reject_invoice(
     """RAF rejects invoice. ACTs become payable again."""
     return crud.reject_invoice(db, id, payload.reason)
 
-@router.get("/receipt/{filename}")
-def get_payment_receipt(filename: str):
-    # Security: Ensure filename is clean to prevent path traversal
-    safe_filename = os.path.basename(filename)
-    path = f"uploads/payments/{safe_filename}"
+
+@router.post("/{id}/acknowledge")
+def sbc_acknowledge_payment(
+    id: int, 
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """SBC confirms they received the funds."""
+    if current_user.role != models.UserRole.SBC:
+        raise HTTPException(status_code=403)
     
-    if not os.path.exists(path):
-        raise HTTPException(status_code=404, detail="File not found")
-        
-    return FileResponse(path)
+    try:
+        return crud.acknowledge_invoice_receipt(db, id, current_user.id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+

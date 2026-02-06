@@ -901,6 +901,7 @@ class InvoiceListItem(BaseModel):
     category: str
     status: str
     total_amount_ht: float
+    total_tax_amount: float
     total_amount_ttc: float
     created_at: datetime
     sbc_name: Optional[str] = None # For RAF view

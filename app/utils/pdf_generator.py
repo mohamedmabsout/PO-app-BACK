@@ -463,33 +463,58 @@ def generate_invoice_pdf(invoice):
     elements.append(Spacer(1, 0.5*cm))
 
     # --- 3. ITEMS TABLE (Aggregated from all ACTs) ---
-    headers = ["BC Num", "PO Line", "Item Description", "Qty", "Tax Rate", "Unit Price", "Amount (HT)"]
+    headers = ["BC Num", "BC Line", "DUID", "Item Description", "Qty", "Tax Rate", "Unit Price", "Amount (HT)"]
+
+    # 2. Distribute the 19cm available width (A4 is 21cm - 2cm margins)
+    # Values are in cm. Adjust according to your needs.
+    col_widths = [
+        2.2 * cm,  # BC Num
+        1.2 * cm,  # PO Line
+        3.8 * cm,  # DUID (Increased for values like DC-RABAT...)
+        5.5 * cm,  # Item Description (The largest one)
+        0.8 * cm,  # Qty
+        1.2 * cm,  # Tax Rate
+        2.15 * cm, # Unit Price
+        2.15 * cm  # Amount (HT)
+    ]
+
     data = [headers]
-    
+
+    # 3. Populate data
     for act in invoice.acts:
+        # We want to find the sequence of the items within their BC.
+        # Since act.items are the items specifically accepted in this ACT, 
+        # we can use their original po_line_no or a relative counter.
+        # Most users prefer the actual line number from the printed BC.
+        
         for item in act.items:
-            # Ensure description is a string before escaping
-            raw_desc = item.merged_po.item_description or "No Description"
-            clean_desc = escape(str(raw_desc))
-            
             data.append([
                 act.bc.bc_number,
-                item.merged_po.po_line_no,
-                Paragraph(clean_desc[:100], style_h), 
+                item.merged_po.po_line_no, # This is the line ID from the BC/PO
+                Paragraph(escape(item.merged_po.site_code or "-"), style_h),
+                Paragraph(escape(item.merged_po.item_description or "-"), style_h),
                 item.quantity_sbc,
                 f"{int(item.applied_tax_rate * 100)}%",
                 f"{item.unit_price_sbc:,.2f}",
                 f"{item.line_amount_sbc:,.2f}"
             ])
 
-    t_items = Table(data, colWidths=[2.5*cm, 1.5*cm, 7*cm, 1*cm, 1.5*cm, 2.5*cm, 3*cm])
+
+    # 4. Create the table with the new colWidths
+    t_items = Table(data, colWidths=col_widths, repeatRows=1)
+
+    # 5. Update TableStyle coordinates
+    # Since we added a column, the alignment index for numbers might shift.
+    # ('ALIGN', (4,0), (-1,-1), 'RIGHT') means from column 4 (Qty) to the end.
     t_items.setStyle(TableStyle([
         ('GRID', (0,0), (-1,-1), 0.5, colors.black),
         ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
         ('BACKGROUND', (0,0), (-1,0), colors.whitesmoke),
         ('FONTSIZE', (0,0), (-1,-1), 7),
-        ('ALIGN', (3,0), (-1,-1), 'RIGHT'),
+        ('VALIGN', (0,0), (-1,-1), 'TOP'),    # Top align text for multi-line rows
+        ('ALIGN', (4,0), (-1,-1), 'RIGHT'),  # Align numbers (Qty, Price, Total) to right
     ]))
+
     elements.append(t_items)
 
     # --- 4. TOTALS ---
