@@ -3328,9 +3328,8 @@ def get_sbc_by_id(db: Session, sbc_id: int):
     if not sbc:
         raise HTTPException(status_code=404, detail="SBC not found")
     return sbc
-
 def get_bcs_export_dataframe(db: Session, search: Optional[str] = None):
-    # 1. Reuse the existing query logic to filter BCs based on search
+    # 1. Fetch data with optimized joins
     query = db.query(models.BonDeCommande).options(
         joinedload(models.BonDeCommande.sbc),
         joinedload(models.BonDeCommande.internal_project),
@@ -3350,47 +3349,58 @@ def get_bcs_export_dataframe(db: Session, search: Optional[str] = None):
     
     bcs = query.order_by(models.BonDeCommande.created_at.desc()).all()
 
-    # 2. Flatten the data for Excel
+    # 2. Helper to format user names
+    def get_user_name(user):
+        return f"{user.first_name} {user.last_name}" if user else "N/A"
+
+    # 3. Flatten the data logically
     data = []
     for bc in bcs:
-        # Common Header Info
-        header_info = {
-            "BC Number": bc.bc_number,
-            "Status": bc.status,
-            "Project": bc.internal_project.name if bc.internal_project else "",
-            "SBC": bc.sbc.name if bc.sbc else "",
-            "Total HT": bc.total_amount_ht,
-            "Total TTC": bc.total_amount_ttc,
-            "Created By": f"{bc.creator.first_name} {bc.creator.last_name}" if bc.creator else "",
-            "Created At": bc.created_at,
-            "Submitted At": bc.submitted_at,
-            "Validated L1 By": f"{bc.approver_l1.first_name} {bc.approver_l1.last_name}" if bc.approver_l1 else "",
-            "Validated L1 At": bc.approved_l1_at,
-            "Approved L2 By": f"{bc.approver_l2.first_name} {bc.approver_l2.last_name}" if bc.approver_l2 else "",
-            "Approved L2 At": bc.approved_l2_at,
-            "Rejection Reason": bc.rejection_reason
-        }
+        for index, item in enumerate(bc.items, start=1):
+            row = {
+                # --- IDENTIFICATION & PROJECT ---
+                "BC Number": bc.bc_number,
+                "BC Line": index,
+                "Internal Project": bc.internal_project.name if bc.internal_project else "N/A",
+                
+                # --- ITEM & SITE DETAILS ---
+                "Site Code": item.merged_po.site_code if item.merged_po else "N/A",
+                "PO ID Reference": item.merged_po.po_id if item.merged_po else "N/A",
+                "Item Description": item.merged_po.item_description if item.merged_po else "N/A",
+                
+                # --- SUBCONTRACTOR ---
+                "SBC Name": bc.sbc.name if bc.sbc else "N/A",
+                
+                # --- WORKFLOW & STATUS ---
+                "Current Status": bc.status,
+                "Created By": get_user_name(bc.creator),
+                "Created At": bc.created_at.strftime("%d/%m/%Y %H:%M") if bc.created_at else "",
+                "Submitted At": bc.submitted_at.strftime("%d/%m/%Y %H:%M") if bc.submitted_at else "Not Submitted",
+                "Validated L1 By": get_user_name(bc.approver_l1),
+                "Validated L1 At": bc.approved_l1_at.strftime("%d/%m/%Y %H:%M") if bc.approved_l1_at else "",
+                "Approved L2 By": get_user_name(bc.approver_l2),
+                "Approved L2 At": bc.approved_l2_at.strftime("%d/%m/%Y %H:%M") if bc.approved_l2_at else "",
+                "Rejection Reason": bc.rejection_reason or "",
 
-        # Add a row for EACH item in the BC
-        for index, item in enumerate(bc.items, start=1): # Use enumerate for counter
-            row = header_info.copy() # Copy header info
-            # Add Item specific info
-            row.update({
-    "BC line": index + 1,  # ligne 1..N (mieux pour Excel)
-
-    "PO ID": item.merged_po.po_id if item.merged_po else "",
-    "BC ID": f"{bc.bc_number}-{index + 1}",  # ✅ FIX ICI (au lieu de item.line_number)
-    "Site Code": item.merged_po.site_code if item.merged_po else "",
-    "Item Description": item.merged_po.item_description if item.merged_po else "",
-    "SBC Rate": item.rate_sbc,
-    "SBC Quantity": item.quantity_sbc,
-    "SBC Unit Price": item.unit_price_sbc,
-    "SBC Line Total": item.line_amount_sbc,
-})
-
+                # --- FINANCIALS (HT ONLY) ---
+                "SBC Rate Applied": f"{item.rate_sbc * 100}%" if item.rate_sbc else "0%",
+                "Quantity": item.quantity_sbc,
+                "Unit Price (HT)": item.unit_price_sbc,
+                "Line Total (HT)": item.line_amount_sbc,
+                "Global BC Total (HT)": bc.total_amount_ht
+            }
             data.append(row)
 
-    return pd.DataFrame(data)
+    # 4. Create DataFrame
+    df = pd.DataFrame(data)
+    
+    # Optional: ensure numeric columns are actually floats for Excel sorting
+    numeric_cols = ["Quantity", "Unit Price (HT)", "Line Total (HT)", "Global BC Total (HT)"]
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+
+    return df
 def get_aging_analysis(db: Session,user: Optional[models.User] = None):
     """
     Groups the total remaining amount (GAP) into age buckets based on publish_date.
