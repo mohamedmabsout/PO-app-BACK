@@ -1933,7 +1933,7 @@ def get_performance_matrix(
     filter_user_id: Optional[int] = None,
     current_user: models.User = None
 ):
-    # 1. Get eligible users (Standard logic)
+    # 1. Get eligible users
     pms_to_process = []
     if current_user and current_user.role in [UserRole.PM]:
         pms_to_process = [current_user]
@@ -1945,13 +1945,13 @@ def get_performance_matrix(
     results = []
 
     for pm in pms_to_process:
-        # A. Fetch Targets (Plan) - Remains the same
+        # A. Fetch Targets (Plan) - Remains the same (Targets are set independently of control)
         target_query = db.query(
             func.sum(models.UserPerformanceTarget.po_monthly_update),
             func.sum(models.UserPerformanceTarget.acceptance_monthly_update)
         ).filter(
             models.UserPerformanceTarget.user_id == pm.id,
-            models.UserPerformanceTarget.year == year
+            models.UserPerformanceTarget.year == year,
         )
         if month:
             target_query = target_query.filter(models.UserPerformanceTarget.month == month)
@@ -1960,20 +1960,15 @@ def get_performance_matrix(
         plan_po = plan_po or 0.0
         plan_invoice = plan_invoice or 0.0
 
-        # --- B. Fetch Actuals (UPDATED LOGIC) ---
-        # Include ALL items assigned to this PM (Approved OR Pending)
-        # We filter by the PM ID on the InternalProject table.
-        base_filters = [
-            models.InternalProject.project_manager_id == pm.id,
-            # CRITICAL CHANGE: We DO NOT filter by assignment_status here. 
-            # If it is assigned to this PM's project, it counts for them.
-            # This covers both APPROVED and PENDING_APPROVAL.
-        ]
+        # --- B. Fetch Actuals for Period (WITH INTERNAL_CONTROL = 1) ---
+        base_filters = [models.InternalProject.project_manager_id == pm.id]
         
-        # Period Filters
-        po_date_filters = base_filters + [extract('year', models.MergedPO.publish_date) == year]
-        ac_date_filters = base_filters + [extract('year', models.MergedPO.date_ac_ok) == year]
-        pac_date_filters = base_filters + [extract('year', models.MergedPO.date_pac_ok) == year]
+        # We add internal_control == 1 to every metric condition
+        control_filter = (models.MergedPO.internal_control == 1)
+        
+        po_date_filters = base_filters + [extract('year', models.MergedPO.publish_date) == year, control_filter]
+        ac_date_filters = base_filters + [extract('year', models.MergedPO.date_ac_ok) == year, control_filter]
+        pac_date_filters = base_filters + [extract('year', models.MergedPO.date_pac_ok) == year, control_filter]
         
         if month:
             po_date_filters.append(extract('month', models.MergedPO.publish_date) == month)
@@ -1985,16 +1980,13 @@ def get_performance_matrix(
             func.sum(case((and_(*ac_date_filters), models.MergedPO.accepted_ac_amount), else_=0)),
             func.sum(case((and_(*pac_date_filters), models.MergedPO.accepted_pac_amount), else_=0))
         ).join(
-            models.CustomerProject, models.MergedPO.customer_project_id == models.CustomerProject.id
-        ).join(
             models.InternalProject, models.MergedPO.internal_project_id == models.InternalProject.id
         ).first()
 
-        actual_po_period = summary[0] or 0.0
-        actual_paid_period = (summary[1] or 0.0) + (summary[2] or 0.0)
+        actual_po_period = float(summary[0] or 0.0)
+        actual_paid_period = float(summary[1] or 0.0) + float(summary[2] or 0.0)
 
-        # --- C. Fetch LIFETIME GAP (UPDATED LOGIC) ---
-        # Same logic: Include everything assigned to this PM's projects.
+        # --- C. Fetch LIFETIME GAP (WITH INTERNAL_CONTROL = 1) ---
         lifetime_summary = db.query(
             func.sum(models.MergedPO.line_amount_hw),
             func.sum(models.MergedPO.accepted_ac_amount),
@@ -2002,12 +1994,12 @@ def get_performance_matrix(
         ).join(
             models.InternalProject, models.MergedPO.internal_project_id == models.InternalProject.id
         ).filter(
-            models.InternalProject.project_manager_id == pm.id
-            # Again, NO status filter. Counts pending and approved.
+            models.InternalProject.project_manager_id == pm.id,
+            models.MergedPO.internal_control == 1 # <--- THE FIX
         ).first()
         
-        lifetime_po = lifetime_summary[0] or 0.0
-        lifetime_paid = (lifetime_summary[1] or 0.0) + (lifetime_summary[2] or 0.0)
+        lifetime_po = float(lifetime_summary[0] or 0.0)
+        lifetime_paid = float(lifetime_summary[1] or 0.0) + float(lifetime_summary[2] or 0.0)
         total_lifetime_gap = lifetime_po - lifetime_paid
 
         # --- E. Final Result Construction ---
@@ -2024,6 +2016,8 @@ def get_performance_matrix(
         })
         
     return results
+    
+    
 # def get_yearly_matrix_data(db: Session, year: int):
 #     # 1. Get all PMs
 #     pms = db.query(models.User).filter(models.User.role.in_(['PM', 'ADMIN', 'PD'])).all()
