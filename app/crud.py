@@ -3328,8 +3328,10 @@ def get_sbc_by_id(db: Session, sbc_id: int):
     if not sbc:
         raise HTTPException(status_code=404, detail="SBC not found")
     return sbc
+
+
 def get_bcs_export_dataframe(db: Session, search: Optional[str] = None):
-    # 1. Fetch data with optimized joins
+    # 1. Fetch data
     query = db.query(models.BonDeCommande).options(
         joinedload(models.BonDeCommande.sbc),
         joinedload(models.BonDeCommande.internal_project),
@@ -3349,58 +3351,49 @@ def get_bcs_export_dataframe(db: Session, search: Optional[str] = None):
     
     bcs = query.order_by(models.BonDeCommande.created_at.desc()).all()
 
-    # 2. Helper to format user names
     def get_user_name(user):
         return f"{user.first_name} {user.last_name}" if user else "N/A"
 
-    # 3. Flatten the data logically
+    # 2. Build the data list
     data = []
     for bc in bcs:
         for index, item in enumerate(bc.items, start=1):
+            # Safe access to original MergedPO data
+            orig_po = item.merged_po if item.merged_po else None
+            
             row = {
-                # --- IDENTIFICATION & PROJECT ---
+                # --- IDENTIFICATION ---
                 "BC Number": bc.bc_number,
                 "BC Line": index,
                 "Internal Project": bc.internal_project.name if bc.internal_project else "N/A",
-                
-                # --- ITEM & SITE DETAILS ---
-                "Site Code": item.merged_po.site_code if item.merged_po else "N/A",
-                "PO ID Reference": item.merged_po.po_id if item.merged_po else "N/A",
-                "Item Description": item.merged_po.item_description if item.merged_po else "N/A",
-                
-                # --- SUBCONTRACTOR ---
+                "Site Code": orig_po.site_code if orig_po else "N/A",
+                "PO ID Reference": orig_po.po_id if orig_po else "N/A",
+                "Item Description": orig_po.item_description if orig_po else "N/A",
                 "SBC Name": bc.sbc.name if bc.sbc else "N/A",
-                
-                # --- WORKFLOW & STATUS ---
                 "Current Status": bc.status,
-                "Created By": get_user_name(bc.creator),
-                "Created At": bc.created_at.strftime("%d/%m/%Y %H:%M") if bc.created_at else "",
-                "Submitted At": bc.submitted_at.strftime("%d/%m/%Y %H:%M") if bc.submitted_at else "Not Submitted",
-                "Validated L1 By": get_user_name(bc.approver_l1),
-                "Validated L1 At": bc.approved_l1_at.strftime("%d/%m/%Y %H:%M") if bc.approved_l1_at else "",
-                "Approved L2 By": get_user_name(bc.approver_l2),
-                "Approved L2 At": bc.approved_l2_at.strftime("%d/%m/%Y %H:%M") if bc.approved_l2_at else "",
-                "Rejection Reason": bc.rejection_reason or "",
 
-                # --- FINANCIALS (HT ONLY) ---
+                # --- WORKFLOW ---
+                "Created At": bc.created_at.strftime("%d/%m/%Y %H:%M") if bc.created_at else "",
+                "Validated L1 By": get_user_name(bc.approver_l1),
+                "Approved L2 By": get_user_name(bc.approver_l2),
+
+                # --- ORIGINAL PRICES (From MergedPO) ---
+                "Original Unit Price": orig_po.unit_price if orig_po else 0,
+                "Original Line Total": orig_po.line_amount_hw if orig_po else 0,
+
+                # --- SBC NEGOTIATED PRICES (From BCItem) ---
                 "SBC Rate Applied": f"{round(item.rate_sbc * 100, 2):g}%" if item.rate_sbc else "0%",
                 "Quantity": item.quantity_sbc,
-                "Unit Price (HT)": item.unit_price_sbc,
-                "Line Total (HT)": item.line_amount_sbc,
+                "SBC Unit Price": item.unit_price_sbc,
+                "SBC Line Total": item.line_amount_sbc,
                 "Global BC Total (HT)": bc.total_amount_ht
             }
             data.append(row)
 
-    # 4. Create DataFrame
-    df = pd.DataFrame(data)
-    
-    # Optional: ensure numeric columns are actually floats for Excel sorting
-    numeric_cols = ["Quantity", "Unit Price (HT)", "Line Total (HT)", "Global BC Total (HT)"]
-    for col in numeric_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
+    return pd.DataFrame(data)
 
-    return df
+
+
 def get_aging_analysis(db: Session,user: Optional[models.User] = None):
     """
     Groups the total remaining amount (GAP) into age buckets based on publish_date.
