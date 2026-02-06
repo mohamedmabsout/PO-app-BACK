@@ -3375,6 +3375,8 @@ def get_bcs_export_dataframe(db: Session, search: Optional[str] = None):
                 # --- WORKFLOW ---
                 "Created At": bc.created_at.strftime("%d/%m/%Y %H:%M") if bc.created_at else "",
                 "Validated L1 By": get_user_name(bc.approver_l1),
+                "Validated L1 At": bc.approved_at_l1.strftime("%d/%m/%Y %H:%M") if bc.approved_at_l1 else "",
+
                 "Approved L2 By": get_user_name(bc.approver_l2),
 
                 # --- ORIGINAL PRICES (From MergedPO) ---
