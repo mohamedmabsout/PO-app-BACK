@@ -3383,7 +3383,7 @@ def get_bcs_export_dataframe(db: Session, search: Optional[str] = None):
                 "Rejection Reason": bc.rejection_reason or "",
 
                 # --- FINANCIALS (HT ONLY) ---
-                "SBC Rate Applied": f"{item.rate_sbc * 100}%" if item.rate_sbc else "0%",
+                "SBC Rate Applied": f"{round(item.rate_sbc * 100, 2):g}%" if item.rate_sbc else "0%",
                 "Quantity": item.quantity_sbc,
                 "Unit Price (HT)": item.unit_price_sbc,
                 "Line Total (HT)": item.line_amount_sbc,
