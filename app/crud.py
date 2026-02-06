@@ -3375,10 +3375,10 @@ def get_bcs_export_dataframe(db: Session, search: Optional[str] = None):
                 # --- WORKFLOW ---
                 "Created At": bc.created_at.strftime("%d/%m/%Y %H:%M") if bc.created_at else "",
                 "Validated L1 By": get_user_name(bc.approver_l1),
-                "Validated L1 At": bc.approved_at_l1.strftime("%d/%m/%Y %H:%M") if bc.approved_at_l1 else "",
+                "Validated L1 At": bc.approved_l1_at.strftime("%d/%m/%Y %H:%M") if bc.approved_l1_at else "",
 
                 "Approved L2 By": get_user_name(bc.approver_l2),
-
+                "Approved L2 At": bc.approved_l2_at.strftime("%d/%m/%Y %H:%M") if bc.approved_l2_at else "",
                 # --- ORIGINAL PRICES (From MergedPO) ---
                 "Original Unit Price": orig_po.unit_price if orig_po else 0,
                 "Original Line Total": orig_po.line_amount_hw if orig_po else 0,
