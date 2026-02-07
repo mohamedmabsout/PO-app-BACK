@@ -2016,9 +2016,7 @@ def get_performance_matrix(
         })
         
     return results
-    
-    
-# def get_yearly_matrix_data(db: Session, year: int):
+    # def get_yearly_matrix_data(db: Session, year: int):
 #     # 1. Get all PMs
 #     pms = db.query(models.User).filter(models.User.role.in_(['PM', 'ADMIN', 'PD'])).all()
     
@@ -3990,10 +3988,7 @@ def approve_fund_request(db: Session, req_id: int, admin_id: int, approved_items
             
     db.commit()
     return req
-def confirm_fund_reception(db: Session, req_id: int, pd_user: int):
-    """
-    Confirms all PENDING transactions. This moves money into the visible wallet balance.
-    """
+def confirm_fund_reception(db: Session, req_id: int, pd_user_id: int):
     # 1. Find all PENDING transactions for this request
     pending_txs = db.query(models.Transaction).filter(
         models.Transaction.related_request_id == req_id,
@@ -4001,31 +3996,28 @@ def confirm_fund_reception(db: Session, req_id: int, pd_user: int):
     ).all()
     
     if not pending_txs:
-        # Check if maybe it's just fully done
-        req = db.query(models.FundRequest).get(req_id)
-        # If there are no pending transactions, it means everything approved so far 
-        # has already been confirmed. We can just return success.
         return {"message": "All approved funds have already been confirmed."}
         
     confirmed_count = 0
     total_confirmed_amount = 0.0
-    req = db.query(models.FundRequest).get(req_id)
-    total_requested = sum(i.requested_amount for i in req.items)
-
-    remaining = total_requested - req.paid_amount
-    if remaining <= 0.01:
-             req.status = models.FundRequestStatus.COMPLETED
+    
+    # 2. Process each pending transaction
     for tx in pending_txs:
-        # 2. Update the Wallet Balance NOW
         wallet = db.query(models.Caisse).get(tx.caisse_id)
         if wallet:
             wallet.balance += tx.amount
         
-        # 3. Mark Transaction as COMPLETED
         tx.status = models.TransactionStatus.COMPLETED
-        
         confirmed_count += 1
         total_confirmed_amount += tx.amount
+        
+    # 3. Check if we should close the whole request
+    req = db.query(models.FundRequest).get(req_id)
+    total_requested = sum(i.requested_amount for i in req.items)
+    # If what was paid by Admin matches the total request, mark as completed
+    if (req.paid_amount or 0.0) >= (total_requested - 0.01):
+        req.status = models.FundRequestStatus.COMPLETED
+        req.completed_at = datetime.now()
         
     db.commit()
     
@@ -4067,8 +4059,6 @@ def get_caisse_stats(db: Session, user: models.User):
         "pending_in": float(pending_in),
         "spent_month": float(spent_month)
     }
-
-
 
 def get_transactions(
     db: Session, 
@@ -4144,46 +4134,48 @@ def get_transactions(
         "total_pages": (total_items + limit - 1) // limit
     }
     
-def confirm_fund_reception(db: Session, req_id: int, pd_user_id: int):
-    # 1. Find all PENDING transactions for this request
-    pending_txs = db.query(models.Transaction).filter(
-        models.Transaction.related_request_id == req_id,
+def get_pending_requests(db: Session, user_id: int = None): # Added user_id param for PD view
+    # Subquery: IDs of requests that still have money in 'PENDING' status
+    pending_tx_req_ids = db.query(models.Transaction.related_request_id).filter(
         models.Transaction.status == models.TransactionStatus.PENDING
-    ).all()
-    
-    if not pending_txs:
-        return {"message": "All approved funds have already been confirmed."}
-        
-    confirmed_count = 0
-    total_confirmed_amount = 0.0
-    
-    # 2. Process each pending transaction
-    for tx in pending_txs:
-        wallet = db.query(models.Caisse).get(tx.caisse_id)
-        if wallet:
-            wallet.balance += tx.amount
-        
-        tx.status = models.TransactionStatus.COMPLETED
-        confirmed_count += 1
-        total_confirmed_amount += tx.amount
-        
-    # 3. Check if we should close the whole request
-    req = db.query(models.FundRequest).get(req_id)
-    total_requested = sum(i.requested_amount for i in req.items)
-    # If what was paid by Admin matches the total request, mark as completed
-    if (req.paid_amount or 0.0) >= (total_requested - 0.01):
-        req.status = models.FundRequestStatus.COMPLETED
-        req.completed_at = datetime.now()
-        
-    db.commit()
-    
-    return {
-        "confirmed_count": confirmed_count, 
-        "total_amount": total_confirmed_amount
-    }
+    ).scalar_subquery()
 
+    query = db.query(models.FundRequest).filter(
+        or_(
+            # Case 1: Still being processed by Admin
+            models.FundRequest.status.in_([
+                models.FundRequestStatus.PENDING_APPROVAL,
+                models.FundRequestStatus.PARTIALLY_PAID,
+                models.FundRequestStatus.APPROVED_WAITING_FUNDS
+            ]),
+            # Case 2: Admin is done, but PD hasn't confirmed receipt of cash
+            models.FundRequest.id.in_(pending_tx_req_ids)
+        )
+    )
+    
+    if user_id: # If PD is logged in, show only their requests
+        query = query.filter(models.FundRequest.requester_id == user_id)
 
+    reqs = query.order_by(models.FundRequest.created_at.desc()).all()
+    
+    results = []
+    for r in reqs:
+        # Check specifically if this request is waiting for a physical confirmation
+        has_pending = db.query(models.Transaction).filter(
+            models.Transaction.related_request_id == r.id,
+            models.Transaction.status == models.TransactionStatus.PENDING
+        ).count() > 0
 
+        results.append({
+            "id": r.id,
+            "request_number": r.request_number,
+            "created_at": r.created_at,
+            "status": r.status,
+            "total_amount": sum(i.requested_amount for i in r.items),
+            "paid_amount": r.paid_amount or 0.0,
+            "requester_name": f"{r.requester.first_name} {r.requester.last_name}",
+            "has_pending_transfer": has_pending 
+        })
 
 def get_request_by_id(db: Session, req_id: int):
     req = db.query(models.FundRequest).get(req_id)

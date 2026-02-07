@@ -703,18 +703,17 @@ def list_transactions(
         db, current_user, page, limit, type, start_date, end_date, search
     )
 
-
 @router.get("/requests/pending")
-def list_pending_requests(
+def read_pending_requests(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
-    """Returns the list of requests for the dashboard table (Admin/PD only)"""
-    # Optional: Enforce security
-    if current_user.role not in [models.UserRole.ADMIN, models.UserRole.PD]:
-        return []
-        
-    return crud.get_pending_requests(db)
+    # If user is PD, filter by their ID. If Admin, show all.
+    user_id_filter = current_user.id if current_user.role == models.UserRole.PD else None
+    
+    return crud.get_pending_requests(db, user_id=user_id_filter)
+
+
 @router.post("/request")
 def create_fund_request(    background_tasks: BackgroundTasks, 
 
