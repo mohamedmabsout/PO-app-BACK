@@ -4035,57 +4035,40 @@ def confirm_fund_reception(db: Session, req_id: int, pd_user: int):
     }
 
 def get_caisse_stats(db: Session, user: models.User):
-   
-    
-    # 1. Récupérer ou Créer la caisse (Lazy Init)
     wallet = db.query(models.Caisse).filter(models.Caisse.user_id == user.id).first()
-    
     if not wallet:
-        wallet = models.Caisse(user_id=user.id, balance=0.0)
+        wallet = models.Caisse(user_id=user.id, balance=0.0, reserved_balance=0.0)
         db.add(wallet)
         db.commit()
         db.refresh(wallet)
 
-    # 2. Calculer les fonds entrants en attente (Pending Incoming Funds)
-    # Somme des montants demandés (PENDING) + approuvés mais non reçus (WAITING_FUNDS)
-    
-    # A. Demandes en attente d'approbation (on prend le montant demandé)
-    pending_reqs = db.query(func.sum(models.FundRequestItem.requested_amount))\
-        .join(models.FundRequest)\
-        .filter(
-            models.FundRequestItem.target_pm_id == user.id,
-            models.FundRequest.status == models.FundRequestStatus.PENDING_APPROVAL
-        ).scalar() or 0.0
-    
-    # B. Demandes approuvées en attente de cash (on prend le montant approuvé)
-    waiting_funds = db.query(func.sum(models.FundRequestItem.approved_amount))\
-        .join(models.FundRequest)\
-        .filter(
-            models.FundRequestItem.target_pm_id == user.id,
-            models.FundRequest.status == models.FundRequestStatus.APPROVED_WAITING_FUNDS
-        ).scalar() or 0.0
-    
-    pending_total = float(pending_reqs) + float(waiting_funds)
+    # --- FIX HERE: Calculate pending incoming from TRANSACTIONS, not Requests ---
+    pending_in = db.query(func.sum(models.Transaction.amount)).filter(
+        models.Transaction.caisse_id == wallet.id,
+        models.Transaction.status == models.TransactionStatus.PENDING,
+        models.Transaction.type == models.TransactionType.CREDIT
+    ).scalar() or 0.0
+    # --------------------------------------------------------------------------
 
-    # 3. Calculer le total dépensé ce mois-ci
     today = datetime.now()
     month_start = today.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    
-    spent_month = db.query(func.sum(models.Transaction.amount))\
-        .filter(
-            models.Transaction.caisse_id == wallet.id,
-            models.Transaction.type == models.TransactionType.DEBIT,
-            models.Transaction.created_at >= month_start
-        ).scalar() or 0.0
-    reserved = wallet.reserved_balance if wallet and wallet.reserved_balance else 0.0
+    spent_month = db.query(func.sum(models.Transaction.amount)).filter(
+        models.Transaction.caisse_id == wallet.id,
+        models.Transaction.type == models.TransactionType.DEBIT,
+        models.Transaction.status == models.TransactionStatus.COMPLETED, # Only count actual spent
+        models.Transaction.created_at >= month_start
+    ).scalar() or 0.0
 
-    # 4. Retourner le dictionnaire final
+    reserved = wallet.reserved_balance or 0.0
+
     return {
         "balance": float(wallet.balance),
-        "reserved":float(reserved),
-        "pending_in": float(pending_total),
+        "reserved": float(reserved),
+        "pending_in": float(pending_in),
         "spent_month": float(spent_month)
     }
+
+
 
 def get_transactions(
     db: Session, 
@@ -4161,47 +4144,47 @@ def get_transactions(
         "total_pages": (total_items + limit - 1) // limit
     }
     
-def get_pending_requests(db: Session):
-    """
-    Returns unique pending requests with a flag indicating if confirmation is needed.
-    """
-    query = db.query(models.FundRequest).filter(
-        models.FundRequest.status.in_([
-            models.FundRequestStatus.PENDING_APPROVAL,
-            models.FundRequestStatus.PARTIALLY_PAID,
-            models.FundRequestStatus.APPROVED_WAITING_FUNDS
-        ])
-    ).order_by(models.FundRequest.created_at.desc())
+def confirm_fund_reception(db: Session, req_id: int, pd_user_id: int):
+    # 1. Find all PENDING transactions for this request
+    pending_txs = db.query(models.Transaction).filter(
+        models.Transaction.related_request_id == req_id,
+        models.Transaction.status == models.TransactionStatus.PENDING
+    ).all()
     
-    reqs = query.distinct().all()
-    
-    results = []
-    for r in reqs:
-        # Calculate total amount (sum of items)
-        total = sum(i.requested_amount for i in r.items)
-        accepted = r.paid_amount or 0.0
-
-        # --- FIX: Check for Pending Transactions ---
-        # If there are transactions with status 'PENDING', the PD needs to confirm receipt.
-        pending_tx_count = db.query(models.Transaction).filter(
-            models.Transaction.related_request_id == r.id,
-            models.Transaction.status == models.TransactionStatus.PENDING
-        ).count()
-
-        results.append({
-            "id": r.id,
-            "request_number": r.request_number,
-            "created_at": r.created_at,
-            "status": r.status,
-            "total_amount": total,
-            "paid_amount": accepted,
-            "requester_name": f"{r.requester.first_name} {r.requester.last_name}",
-            
-            # --- NEW FIELD ---
-            "has_pending_transfer": pending_tx_count > 0 
-        })
+    if not pending_txs:
+        return {"message": "All approved funds have already been confirmed."}
         
-    return results
+    confirmed_count = 0
+    total_confirmed_amount = 0.0
+    
+    # 2. Process each pending transaction
+    for tx in pending_txs:
+        wallet = db.query(models.Caisse).get(tx.caisse_id)
+        if wallet:
+            wallet.balance += tx.amount
+        
+        tx.status = models.TransactionStatus.COMPLETED
+        confirmed_count += 1
+        total_confirmed_amount += tx.amount
+        
+    # 3. Check if we should close the whole request
+    req = db.query(models.FundRequest).get(req_id)
+    total_requested = sum(i.requested_amount for i in req.items)
+    # If what was paid by Admin matches the total request, mark as completed
+    if (req.paid_amount or 0.0) >= (total_requested - 0.01):
+        req.status = models.FundRequestStatus.COMPLETED
+        req.completed_at = datetime.now()
+        
+    db.commit()
+    
+    return {
+        "confirmed_count": confirmed_count, 
+        "total_amount": total_confirmed_amount
+    }
+
+
+
+
 def get_request_by_id(db: Session, req_id: int):
     req = db.query(models.FundRequest).get(req_id)
     if not req:

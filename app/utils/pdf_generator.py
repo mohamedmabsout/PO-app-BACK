@@ -14,12 +14,12 @@ from reportlab.lib import colors
 from .. import models 
 
 # SIB Legal Information constants
-SIB_NAME = "SOLUTION INTEGRALE BUILDING (SIB) SARL AU"
-SIB_ADDRESS = "Lotissement Mandarona n°142, Sidi Maârouf, Casablanca, Maroc"
-SIB_RC = "373413"
-SIB_ICE = "001529147000078"
-SIB_IF = "20735311"
-SIB_CNSS = "4945532"
+SIB_NAME = "SOLUTION INTEGRALE BUILDING (SIB) SARL"
+SIB_ADDRESS = "57 RUE MOSTAPHA RAFII RES DES JARDINS IM 2 B 9 KENITRA"
+SIB_RC = "42505/KENITRA"
+SIB_ICE = "001704095000027"
+SIB_IF = "29156258"
+SIB_CNSS = "4312980"
 SIB_WEB = "www.sib.co.ma"
 
 def generate_bc_pdf(bc):
@@ -435,13 +435,17 @@ def generate_invoice_pdf(invoice):
             Paragraph(f"Address: {escape(invoice.sbc.address or '-')}", style_h)
         ],
         [
-            Paragraph("", style_h), 
+            Paragraph(f"SIB ice: {escape(SIB_ICE)}", style_h), 
             # THE FIX FOR YOUR SPECIFIC ERROR:
             Paragraph(f"Bank: {escape(invoice.sbc.bank_name or '-')}", style_h) 
         ],
         [
             Paragraph("", style_h), 
             Paragraph(f"RIB: {escape(invoice.sbc.rib or '-')}", style_h)
+        ],
+        [
+            Paragraph("", style_h), 
+            Paragraph(f"ICE: {escape(invoice.sbc.ice or '-')}", style_h)
         ],
     ]
     t_top = Table(bill_to, colWidths=[9.5*cm, 9.5*cm])
