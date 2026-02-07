@@ -4134,33 +4134,42 @@ def get_transactions(
         "total_pages": (total_items + limit - 1) // limit
     }
     
-def get_pending_requests(db: Session, user_id: int = None): # Added user_id param for PD view
-    # Subquery: IDs of requests that still have money in 'PENDING' status
+def get_pending_requests(db: Session, user_id: int = None):
+    """
+    Returns requests that need action.
+    - Admin needs to approve/pay.
+    - PD needs to confirm receipt.
+    """
+    # 1. Identify requests that have money "In Transit" (Pending transactions)
     pending_tx_req_ids = db.query(models.Transaction.related_request_id).filter(
         models.Transaction.status == models.TransactionStatus.PENDING
     ).scalar_subquery()
 
+    # 2. Build the query to include both active statuses AND items with pending cash
     query = db.query(models.FundRequest).filter(
         or_(
-            # Case 1: Still being processed by Admin
             models.FundRequest.status.in_([
                 models.FundRequestStatus.PENDING_APPROVAL,
                 models.FundRequestStatus.PARTIALLY_PAID,
                 models.FundRequestStatus.APPROVED_WAITING_FUNDS
             ]),
-            # Case 2: Admin is done, but PD hasn't confirmed receipt of cash
             models.FundRequest.id.in_(pending_tx_req_ids)
         )
     )
     
-    if user_id: # If PD is logged in, show only their requests
+    # 3. Security Filter: If user is a PD, show only their requests
+    if user_id:
         query = query.filter(models.FundRequest.requester_id == user_id)
 
     reqs = query.order_by(models.FundRequest.created_at.desc()).all()
     
-    results = []
+    results = [] # Initialize as empty list
+    
+    if not reqs:
+        return results # Returns [] instead of null
+
     for r in reqs:
-        # Check specifically if this request is waiting for a physical confirmation
+        # Check if there is money for the "Confirm Receipt" button
         has_pending = db.query(models.Transaction).filter(
             models.Transaction.related_request_id == r.id,
             models.Transaction.status == models.TransactionStatus.PENDING
@@ -4176,6 +4185,11 @@ def get_pending_requests(db: Session, user_id: int = None): # Added user_id para
             "requester_name": f"{r.requester.first_name} {r.requester.last_name}",
             "has_pending_transfer": has_pending 
         })
+        
+    return results # <--- This will now be a list [...]
+
+
+
 
 def get_request_by_id(db: Session, req_id: int):
     req = db.query(models.FundRequest).get(req_id)

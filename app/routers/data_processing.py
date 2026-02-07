@@ -708,12 +708,14 @@ def read_pending_requests(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
-    # If user is PD, filter by their ID. If Admin, show all.
-    user_id_filter = current_user.id if current_user.role == models.UserRole.PD else None
+    # Determine if we filter by user (PD) or show all (Admin)
+    user_id_to_filter = current_user.id if current_user.role == models.UserRole.PD else None
     
-    return crud.get_pending_requests(db, user_id=user_id_filter)
+    # CRITICAL: If you don't return the result of crud.get_pending_requests, it returns null
+    data = crud.get_pending_requests(db, user_id=user_id_to_filter)
+    return data
 
-
+    
 @router.post("/request")
 def create_fund_request(    background_tasks: BackgroundTasks, 
 
