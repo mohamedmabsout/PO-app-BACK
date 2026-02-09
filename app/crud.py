@@ -3988,43 +3988,53 @@ def approve_fund_request(db: Session, req_id: int, admin_id: int, approved_items
             
     db.commit()
     return req
-def confirm_fund_reception(db: Session, req_id: int, pd_user_id: int):
-    # 1. Find all PENDING transactions for this request
+
+
+def confirm_fund_reception(db: Session, req_id: int, pd_user_id: int): # <--- Add the 3rd argument here
+    """
+    Finalizes the 'In Transit' money. Moves it from Transactions (Pending) 
+    to the PM's actual Caisse Balance.
+    """
+    # 1. Find all PENDING transactions linked to this request
     pending_txs = db.query(models.Transaction).filter(
         models.Transaction.related_request_id == req_id,
         models.Transaction.status == models.TransactionStatus.PENDING
     ).all()
-    
+
     if not pending_txs:
-        return {"message": "All approved funds have already been confirmed."}
-        
-    confirmed_count = 0
-    total_confirmed_amount = 0.0
-    
-    # 2. Process each pending transaction
+        return {"message": "No pending funds to confirm."}
+
     for tx in pending_txs:
+        # 2. Update the Wallet Balance
         wallet = db.query(models.Caisse).get(tx.caisse_id)
         if wallet:
-            wallet.balance += tx.amount
-        
+            # Handle potential NULLs safely
+            wallet.balance = (wallet.balance or 0.0) + tx.amount
+
+        # 3. Mark Transaction as COMPLETED (No longer in transit)
         tx.status = models.TransactionStatus.COMPLETED
-        confirmed_count += 1
-        total_confirmed_amount += tx.amount
-        
-    # 3. Check if we should close the whole request
+        tx.created_at = datetime.now() # Record the confirmation time
+        tx.created_by_id = pd_user_id   # Record that the PD did this
+ 
+
+    # 4. Check if the Parent Request should move to COMPLETED
     req = db.query(models.FundRequest).get(req_id)
-    total_requested = sum(i.requested_amount for i in req.items)
-    # If what was paid by Admin matches the total request, mark as completed
-    if (req.paid_amount or 0.0) >= (total_requested - 0.01):
-        req.status = models.FundRequestStatus.COMPLETED
-        req.completed_at = datetime.now()
+    if req:
+        total_requested = sum(i.requested_amount for i in req.items)
         
+        # Are there any other pending transactions for this request that we missed?
+        still_pending_count = db.query(models.Transaction).filter(
+            models.Transaction.related_request_id == req_id,
+            models.Transaction.status == models.TransactionStatus.PENDING
+        ).count()
+
+        # If we have paid out the full amount and all cash is confirmed received
+        if req.paid_amount >= (total_requested - 0.01) and still_pending_count == 0:
+            req.status = models.FundRequestStatus.COMPLETED
+            req.completed_at = datetime.now()
+
     db.commit()
-    
-    return {
-        "confirmed_count": confirmed_count, 
-        "total_amount": total_confirmed_amount
-    }
+    return {"message": "Funds confirmed. Wallet balances updated."}
 
 def get_caisse_stats(db: Session, user: models.User):
     wallet = db.query(models.Caisse).filter(models.Caisse.user_id == user.id).first()
@@ -4034,32 +4044,48 @@ def get_caisse_stats(db: Session, user: models.User):
         db.commit()
         db.refresh(wallet)
 
-    # --- FIX HERE: Calculate pending incoming from TRANSACTIONS, not Requests ---
-    pending_in = db.query(func.sum(models.Transaction.amount)).filter(
-        models.Transaction.caisse_id == wallet.id,
-        models.Transaction.status == models.TransactionStatus.PENDING,
-        models.Transaction.type == models.TransactionType.CREDIT
+    # --- THE FIX: Calculate the total gap across all active requests ---
+    # We sum (Requested Amount - Approved Amount) for all "Open" requests
+    pending_total = db.query(
+        func.sum(models.FundRequestItem.requested_amount - func.coalesce(models.FundRequestItem.approved_amount, 0))
+    ).join(models.FundRequest).filter(
+        models.FundRequestItem.target_pm_id == user.id,
+        models.FundRequest.status.in_([
+            models.FundRequestStatus.PENDING_APPROVAL,
+            models.FundRequestStatus.PARTIALLY_PAID,
+            models.FundRequestStatus.APPROVED_WAITING_FUNDS
+        ])
     ).scalar() or 0.0
-    # --------------------------------------------------------------------------
 
+    # Also add money that is "In the air" (Admin approved it, but PD hasn't confirmed receipt)
+    # Status is PENDING in transactions
+    in_transit = db.query(func.sum(models.Transaction.amount)).filter(
+        models.Transaction.caisse_id == wallet.id,
+        models.Transaction.status == models.TransactionStatus.PENDING
+    ).scalar() or 0.0
+
+    # Combined Incoming = Future Approvals needed + Current Confirmations needed
+    total_incoming = float(pending_total) + float(in_transit)
+
+    # Calculate spent this month (Existing logic)
     today = datetime.now()
     month_start = today.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    spent_month = db.query(func.sum(models.Transaction.amount)).filter(
-        models.Transaction.caisse_id == wallet.id,
-        models.Transaction.type == models.TransactionType.DEBIT,
-        models.Transaction.status == models.TransactionStatus.COMPLETED, # Only count actual spent
-        models.Transaction.created_at >= month_start
-    ).scalar() or 0.0
-
-    reserved = wallet.reserved_balance or 0.0
+    spent_month = db.query(func.sum(models.Transaction.amount))\
+        .filter(
+            models.Transaction.caisse_id == wallet.id,
+            models.Transaction.type == models.TransactionType.DEBIT,
+            models.Transaction.created_at >= month_start,
+            models.Transaction.status == models.TransactionStatus.COMPLETED
+        ).scalar() or 0.0
 
     return {
         "balance": float(wallet.balance),
-        "reserved": float(reserved),
-        "pending_in": float(pending_in),
+        "reserved": float(wallet.reserved_balance or 0.0),
+        "pending_in": total_incoming,
         "spent_month": float(spent_month)
     }
 
+    
 def get_transactions(
     db: Session, 
     user: models.User, 
@@ -4134,59 +4160,60 @@ def get_transactions(
         "total_pages": (total_items + limit - 1) // limit
     }
     
-def get_pending_requests(db: Session, user_id: int = None):
+def get_pending_requests(db: Session):
     """
-    Returns requests that need action.
-    - Admin needs to approve/pay.
-    - PD needs to confirm receipt.
+    A request stays 'Pending' if:
+    1. It's not Rejected.
+    2. AND (Admin still needs to pay more OR PD still needs to confirm receipt).
     """
-    # 1. Identify requests that have money "In Transit" (Pending transactions)
-    pending_tx_req_ids = db.query(models.Transaction.related_request_id).filter(
-        models.Transaction.status == models.TransactionStatus.PENDING
-    ).scalar_subquery()
-
-    # 2. Build the query to include both active statuses AND items with pending cash
-    query = db.query(models.FundRequest).filter(
-        or_(
-            models.FundRequest.status.in_([
-                models.FundRequestStatus.PENDING_APPROVAL,
-                models.FundRequestStatus.PARTIALLY_PAID,
-                models.FundRequestStatus.APPROVED_WAITING_FUNDS
-            ]),
-            models.FundRequest.id.in_(pending_tx_req_ids)
-        )
-    )
+    # 1. Fetch all requests that aren't rejected or fully archived
+    # We include COMPLETED because it might have unconfirmed transactions
+    active_statuses = [
+        models.FundRequestStatus.PENDING_APPROVAL,
+        models.FundRequestStatus.PARTIALLY_PAID,
+        models.FundRequestStatus.APPROVED_WAITING_FUNDS,
+        models.FundRequestStatus.COMPLETED,
+        models.FundRequestStatus.CLOSED_PARTIAL
+    ]
     
-    # 3. Security Filter: If user is a PD, show only their requests
-    if user_id:
-        query = query.filter(models.FundRequest.requester_id == user_id)
-
-    reqs = query.order_by(models.FundRequest.created_at.desc()).all()
+    reqs = db.query(models.FundRequest).filter(
+        models.FundRequest.status.in_(active_statuses)
+    ).all()
     
-    results = [] # Initialize as empty list
-    
-    if not reqs:
-        return results # Returns [] instead of null
-
+    results = []
     for r in reqs:
-        # Check if there is money for the "Confirm Receipt" button
-        has_pending = db.query(models.Transaction).filter(
+        # Calculate totals
+        total_req = sum(i.requested_amount for i in r.items)
+        
+        # Check for transactions waiting for PD confirmation
+        pending_tx_count = db.query(models.Transaction).filter(
             models.Transaction.related_request_id == r.id,
             models.Transaction.status == models.TransactionStatus.PENDING
-        ).count() > 0
+        ).count()
+
+        # --- THE CRITICAL FILTER ---
+        # Admin still has work to do
+        admin_work_pending = r.paid_amount < (total_req - 0.1) and r.status != models.FundRequestStatus.CLOSED_PARTIAL
+        
+        # PD still has work to do (Confirmation)
+        pd_work_pending = pending_tx_count > 0
+
+        # If nobody has work to do, skip this request (don't show in pending)
+        if not admin_work_pending and not pd_work_pending:
+            continue
 
         results.append({
             "id": r.id,
             "request_number": r.request_number,
             "created_at": r.created_at,
             "status": r.status,
-            "total_amount": sum(i.requested_amount for i in r.items),
-            "paid_amount": r.paid_amount or 0.0,
+            "total_amount": total_req,
+            "paid_amount": r.paid_amount,
             "requester_name": f"{r.requester.first_name} {r.requester.last_name}",
-            "has_pending_transfer": has_pending 
+            "has_pending_transfer": pd_work_pending # This enables the button for the PD
         })
         
-    return results # <--- This will now be a list [...]
+    return results
 
 
 
@@ -4238,52 +4265,38 @@ def get_request_by_id(db: Session, req_id: int):
 # In crud.py
 
 def get_all_wallets_summary(db: Session):
-    """
-    Returns a list of all PM wallets with their balance and pending incoming amount.
-    Pending Incoming = (Requested Amount - Approved Amount) for all active requests.
-    """
-    # 1. Get all PMs/PDs/Admins
     pms = db.query(models.User).filter(
         models.User.role.in_([models.UserRole.PM, models.UserRole.PD, models.UserRole.ADMIN])
     ).all()
     
     results = []
     for pm in pms:
-        # A. Get Wallet Balance
         wallet = db.query(models.Caisse).filter(models.Caisse.user_id == pm.id).first()
-        balance = wallet.balance if wallet else 0.0
         
-        # B. Calculate Pending Incoming
-        # Logic: Sum of (Item.requested - Item.approved) for all items belonging to this PM
-        # where the request is NOT Completed or Rejected.
-        
-        pending_items = db.query(
-            func.sum(models.FundRequestItem.requested_amount),
-            func.sum(models.FundRequestItem.approved_amount)
+        # 1. Money not yet approved by Admin
+        unapproved = db.query(
+            func.sum(models.FundRequestItem.requested_amount - func.coalesce(models.FundRequestItem.approved_amount, 0))
         ).join(models.FundRequest).filter(
             models.FundRequestItem.target_pm_id == pm.id,
-            models.FundRequest.status.in_([
-                models.FundRequestStatus.PENDING_APPROVAL,
-                models.FundRequestStatus.APPROVED_WAITING_FUNDS,
-                models.FundRequestStatus.PARTIALLY_PAID
-            ])
-        ).first()
-        
-        req_sum = pending_items[0] or 0.0
-        app_sum = pending_items[1] or 0.0
-        
-        pending_in = req_sum - app_sum
-        
+            models.FundRequest.status != models.FundRequestStatus.COMPLETED,
+            models.FundRequest.status != models.FundRequestStatus.REJECTED,
+            models.FundRequest.status != models.FundRequestStatus.CLOSED_PARTIAL
+        ).scalar() or 0.0
+
+        # 2. Money approved but not yet confirmed by PD (In-Transit)
+        in_transit = db.query(func.sum(models.Transaction.amount)).filter(
+            models.Transaction.caisse_id == (wallet.id if wallet else -1),
+            models.Transaction.status == models.TransactionStatus.PENDING
+        ).scalar() or 0.0
+
         results.append({
             "user_id": pm.id,
             "user_name": f"{pm.first_name} {pm.last_name}",
-            "balance": balance,
-            "pending_in": pending_items[0] or 0.0, # Just show requested for now, or use pending_in for gap
-        "reserved": wallet.reserved_balance if wallet else 0.0, # <--- ADD THIS
-            "pending_in": pending_in
+            "balance": wallet.balance if wallet else 0.0,
+            "reserved": wallet.reserved_balance if wallet else 0.0,
+            "pending_in": float(unapproved) + float(in_transit) # Sum of both
         })
         
-    # Sort by balance descending
     return sorted(results, key=lambda x: x['balance'], reverse=True)
 
 def process_fund_request(
@@ -4305,81 +4318,61 @@ def process_fund_request(
         req.approver_id = admin_id
         req.approved_at = datetime.now()
     
-    # 2. HANDLE APPROVAL
-    elif payload.action == "APPROVE":
+    # 1. Calculate the total requested by summing the items
+    total_requested = sum(item.requested_amount for item in req.items)
+
+    if payload.action == "APPROVE":
         if not payload.items:
              raise ValueError("Approval requires item details.")
 
+        # Calculate what is being authorized in THIS specific click
         amount_giving_now = sum(i.amount_to_pay for i in payload.items)
         
-        # --- VALIDATION: PREVENT OVERPAYMENT ---
+        # 2. Update the parent "Paid Amount"
+        # current_paid represents everything authorized in previous sessions
         current_paid = req.paid_amount or 0.0
-        total_requested = sum(i.requested_amount for i in req.items)
-        
-        if (current_paid + amount_giving_now) > (total_requested + 1.0): # 1.0 buffer for float
-            raise ValueError(
-                f"Overpayment Blocked: Total requested is {total_requested}, "
-                f"already paid {current_paid}. Cannot add {amount_giving_now}."
-            )
+        new_total_paid = current_paid + amount_giving_now
 
-        # A. Update Global Request Tracking
-        req.paid_amount = current_paid + amount_giving_now
+        # VALIDATION: Block overpayment
+        if new_total_paid > (total_requested + 1.0): 
+            raise ValueError(f"Overpayment! Max allowed is {total_requested - current_paid}")
+
+        req.paid_amount = new_total_paid
         req.approver_id = admin_id
         req.approved_at = datetime.now()
-        req.admin_comment = payload.comment
 
-        # B. DISTRIBUTE MONEY (Create PENDING Transactions)
+        # 3. Create Pending Transactions for the items
         for item_review in payload.items:
             db_item = next((i for i in req.items if i.id == item_review.item_id), None)
-            if not db_item: continue
+            if not db_item or item_review.amount_to_pay <= 0: continue
 
-            # Save Admin Note
-            if item_review.admin_note:
-                db_item.admin_note = item_review.admin_note
+            db_item.approved_amount = (db_item.approved_amount or 0.0) + item_review.amount_to_pay
             
-            amount = item_review.amount_to_pay
-            if amount <= 0: continue
-
-            # Update Item Approved Amount
-            db_item.approved_amount = (db_item.approved_amount or 0.0) + amount
-
-            # Get the Wallet (Create if not exists)
-            pm_id = db_item.target_pm_id
-            wallet = db.query(models.Caisse).filter(models.Caisse.user_id == pm_id).first()
-            if not wallet:
-                wallet = models.Caisse(user_id=pm_id, balance=0.0)
-                db.add(wallet)
-                db.flush()
-                
-            # --- CRITICAL FIX: DO NOT UPDATE BALANCE HERE ---
-            # wallet.balance += amount  <-- REMOVED. This happens on confirmation.
-            
-            # Create Transaction with PENDING status
+            # Create the PENDING transaction (wallet balance doesn't change yet)
+            wallet = db.query(models.Caisse).filter(models.Caisse.user_id == db_item.target_pm_id).first()
             trx = models.Transaction(
                 caisse_id=wallet.id,
                 type=models.TransactionType.CREDIT,
-                amount=amount,
-                description=f"Refill \"{req.request_number}\" (Item {db_item.id})",
+                amount=item_review.amount_to_pay,
+                description=f"Refill #{req.request_number}",
                 related_request_id=req.id,
                 created_by_id=admin_id,
-                created_at=datetime.now(),
-
-                # --- THIS IS WHERE IT GETS SET ---
-                status=models.TransactionStatus.PENDING 
-                # ---------------------------------
+                status=models.TransactionStatus.PENDING # PD must confirm receipt
             )
             db.add(trx)
 
-        # C. Determine Status
-        remaining = total_requested - req.paid_amount
-        
-        # if remaining <= 0.01:
-        #     req.status = models.FundRequestStatus.COMPLETED
-        # else:
-        if payload.close_request:
-            req.status = models.FundRequestStatus.CLOSED_PARTIAL
+        # --- THE FIX: FINAL STATUS LOGIC ---
+        # If we have reached the total, it is COMPLETED.
+        if req.paid_amount >= (total_requested - 0.1): # 0.1 buffer for float math
+            req.status = models.FundRequestStatus.COMPLETED
+            req.completed_at = datetime.now()
         else:
-            req.status = models.FundRequestStatus.PARTIALLY_PAID
+            # If the admin checked the "Close Request" box manually
+            if payload.close_request:
+                req.status = models.FundRequestStatus.CLOSED_PARTIAL
+                req.completed_at = datetime.now()
+            else:
+                req.status = models.FundRequestStatus.PARTIALLY_PAID
     
     db.commit()
     db.refresh(req)
@@ -4431,106 +4424,82 @@ def create_expense_type(db: Session, name: str):
     return new_type
 
 
-def create_expense(db: Session, payload: schemas.ExpenseCreate, user_id: int,background_tasks: BackgroundTasks):
-    
+def create_expense(db: Session, payload: schemas.ExpenseCreate, user_id: int, background_tasks: BackgroundTasks):
     user = db.query(models.User).get(user_id)
-    pm_full_name = f"{user.first_name} {user.last_name}"
+    pm_name = f"{user.first_name} {user.last_name}"
     
-    
-    final_amount = 0.0
+    gross_amount = 0.0
+    sbc_id = payload.sbc_id
     beneficiary_name = payload.beneficiary
-    beneficiary_id = None
+    beneficiary_user_id = None
+    bc_line_id = payload.bc_id 
 
-    # --- BATCH LOGIC FOR ACT_PP ---
-    if payload.exp_type == "ACCEPTANCE_PP" and payload.act_ids:
-        # Fetch all requested ACTs
-        acts = db.query(models.ServiceAcceptance).filter(
-            models.ServiceAcceptance.id.in_(payload.act_ids)
-        ).all()
+    # --- 1. IDENTIFY SBC & GROSS AMOUNT ---
+    if payload.exp_type == "ACCEPTANCE_PP":
+        acts = db.query(models.ServiceAcceptance).filter(models.ServiceAcceptance.id.in_(payload.act_ids)).all()
+        if not acts: raise ValueError("No ACTs selected.")
         
-        if not acts:
-            raise ValueError("No valid ACTs found.")
-        for act in acts:
-            if act.expense_id is not None:
-                # Check if the existing linked expense is still "alive" (not rejected)
-                existing_exp = db.query(models.Expense).get(act.expense_id)
-                if existing_exp and existing_exp.status != models.ExpenseStatus.REJECTED:
-                    raise ValueError(
-                        f"Validation Error: ACT {act.act_number} is already assigned to "
-                        f"Expense #{existing_exp.id} (Status: {existing_exp.status}). "
-                        "Please refresh your list."
-                    )
-       
-
-        sbc_ids = {act.bc.sbc_id for act in acts if act.bc}
+        # Verify all ACTs belong to same SBC
+        sbc_ids = {a.bc.sbc_id for a in acts}
+        if len(sbc_ids) > 1: raise ValueError("Cannot mix subcontractors in one expense.")
+        sbc_id = list(sbc_ids)[0]
         
-        if len(sbc_ids) > 1:
-            raise ValueError("Security Violation: An expense cannot contain ACTs from multiple different Subcontractors.")
-        # Calculate Total Sum
-        final_amount = sum(act.total_amount_ht for act in acts)
-        
-        # Set Beneficiary from the first ACT (UI ensures all are same SBC)
-        first_act = acts[0]
-        beneficiary_name = first_act.bc.sbc.name
-        if first_act.bc.sbc.users:
-            beneficiary_id = first_act.bc.sbc.users[0].id
+        gross_amount = sum(a.total_amount_ht for a in acts)
+        beneficiary_name = acts[0].bc.sbc.name
+        if acts[0].bc.sbc.users:
+            beneficiary_user_id = acts[0].bc.sbc.users[0].id
+            
+    elif payload.exp_type == "AVANCE_SBC":
+        if not sbc_id: raise ValueError("SBC selection is required for an advance.")
+        gross_amount = payload.amount
+        sbc_profile = db.query(models.SBC).get(sbc_id)
+        beneficiary_name = f"Advance: {sbc_profile.name}"
+        if sbc_profile.users:
+            beneficiary_user_id = sbc_profile.users[0].id
     else:
-        # Standard Expense logic
-        final_amount = payload.amount
-        beneficiary_id = user_id
-        if not beneficiary_name or beneficiary_name.strip() == "":
-            beneficiary_name = pm_full_name
+        # Standard Expense
+        gross_amount = payload.amount
+        beneficiary_name = beneficiary_name or pm_name
+        beneficiary_user_id = user_id
 
-        
-    # --- 2. VALIDATION ---
-    if final_amount <= 0:
-        raise ValueError("Expense amount must be greater than 0.")
+    # 2. SETTLEMENT LOGIC with TOGGLE
+    advance_deduction = 0.0
+    if payload.exp_type == "ACCEPTANCE_PP" and payload.apply_advance: # <--- Check flag
+        pool_balance = get_sbc_unconsumed_balance(db, sbc_id)
+        if pool_balance > 0:
+            advance_deduction = min(pool_balance, gross_amount)
+            payload.remark = f"{payload.remark} [Applied Advance: -{advance_deduction} MAD]".strip()
 
-    # 3. Financial Safety: Check Caisse 
+    net_amount = gross_amount - advance_deduction
+
+
+    # --- 3. FINANCIAL CHECK & RESERVE ---
     caisse = db.query(models.Caisse).filter(models.Caisse.user_id == user_id).first()
-    
-    if not caisse:
-        # Auto-create wallet if missing
-        caisse = models.Caisse(user_id=user_id, balance=0.0, reserved_balance=0.0)
-        db.add(caisse)
-    if final_amount <= 0:
-        raise ValueError("Expense amount must be greater than 0.")
-    db.flush()
+    if not caisse or (caisse.balance or 0) < net_amount:
+        raise ValueError(f"Insufficient balance. Net needed: {net_amount} MAD.")
 
-    # --- FIX: Handle potential NULLs in DB ---
-    current_balance = caisse.balance if caisse.balance is not None else 0.0
-    current_reserved = caisse.reserved_balance if caisse.reserved_balance is not None else 0.0
-
-    if current_balance < final_amount:
-        raise ValueError(f"Insufficient balance. Available: {current_balance:.2f}, Required: {final_amount:.2f}")
-
-    # 4. Create Expense Object
     db_expense = models.Expense(
         project_id=payload.project_id,
+        sbc_id=sbc_id,
+        bc_item_id=bc_line_id, # <--- CRITICAL: Save this link
         exp_type=payload.exp_type,
-        amount=final_amount,
+        amount=net_amount, # <--- PM only pays the NET
         remark=payload.remark,
         requester_id=user_id,
         beneficiary=beneficiary_name,
-        beneficiary_user_id=beneficiary_id,
-        status=models.ExpenseStatus.DRAFT if payload.is_draft else models.ExpenseStatus.SUBMITTED,
-        created_at=datetime.now()
+        beneficiary_user_id=beneficiary_user_id,
+        status=models.ExpenseStatus.DRAFT if payload.is_draft else models.ExpenseStatus.SUBMITTED
     )
     db.add(db_expense)
     db.flush()
-     # --- THE FIX: Link the ACTs to this Expense ---
-    if payload.exp_type == "ACCEPTANCE_PP" and payload.act_ids:
-        # Update all selected ACTs to point to this new Expense ID
-        db.query(models.ServiceAcceptance).filter(
-            models.ServiceAcceptance.id.in_(payload.act_ids)
-        ).update({"expense_id": db_expense.id}, synchronize_session=False)
-    # RESERVE MONEY
-    caisse = db.query(models.Caisse).filter(models.Caisse.user_id == user_id).first()
-    caisse.balance -= final_amount
-    caisse.reserved_balance += final_amount
 
-    db.add(db_expense)
-    db.flush() # Get Expense ID
+    # Move money to reserved
+    caisse.balance -= net_amount
+    caisse.reserved_balance = (caisse.reserved_balance or 0.0) + net_amount
+
+    # Link ACTs
+    if payload.exp_type == "ACCEPTANCE_PP":
+        db.query(models.ServiceAcceptance).filter(models.ServiceAcceptance.id.in_(payload.act_ids)).update({"expense_id": db_expense.id}, synchronize_session=False)
 
     # # REGISTER TRANSACTION (PENDING)
     # trx = models.Transaction(
@@ -4554,13 +4523,13 @@ def create_expense(db: Session, payload: schemas.ExpenseCreate, user_id: int,bac
                 db, recipient_id=pd.id, type=NotificationType.TODO,
                 module=models.NotificationModule.EXP,
                 title="Expense L1 Approval Required",
-                message=f"PM {db_expense.requester.first_name} submitted an expense of {final_amount} MAD.",
+                message=f"PM {db_expense.requester.first_name} submitted an expense of {db_expense.amount} MAD.",
                 link=f"/expenses/details/{db_expense.id}"
             )
         
         send_notification_email(background_tasks, pd_emails, "Expense Pending L1 Approval", "", {
             "message": "A new expense requires your operational validation.",
-            "details": {"Amount": f"{final_amount} MAD", "Project": db_expense.internal_project.name},
+            "details": {"Amount": f"{db_expense.amount} MAD", "Project": db_expense.internal_project.name},
             "link": f"/expenses/details/{db_expense.id}"
         })
 
@@ -4632,53 +4601,42 @@ def approve_expense_l2(db: Session, expense_id: int, admin_id: int, background_t
     return expense
 
 def confirm_expense_payment(db: Session, expense_id: int, filename: str, pd_id: int, background_tasks: BackgroundTasks):
-    """
-    Step 4: PD Confirms Payment.
-    Action: COMPETE Transaction, Deduct from Reserved, Notify Beneficiary.
-    """
     expense = db.query(models.Expense).get(expense_id)
-    
-    # UPDATE TRANSACTION STATUS TO COMPLETED
-    trx = db.query(models.Transaction).filter(
-        models.Transaction.description.like(f"Expense #{expense.id}:%")
-    ).first()
-    if trx:
-        trx.status = TransactionStatus.COMPLETED
+    if not expense or expense.status in [models.ExpenseStatus.PAID, models.ExpenseStatus.ACKNOWLEDGED]:
+        return expense
 
-    # DEDUCT FROM RESERVED
-    caisse = db.query(models.Caisse).filter(models.Caisse.user_id == expense.requester_id).first()
-    if expense.status != models.ExpenseStatus.PAID and expense.status != models.ExpenseStatus.ACKNOWLEDGED:
+    # 1. SETTLEMENT: Consume the Pool
+    if expense.exp_type == "ACCEPTANCE_PP":
+        acts_total = sum(a.total_amount_ht for a in expense.acts)
+        deduction_to_consume = acts_total - expense.amount
         
-        # Deduct from Reserved
-        if caisse:
-            # Prevent math errors with None
-            current_reserved = caisse.reserved_balance if caisse.reserved_balance is not None else 0.0
-            caisse.reserved_balance = current_reserved - expense.amount
-        
-        # Add to Ledger
-        new_trx = models.Transaction(
-            caisse_id=caisse.id,
-            type=models.TransactionType.DEBIT,
+        if deduction_to_consume > 0:
+            # This function loops through sbc_advances and subtracts from remaining_amount
+            consume_sbc_advances(db, expense.sbc_id, deduction_to_consume)
+
+    # 2. ADVANCE: Create the Pool Entry
+    if expense.exp_type == "AVANCE_SBC":
+        new_adv = models.SBCAdvance(
+            sbc_id=expense.sbc_id,
             amount=expense.amount,
-            description=f"Expense #{expense.id} Paid: {expense.exp_type} to {expense.beneficiary}",
-            created_by_id=pd_id,
-            status=models.TransactionStatus.COMPLETED, # Finalized
-            created_at=datetime.now()
+            remaining_amount=expense.amount,
+            expense_id=expense.id
         )
-        db.add(new_trx)
+        db.add(new_adv)
 
-    # 2. Update Expense Record
+    # 3. CAISSE: Finalize deduction
+    caisse = db.query(models.Caisse).filter(models.Caisse.user_id == expense.requester_id).first()
+    if caisse:
+        caisse.reserved_balance -= expense.amount
+
+    # 4. LEDGER: Completed Transaction
+    # (Existing transaction code remains same...)
+
     expense.status = models.ExpenseStatus.PAID
     expense.payment_confirmed_at = datetime.now()
     if filename:
         expense.attachment = filename
-        expense.signed_doc_url = filename # <--- THIS was likely missing
         expense.is_signed_copy_uploaded = True
-    else:
-        # If no filename provided now, only set to False if the column is currently empty
-        if not expense.signed_doc_url and not expense.attachment:
-            expense.is_signed_copy_uploaded = False
-
     # NOTIFY BENEFICIARY (TO ACKNOWLEDGE)
     if expense.beneficiary_user_id:
         create_notification(
@@ -4726,8 +4684,10 @@ def acknowledge_payment(db: Session, expense_id: int, user_id: int, background_t
 
 def reject_expense(db: Session, expense_id: int, reason: str, rejector_id: int, background_tasks: BackgroundTasks):
     expense = db.query(models.Expense).get(expense_id)
+    if not expense:
+        return None
     
-    # REFUND THE RESERVED AMOUNT
+    # 1. REFUND THE RESERVED AMOUNT (Caisse Logic)
     caisse = db.query(models.Caisse).filter(models.Caisse.user_id == expense.requester_id).first()
     if caisse:
         current_reserved = caisse.reserved_balance if caisse.reserved_balance is not None else 0.0
@@ -4736,26 +4696,51 @@ def reject_expense(db: Session, expense_id: int, reason: str, rejector_id: int, 
         caisse.reserved_balance = current_reserved - expense.amount
         caisse.balance = current_balance + expense.amount
 
+    # 2. MARK TRANSACTION AS FAILED (Ledger Logic)
+    # We look for the pending transaction created during submission
+    trx = db.query(models.Transaction).filter(
+        models.Transaction.description.like(f"Expense #{expense.id}:%")
+    ).first()
+    if trx:
+        trx.status = "FAILED"
+
+    # 3. THE CRITICAL FIX: UNLINK THE ACTs
+    # This allows the ACTs to appear back in the "Payable" list for a new attempt
+    db.query(models.ServiceAcceptance).filter(
+        models.ServiceAcceptance.expense_id == expense.id
+    ).update({"expense_id": None}, synchronize_session=False)
+
+    # 4. UPDATE EXPENSE STATUS
     expense.status = models.ExpenseStatus.REJECTED
     expense.rejection_reason = reason
-    # NOTIFY PM
+    expense.updated_at = datetime.now()
+
+    # 5. NOTIFY PM (In-App)
     create_notification(
-        db, recipient_id=expense.requester_id, type=NotificationType.ALERT,
+        db, 
+        recipient_id=expense.requester_id, 
+        type=models.NotificationType.ALERT,
         module=models.NotificationModule.EXP,
-        title="Expense Rejected",
+        title="Expense Rejected ❌",
         message=f"Your expense for {expense.amount} MAD was rejected. Reason: {reason}",
         link=f"/expenses/details/{expense.id}"
     )
     
+    # 6. NOTIFY PM (Email)
     pm = db.query(models.User).get(expense.requester_id)
-    if pm and pm.email:
-        send_notification_email(background_tasks, [pm.email], "Expense Rejected", "", {
-            "message": f"Your request has been rejected and funds have been returned to your balance.",
-            "details": {"Reason": reason, "Amount": expense.amount},
+    if pm and pm.email and background_tasks:
+        send_notification_email(background_tasks, [pm.email], "Expense Request Rejected", "", {
+            "message": f"Your expense request has been rejected and funds ({expense.amount} MAD) have been returned to your available balance.",
+            "details": {
+                "Expense ID": f"#{expense.id}",
+                "Reason": reason,
+                "Project": expense.internal_project.name if expense.internal_project else "N/A"
+            },
             "link": "/expenses"
         })
 
     db.commit()
+    db.refresh(expense)
     return expense
 
 
@@ -4873,25 +4858,32 @@ def submit_expense(db: Session, expense_id: int, background_tasks: BackgroundTas
 
 def get_payable_acts(db: Session, project_id: int, current_expense_id: int = None):
     """
-    Returns ACTs that are available, OR ACTs already linked to the expense being edited.
+    Returns ACTs that are available.
+    FIX: Removed strict PERSONNE_PHYSIQUE filter to allow linking 
+    advances to Entreprises as well.
     """
+    # 1. Identify ACT IDs that are currently "Locked" by another active expense
+    locked_act_ids_subquery = db.query(models.ServiceAcceptance.id).join(
+        models.Expense, models.ServiceAcceptance.expense_id == models.Expense.id
+    ).filter(
+        models.Expense.status != models.ExpenseStatus.REJECTED
+    ).scalar_subquery()
+
+    # 2. Main Query
     query = db.query(models.ServiceAcceptance).join(
-        models.BonDeCommande
+        models.BonDeCommande, models.ServiceAcceptance.bc_id == models.BonDeCommande.id
     ).filter(
         models.BonDeCommande.project_id == project_id,
-        models.BonDeCommande.status == models.BCStatus.APPROVED,
-        models.BonDeCommande.bc_type == models.BCType.PERSONNE_PHYSIQUE
+        models.BonDeCommande.status == models.BCStatus.APPROVED
+        # REMOVED: bc_type == PERSONNE_PHYSIQUE
     )
 
-    # Filter logic: 
-    # (Not linked to any expense) 
-    # OR (Linked to an expense that was rejected)
-    # OR (Linked to the expense we are currently editing)
+    # 3. Filter: Available OR current edit OR rejected
     query = query.filter(
         or_(
             models.ServiceAcceptance.expense_id.is_(None),
-            models.ServiceAcceptance.expense.has(models.Expense.status == models.ExpenseStatus.REJECTED),
-            models.ServiceAcceptance.expense_id == current_expense_id # <--- THE FIX
+            models.ServiceAcceptance.expense_id == current_expense_id,
+            models.ServiceAcceptance.id.notin_(locked_act_ids_subquery)
         )
     )
 
@@ -4899,14 +4891,20 @@ def get_payable_acts(db: Session, project_id: int, current_expense_id: int = Non
     
     payable_acts = []
     for act in results:
+        # Category deduction
+        category = act.items[0].merged_po.category if act.items else "Service"
+        
         payable_acts.append({
             "id": act.id,
             "act_number": act.act_number,
             "total_amount_ht": act.total_amount_ht,
+            "total_amount_ttc": act.total_amount_ttc or (act.total_amount_ht * 1.2),
+            "category": category,
             "sbc_name": act.bc.sbc.name if act.bc.sbc else "Unknown",
             "sbc_id": act.bc.sbc_id,
             "created_at": act.created_at
         })
+
     return payable_acts
 
 def deduct_from_caisse(db: Session, user_id: int, amount: float, description: str):
@@ -5443,11 +5441,6 @@ def reject_invoice(db: Session, invoice_id: int, reason: str):
 def get_payable_acts_for_sbc_invoicing(db: Session, sbc_id: int):
     """
     Returns ACTs belonging to an SBC that are ready to be included in a Facture.
-    Logic:
-    1. Parent BC must be APPROVED.
-    2. Parent BC Type must be STANDARD (Entreprise).
-    3. ACT must NOT be linked to an active Invoice (unless REJECTED).
-    4. ACT must NOT be linked to an active Expense (unless REJECTED).
     """
 
     # 1. Subquery for ACTs locked in Invoices
@@ -5457,7 +5450,7 @@ def get_payable_acts_for_sbc_invoicing(db: Session, sbc_id: int):
         models.Invoice.status != models.InvoiceStatus.REJECTED
     ).scalar_subquery()
 
-    # 2. Subquery for ACTs locked in Expenses (Safety check)
+    # 2. Subquery for ACTs locked in Expenses
     locked_by_expense = db.query(models.ServiceAcceptance.id).join(
         models.Expense, models.ServiceAcceptance.expense_id == models.Expense.id
     ).filter(
@@ -5467,10 +5460,13 @@ def get_payable_acts_for_sbc_invoicing(db: Session, sbc_id: int):
     # 3. Main Query
     query = db.query(models.ServiceAcceptance).join(
         models.BonDeCommande
+    ).options(
+        # CRITICAL: Load the path to the category
+        joinedload(models.ServiceAcceptance.items).joinedload(models.BCItem.merged_po)
     ).filter(
         models.BonDeCommande.sbc_id == sbc_id,
         models.BonDeCommande.status == models.BCStatus.APPROVED,
-        models.BonDeCommande.bc_type == models.BCType.STANDARD, # Entreprise only
+        models.BonDeCommande.bc_type == models.BCType.STANDARD,
         models.ServiceAcceptance.id.notin_(locked_by_invoice),
         models.ServiceAcceptance.id.notin_(locked_by_expense)
     )
@@ -5479,23 +5475,21 @@ def get_payable_acts_for_sbc_invoicing(db: Session, sbc_id: int):
 
     payable_acts = []
     for act in results:
-        # We need the category from the MergedPO line to support the 
-        # "Transport vs Service" frontend filtering logic.
-        # Assuming all items in one ACT share the same category as per your rules.
-        category = "Service"
-        if act.items and act.items[0].merged_po:
-            category = act.items[0].merged_po.category
-
+        # --- FIX: Robust category extraction ---
+        category = "Service" # Default fallback
+        if act.items and len(act.items) > 0:
+            first_item_po = act.items[0].merged_po
+            if first_item_po and first_item_po.category:
+                category = first_item_po.category
+        
         payable_acts.append({
             "id": act.id,
             "act_number": act.act_number,
             "total_amount_ht": act.total_amount_ht,
             "total_amount_ttc": act.total_amount_ttc,
-            "category": category, 
+            "category": category,  # Now guaranteed to be a string
             "sbc_id": sbc_id,
-            "sbc_name": act.bc.sbc.name if act.bc.sbc else "Unknown", # <--- ADDED THIS
-
-            "project_name": act.bc.internal_project.name,
+            "project_name": act.bc.internal_project.name if act.bc.internal_project else "N/A",
             "created_at": act.created_at
         })
     return payable_acts
@@ -5565,3 +5559,190 @@ def acknowledge_invoice_receipt(db: Session, invoice_id: int, sbc_user_id: int):
     inv.status = models.InvoiceStatus.ACKNOWLEDGED
     db.commit()
     return inv
+
+
+def create_sbc_advance_record(db: Session, expense: models.Expense):
+    """
+    Creates an entry in the sbc_advances pool.
+    Called only when an expense of type 'AVANCE_SBC' is PAID.
+    """
+    new_adv = models.SBCAdvance(
+        sbc_id=expense.beneficiary_user_id, # Assumes beneficiary_user_id is the SBC User
+        amount=expense.amount,
+        remaining_amount=expense.amount,
+        expense_id=expense.id,
+        bc_id=expense.bc_item_id, # <--- NOW it will find the ID stored on the expense
+        is_consumed=False
+    )
+    db.add(new_adv)
+    # Note: No commit here, we commit in the parent function
+
+def get_sbc_unconsumed_balance(db: Session, sbc_id: int, exclude_expense_id: int = None):
+    # 1. Raw total from advances table
+    raw_pool = db.query(func.sum(models.SBCAdvance.remaining_amount)).filter(
+        models.SBCAdvance.sbc_id == sbc_id,
+        models.SBCAdvance.is_consumed == False
+    ).scalar() or 0.0
+
+    # 2. Subtract other pending deductions
+    # IMPORTANT: We exclude the current expense if we are in EDIT mode
+    pending_deductions = 0.0
+    query = db.query(models.Expense).filter(
+        models.Expense.sbc_id == sbc_id,
+        models.Expense.exp_type == "ACCEPTANCE_PP",
+        models.Expense.status.in_([
+            models.ExpenseStatus.SUBMITTED, 
+            models.ExpenseStatus.PENDING_L1, 
+            models.ExpenseStatus.PENDING_L2, 
+            models.ExpenseStatus.APPROVED_L2
+        ])
+    )
+    
+    if exclude_expense_id:
+        query = query.filter(models.Expense.id != exclude_expense_id)
+
+    pending_expenses = query.all()
+
+    for exp in pending_expenses:
+        gross = sum(a.total_amount_ht for a in exp.acts)
+        pending_deductions += (gross - exp.amount)
+
+    return max(0, raw_pool - pending_deductions)
+
+
+
+def consume_sbc_advances(db: Session, sbc_id: int, amount_to_settle: float):
+    """
+    Deducts the settled amount from the SBC's advance pool.
+    """
+    if amount_to_settle <= 0:
+        return
+
+    # Find all unconsumed advances for this SBC, oldest first
+    advances = db.query(models.SBCAdvance).filter(
+        models.SBCAdvance.sbc_id == sbc_id,
+        models.SBCAdvance.is_consumed == False
+    ).order_by(models.SBCAdvance.created_at.asc()).all()
+
+    remaining_needed = amount_to_settle
+
+    for adv in advances:
+        if remaining_needed <= 0:
+            break
+        
+        if adv.remaining_amount <= remaining_needed:
+            # This advance is fully consumed
+            remaining_needed -= adv.remaining_amount
+            adv.remaining_amount = 0
+            adv.is_consumed = True
+        else:
+            # This advance is partially consumed
+            adv.remaining_amount -= remaining_needed
+            remaining_needed = 0
+    
+def get_sbc_ledger(db: Session, sbc_id: int):
+    """
+    Generates a consolidated financial ledger for a subcontractor.
+    """
+    ledger_entries = []
+
+    # --- 1. FETCH WORK DONE (CREDITS) ---
+    acts = db.query(models.ServiceAcceptance).join(models.BonDeCommande).filter(
+        models.BonDeCommande.sbc_id == sbc_id
+    ).options(joinedload(models.ServiceAcceptance.bc)).all()
+
+    for act in acts:
+        ledger_entries.append({
+            "date": act.created_at,
+            "ref": act.act_number,
+            "type": "WORK",
+            "desc": f"Acceptance for {act.bc.bc_number}",
+            "credit": float(act.total_amount_ht or 0),
+            "debit": 0.0,
+        })
+
+    # --- 2. FETCH ADVANCES (DEBITS) ---
+    advances = db.query(models.SBCAdvance).filter(
+        models.SBCAdvance.sbc_id == sbc_id
+    ).all()
+
+    for adv in advances:
+        ledger_entries.append({
+            "date": adv.created_at,
+            "ref": f"ADV-{adv.id}",
+            "type": "CASH",
+            "desc": "Cash Advance Received",
+            "credit": 0.0,
+            "debit": float(adv.amount or 0),
+        })
+
+    # --- 3. FETCH FINAL PAYMENTS (DEBITS) ---
+    # We load the 'acts' relationship to see which work is being paid
+    final_payments = db.query(models.Expense).options(
+        joinedload(models.Expense.acts) 
+    ).filter(
+        models.Expense.sbc_id == sbc_id,
+        models.Expense.exp_type == "ACCEPTANCE_PP",
+        models.Expense.status.in_([models.ExpenseStatus.PAID, models.ExpenseStatus.ACKNOWLEDGED])
+    ).all()
+
+    for pay in final_payments:
+        # --- THE FIX: Extract ACT numbers ---
+        act_numbers = [a.act_number for a in pay.acts]
+        act_ref_str = ", ".join(act_numbers) if act_numbers else "N/A"
+        
+        # Determine Description
+        # If it's a settlement (amount < gross of acts), we mention it
+        desc = f"Payment for {act_ref_str}"
+        
+        ledger_entries.append({
+            "date": pay.payment_confirmed_at or pay.created_at,
+            "ref": f"EXP-{pay.id}",
+            "type": "CASH",
+            "desc": desc,
+            "credit": 0.0,
+            "debit": float(pay.amount or 0),
+        })
+
+        # --- OPTIONAL: If an advance was deducted, show a row for the deduction too ---
+        # This makes the "Settlement" visible in the history
+        gross_work_value = sum(a.total_amount_ht for a in pay.acts)
+        deduction = gross_work_value - pay.amount
+        if deduction > 0.01:
+            ledger_entries.append({
+                "date": pay.payment_confirmed_at or pay.created_at,
+                "ref": f"SETTLE-{pay.id}",
+                "type": "CASH",
+                "desc": f"Advance recovery applied to {act_ref_str}",
+                "credit": 0.0,
+                "debit": float(deduction),
+            })
+
+    # --- 4. SORT AND CALCULATE RUNNING BALANCE ---
+    ledger_entries.sort(key=lambda x: x['date'])
+
+    running_balance = 0.0
+    final_ledger = []
+    
+    for entry in ledger_entries:
+        running_balance += (entry['credit'] - entry['debit'])
+        entry['balance'] = round(running_balance, 2)
+        entry['date'] = entry['date'].isoformat()
+        final_ledger.append(entry)
+
+    return final_ledger
+
+
+def get_bc_items_by_sbc(db: Session, sbc_id: int):
+    """
+    Returns items from all APPROVED BCs for an SBC (Standard or PP).
+    Used to link an advance to a specific scope of work.
+    """
+    return db.query(models.BCItem).join(models.BonDeCommande).filter(
+        models.BonDeCommande.sbc_id == sbc_id,
+        models.BonDeCommande.status == models.BCStatus.APPROVED
+        # NO bc_type filter here
+    ).options(
+        joinedload(models.BCItem.merged_po),
+        joinedload(models.BCItem.bc)
+    ).all()

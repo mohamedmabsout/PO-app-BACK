@@ -606,6 +606,8 @@ class Expense(Base):
     
     # Core Data
     project_id = Column(Integer, ForeignKey("internal_projects.id"))
+    sbc_id = Column(Integer, ForeignKey("sbcs.id"), nullable=True) 
+
     exp_type = Column(String(50)) # Can be linked to ExpenseType name or ID
     amount = Column(Float, nullable=False)
     remark = Column(Text)
@@ -641,7 +643,8 @@ class Expense(Base):
     # --- NEW: Document Control ---
     signed_doc_url = Column(String(500), nullable=True) # The physical signed PDF scan
     is_signed_copy_uploaded = Column(Boolean, default=False) # Helper flag for the 24h reminder
-    
+    bc_item_id = Column(Integer, ForeignKey("bc_items.id"), nullable=True)
+
     # Relationships
     acts = relationship(
         "ServiceAcceptance", 
@@ -655,6 +658,9 @@ class Expense(Base):
     l1_approver = relationship("User", foreign_keys=[l1_approver_id])
     l2_approver = relationship("User", foreign_keys=[l2_approver_id])
     beneficiary_user = relationship("User", foreign_keys=[beneficiary_user_id])
+    sbc = relationship("SBC")
+    bc_item = relationship("BCItem")
+
 
 class ExpenseType(Base):
     __tablename__ = "expense_types"
@@ -687,3 +693,25 @@ class Invoice(Base):
     sbc = relationship("SBC")
     # One Invoice covers Many ACTs
     acts = relationship("ServiceAcceptance", back_populates="invoice")
+
+
+class SBCAdvance(Base):
+    __tablename__ = "sbc_advances"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    sbc_id = Column(Integer, ForeignKey("sbcs.id"), nullable=False)
+    
+    # Financials
+    amount = Column(Float, nullable=False) # The original advance amount
+    remaining_amount = Column(Float, nullable=False) # What hasn't been deducted yet
+    
+    # Traceability
+    expense_id = Column(Integer, ForeignKey("expenses.id"), nullable=False) # Link to the cash movement
+    bc_id = Column(Integer, ForeignKey("bon_de_commandes.id"), nullable=True) # Optional: Link to a specific BC
+    
+    is_consumed = Column(Boolean, default=False) # True when remaining_amount reaches 0
+    created_at = Column(DateTime, server_default=func.now())
+    
+    # Relationships
+    sbc = relationship("SBC", backref="advances")
+    origin_expense = relationship("Expense", foreign_keys=[expense_id])

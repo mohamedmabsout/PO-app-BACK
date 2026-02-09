@@ -9,9 +9,11 @@ from reportlab.lib.enums import TA_LEFT, TA_RIGHT, TA_CENTER
 from xml.sax.saxutils import escape
 from reportlab.pdfgen import canvas
 from reportlab.lib import colors
-
+from fastapi import Depends
 # Assuming you import your models to check the Enum
-from .. import models 
+from .. import models , crud
+from ..dependencies import get_db
+from sqlalchemy.orm import object_session # <--- ADD THIS IMPORT
 
 # SIB Legal Information constants
 SIB_NAME = "SOLUTION INTEGRALE BUILDING (SIB) SARL"
@@ -410,11 +412,16 @@ def generate_expense_pdf(expense):
 
 
 def generate_invoice_pdf(invoice):
+    """Generate PDF for a given invoice."""
+    db = object_session(invoice)
+
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=10*mm, leftMargin=10*mm, topMargin=10*mm, bottomMargin=10*mm)
     elements = []
     styles = getSampleStyleSheet()
-    
+    style_bold = ParagraphStyle(
+        'Bold', parent=styles['Normal'], fontSize=8, fontName='Helvetica-Bold'
+    )
     # Custom Styles
     style_h = ParagraphStyle('Header', parent=styles['Normal'], fontSize=8, leading=10)
     style_title = ParagraphStyle('Title', parent=styles['Normal'], fontSize=16, leading=20, fontName='Helvetica-Bold', alignment=TA_CENTER)
@@ -520,6 +527,7 @@ def generate_invoice_pdf(invoice):
     ]))
 
     elements.append(t_items)
+    adv_balance = crud.get_sbc_unconsumed_balance(db, invoice.sbc_id)
 
     # --- 4. TOTALS ---
     totals = [
@@ -527,10 +535,16 @@ def generate_invoice_pdf(invoice):
         ["", f"TVA {int((invoice.total_tax_amount/invoice.total_amount_ht)*100) if invoice.total_amount_ht > 0 else 20}%:", f"{invoice.total_tax_amount:,.2f}"],
         ["", "Total Amount (Incl. Tax):", f"{invoice.total_amount_ttc:,.2f} MAD"]
     ]
+    if adv_balance > 0:
+        net_to_pay = max(0, invoice.total_amount_ttc - adv_balance)
+        totals.append(["Less Advances Received:", f"- {adv_balance:,.2f} MAD"])
+        totals.append([Paragraph("<b>NET TO PAY:</b>", style_bold), 
+                            Paragraph(f"<b>{net_to_pay:,.2f} MAD</b>", style_bold)])
+
     t_tot = Table(totals, colWidths=[10*cm, 6*cm, 3*cm])
     t_tot.setStyle(TableStyle([('FONTNAME', (1,2), (2,2), 'Helvetica-Bold'), ('ALIGN', (1,0), (2,2), 'RIGHT')]))
     elements.append(t_tot)
-
+    
     doc.build(elements)
     buffer.seek(0)
     return buffer

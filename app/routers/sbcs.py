@@ -337,3 +337,7 @@ def download_sbc_document(filename: str):
     )
 
 
+@router.get("/{id}/advance-balance")
+def read_sbc_advance_balance(id: int, db: Session = Depends(get_db)):
+    balance = crud.get_sbc_unconsumed_balance(db, id)
+    return {"sbc_id": id, "total_unconsumed": balance}

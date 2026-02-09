@@ -98,6 +98,24 @@ def get_payment_receipt(filename: str):
     return FileResponse(path)
 
 
+@router.get("/my-ledger", response_model=List[dict])
+def get_current_sbc_ledger(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """
+    SBC Portal: Returns the logged-in subcontractor's financial statement.
+    The sbc_id is pulled directly from the user's account info.
+    """
+    if current_user.role != models.UserRole.SBC:
+        raise HTTPException(status_code=403, detail="Only subcontractors can access this ledger.")
+    
+    if not current_user.sbc_id:
+        raise HTTPException(status_code=400, detail="User account is not linked to a subcontractor profile.")
+
+    # Calls the CRUD function we built previously
+    return crud.get_sbc_ledger(db, current_user.sbc_id)
+
 
 @router.get("/{id}", response_model=schemas.InvoiceDetail)
 def get_invoice_details(id: int, db: Session = Depends(get_db)):

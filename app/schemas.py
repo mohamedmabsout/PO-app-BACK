@@ -754,8 +754,11 @@ class ExpenseBase(BaseModel):
 
 
 class ExpenseCreate(ExpenseBase):
-
-    pass
+    sbc_id: Optional[int] = None
+    bc_id: Optional[int] = None # For advances linked to BC lines
+    apply_advance: bool = True
+    act_ids: List[int] = []
+    is_draft: bool = False
 
 class ServiceAcceptanceMini(BaseModel):
     id: int
@@ -879,8 +882,8 @@ class PayableActResponse(BaseModel):
     id: int
     act_number: str
     total_amount_ht: float
-    total_amount_ttc: float
-    category: str
+    total_amount_ttc: Optional[float] = 0.0 
+    category: Optional[str] = "Service" # <--- Change to Optional with a default
     project_name: Optional[str] = None
     sbc_name: str
     sbc_id: Optional[int] = None # <--- Allow None to prevent crashes

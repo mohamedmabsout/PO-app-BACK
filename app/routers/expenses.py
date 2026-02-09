@@ -173,6 +173,24 @@ def get_my_reserved_breakdown(
         models.Expense.status.in_(reserved_statuses)
     ).order_by(models.Expense.created_at.desc()).all()
 
+   
+@router.get("/sbc/{sbc_id}/ledger", response_model=List[dict])
+def get_sbc_financial_status(
+    sbc_id: int, 
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """
+    Public-style Ledger for a Subcontractor.
+    Access: Internal Staff (PM/PD/Admin) to verify debts before paying.
+    """
+    # Security: Ensure role is internal
+    if current_user.role == models.UserRole.SBC:
+        # If an SBC calls this, verify they are only looking at THEIR own ID
+        if current_user.sbc_id != sbc_id:
+            raise HTTPException(status_code=403, detail="Cannot view other SBC ledgers")
+            
+    return crud.get_sbc_ledger(db, sbc_id)
 
 @router.get("/{id}", response_model=schemas.ExpenseResponse)
 def get_expense_details(
@@ -435,3 +453,4 @@ def update_expense(
         
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+ 

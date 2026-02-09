@@ -712,7 +712,7 @@ def read_pending_requests(
     user_id_to_filter = current_user.id if current_user.role == models.UserRole.PD else None
     
     # CRITICAL: If you don't return the result of crud.get_pending_requests, it returns null
-    data = crud.get_pending_requests(db, user_id=user_id_to_filter)
+    data = crud.get_pending_requests(db)
     return data
 
     
@@ -841,6 +841,8 @@ def process_request_endpoint(
         
     except ValueError as e:
         raise HTTPException(400, str(e))
+
+
 @router.get("/history/grouped")
 def get_history_grouped(
     page: int = 1,
@@ -848,3 +850,30 @@ def get_history_grouped(
     db: Session = Depends(get_db)
 ):
     return crud.get_grouped_history(db, page, limit)
+
+
+@router.get("/by-sbc/{sbc_id}")
+def get_bc_items_for_sbc_selection(
+    sbc_id: int, 
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """
+    Returns items from approved BCs to allow PMs to link advances.
+    """
+    items = crud.get_bc_items_by_sbc(db, sbc_id)
+    
+    # We transform the data here so the frontend React-Select can use it directly
+    output = []
+    for item in items:
+        # Create a descriptive label: [BC Number] - [Site Code] - [Description snippet]
+        site = item.merged_po.site_code if item.merged_po else "No Site"
+        desc = item.merged_po.item_description[:40] if item.merged_po else "No Description"
+        
+        output.append({
+            "value": item.id, # The BCItem ID
+            "label": f"{item.bc.bc_number} | {site} ({desc}...)",
+            "bc_number": item.bc.bc_number
+        })
+        
+    return output

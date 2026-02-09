@@ -103,6 +103,7 @@ class NotificationModule(str, enum.Enum):
     DISPATCH = "DISPATCH"     # Site Assignments
     SYSTEM = "SYSTEM"         # SBC Approval, Targets, Compliance
     FACTURATION = "FACTURATION"
+    SBC_ACCOUNT = "SBC_ACCOUNT" # New module for Ledger/Balance alerts
 
 
 class InvoiceStatus(str, enum.Enum):
