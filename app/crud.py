@@ -5439,56 +5439,47 @@ def reject_invoice(db: Session, invoice_id: int, reason: str):
     return inv
 
 def get_payable_acts_for_sbc_invoicing(db: Session, sbc_id: int):
-    """
-    Returns ACTs belonging to an SBC that are ready to be included in a Facture.
-    """
-
-    # 1. Subquery for ACTs locked in Invoices
+    # 1. Subqueries (Keep existing logic for locking)
     locked_by_invoice = db.query(models.ServiceAcceptance.id).join(
         models.Invoice, models.ServiceAcceptance.invoice_id == models.Invoice.id
-    ).filter(
-        models.Invoice.status != models.InvoiceStatus.REJECTED
-    ).scalar_subquery()
+    ).filter(models.Invoice.status != models.InvoiceStatus.REJECTED).scalar_subquery()
 
-    # 2. Subquery for ACTs locked in Expenses
     locked_by_expense = db.query(models.ServiceAcceptance.id).join(
         models.Expense, models.ServiceAcceptance.expense_id == models.Expense.id
-    ).filter(
-        models.Expense.status != models.ExpenseStatus.REJECTED
-    ).scalar_subquery()
+    ).filter(models.Expense.status != models.ExpenseStatus.REJECTED).scalar_subquery()
 
-    # 3. Main Query
-    query = db.query(models.ServiceAcceptance).join(
+    # 2. Main Query
+    results = db.query(models.ServiceAcceptance).join(
         models.BonDeCommande
     ).options(
-        # CRITICAL: Load the path to the category
-        joinedload(models.ServiceAcceptance.items).joinedload(models.BCItem.merged_po)
+        joinedload(models.ServiceAcceptance.items).joinedload(models.BCItem.merged_po),
+        joinedload(models.ServiceAcceptance.bc).joinedload(models.BonDeCommande.sbc) # Ensure SBC is loaded
     ).filter(
         models.BonDeCommande.sbc_id == sbc_id,
         models.BonDeCommande.status == models.BCStatus.APPROVED,
         models.BonDeCommande.bc_type == models.BCType.STANDARD,
         models.ServiceAcceptance.id.notin_(locked_by_invoice),
         models.ServiceAcceptance.id.notin_(locked_by_expense)
-    )
-
-    results = query.all()
+    ).all()
 
     payable_acts = []
     for act in results:
-        # --- FIX: Robust category extraction ---
-        category = "Service" # Default fallback
+        # Robust category extraction
+        category = "Service"
         if act.items and len(act.items) > 0:
             first_item_po = act.items[0].merged_po
             if first_item_po and first_item_po.category:
                 category = first_item_po.category
         
+        # --- THE FIX: ADD sbc_name HERE ---
         payable_acts.append({
             "id": act.id,
             "act_number": act.act_number,
             "total_amount_ht": act.total_amount_ht,
-            "total_amount_ttc": act.total_amount_ttc,
-            "category": category,  # Now guaranteed to be a string
+            "total_amount_ttc": act.total_amount_ttc or (act.total_amount_ht * 1.2),
+            "category": category,
             "sbc_id": sbc_id,
+            "sbc_name": act.bc.sbc.name if act.bc and act.bc.sbc else "Unknown SBC", # <--- ADDED
             "project_name": act.bc.internal_project.name if act.bc.internal_project else "N/A",
             "created_at": act.created_at
         })

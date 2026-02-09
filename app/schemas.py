@@ -882,11 +882,11 @@ class PayableActResponse(BaseModel):
     id: int
     act_number: str
     total_amount_ht: float
-    total_amount_ttc: Optional[float] = 0.0 
-    category: Optional[str] = "Service" # <--- Change to Optional with a default
-    project_name: Optional[str] = None
-    sbc_name: str
-    sbc_id: Optional[int] = None # <--- Allow None to prevent crashes
+    total_amount_ttc: Optional[float] = 0.0
+    category: Optional[str] = "Service"
+    sbc_id: Optional[int] = None
+    sbc_name: Optional[str] = "Unknown SBC" # <--- Change to Optional
+    project_name: Optional[str] = "N/A"
     created_at: datetime
 
     class Config:
