@@ -176,3 +176,37 @@ def sbc_acknowledge_payment(
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@router.get("/{id}/download-bundle")
+async def download_invoice_bundle(
+    id: int, 
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """
+    Re-generates and downloads the ZIP bundle for an existing invoice.
+    Accessible by RAF/Admin (to print/verify) and the SBC (the owner).
+    """
+    invoice = crud.get_invoice_by_id(db, id)
+    if not invoice:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+
+    # SECURITY CHECK
+    is_internal = current_user.role in [models.UserRole.RAF, models.UserRole.ADMIN]
+    is_owner = current_user.role == models.UserRole.SBC and current_user.sbc_id == invoice.sbc_id
+    
+    if not (is_internal or is_owner):
+        raise HTTPException(status_code=403, detail="Not authorized to download this bundle.")
+
+    try:
+        # Create the ZIP in memory using the utility we built earlier
+        zip_buffer = create_invoice_zip(invoice)
+
+        filename = f"Payment_Bundle_{invoice.invoice_number}.zip"
+        return StreamingResponse(
+            iter([zip_buffer.getvalue()]), 
+            media_type="application/x-zip-compressed",
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+    except Exception as e:
+        print(f"Error regenerating ZIP: {e}")
+        raise HTTPException(status_code=500, detail="Failed to generate ZIP bundle")

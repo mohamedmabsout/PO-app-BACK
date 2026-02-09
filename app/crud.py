@@ -47,6 +47,9 @@ PAYMENT_TERM_MAP = {
     "AC1 (100%, Invoice AC -30D, Complete 100%) ▍": "AC PAC 100%",
     "COD": "AC PAC 100%",
 }
+def format_currency_python(value):
+    """Formats a number to '10 000,00 MAD' style in Python"""
+    return f"{value:,.2f} MAD".replace(",", " ").replace(".", ",")
 def send_notification_email(
     background_tasks: BackgroundTasks,
     recipients: List[str],
@@ -5678,36 +5681,40 @@ def get_sbc_ledger(db: Session, sbc_id: int):
     ).all()
 
     for pay in final_payments:
-        # --- THE FIX: Extract ACT numbers ---
         act_numbers = [a.act_number for a in pay.acts]
         act_ref_str = ", ".join(act_numbers) if act_numbers else "N/A"
         
-        # Determine Description
-        # If it's a settlement (amount < gross of acts), we mention it
-        desc = f"Payment for {act_ref_str}"
-        
+        # 1. Row for the Actual Cash Handover (The Net)
+        # This IS a cash movement, so it impacts the balance.
         ledger_entries.append({
             "date": pay.payment_confirmed_at or pay.created_at,
             "ref": f"EXP-{pay.id}",
             "type": "CASH",
-            "desc": desc,
+            "desc": f"Net Cash Payment for {act_ref_str}",
             "credit": 0.0,
-            "debit": float(pay.amount or 0),
+            "debit": float(pay.amount or 0), # Impacts math
         })
 
-        # --- OPTIONAL: If an advance was deducted, show a row for the deduction too ---
-        # This makes the "Settlement" visible in the history
-        gross_work_value = sum(a.total_amount_ht for a in pay.acts)
-        deduction = gross_work_value - pay.amount
-        if deduction > 0.01:
+        # 2. Row for the Advance Consumption (The Information)
+        # This is NOT a new cash movement, so debit is 0.0 for the math.
+        acts_gross_ht = sum(a.total_amount_ht for a in pay.acts)
+        deduction_val = acts_gross_ht - pay.amount
+        
+        if deduction_val > 0.01:
+            # Use the python helper or a direct f-string
+            formatted_deduction = f"{deduction_val:,.2f} MAD" 
+
             ledger_entries.append({
                 "date": pay.payment_confirmed_at or pay.created_at,
                 "ref": f"SETTLE-{pay.id}",
-                "type": "CASH",
-                "desc": f"Advance recovery applied to {act_ref_str}",
+                "type": "INFO", 
+                # FIX: Use the Python-formatted string here
+                "desc": f"Deduction: {formatted_deduction} from previous advances applied to {act_ref_str}",
                 "credit": 0.0,
-                "debit": float(deduction),
+                "debit": 0.0, # Keeps math correct
             })
+
+
 
     # --- 4. SORT AND CALCULATE RUNNING BALANCE ---
     ledger_entries.sort(key=lambda x: x['date'])
