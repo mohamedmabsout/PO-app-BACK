@@ -553,6 +553,9 @@ class FundRequest(Base):
     created_at = Column(DateTime, server_default=func.now())
     approved_at = Column(DateTime, nullable=True)
     completed_at = Column(DateTime, nullable=True)
+    reception_attachment = Column(String(500), nullable=True) # Scan of signed paper
+    confirmed_reception_amount = Column(Float, default=0.0)    # Amount PD typed
+
     
     # Relationships
     requester = relationship("User", foreign_keys=[requester_id])

@@ -3993,10 +3993,11 @@ def approve_fund_request(db: Session, req_id: int, admin_id: int, approved_items
     return req
 
 
-def confirm_fund_reception(db: Session, req_id: int, pd_user_id: int): # <--- Add the 3rd argument here
+def confirm_fund_reception(db: Session, req_id: int, pd_user_id: int, received_amount: float, filename: str):
     """
-    Finalizes the 'In Transit' money. Moves it from Transactions (Pending) 
-    to the PM's actual Caisse Balance.
+    Hardened confirmation process:
+    PD must type the amount and upload the signed paper to move money 
+    from 'Pending' to 'Balance'.
     """
     # 1. Find all PENDING transactions linked to this request
     pending_txs = db.query(models.Transaction).filter(
@@ -4005,39 +4006,50 @@ def confirm_fund_reception(db: Session, req_id: int, pd_user_id: int): # <--- Ad
     ).all()
 
     if not pending_txs:
-        return {"message": "No pending funds to confirm."}
+        raise ValueError("No pending funds found for this request. It may have already been confirmed.")
 
+    # 2. VALIDATION: Check if typed amount matches system total
+    total_to_confirm = sum(tx.amount for tx in pending_txs)
+    
+    # We use abs() difference < 0.01 to handle potential float precision issues
+    if abs(received_amount - total_to_confirm) > 0.01:
+        raise ValueError(
+            f"Verification Failed: The system expected {total_to_confirm:,.2f} MAD based on approvals, "
+            f"but you declared receiving {received_amount:,.2f} MAD. Please check the cash again."
+        )
+
+    # 3. Process the money movement
     for tx in pending_txs:
-        # 2. Update the Wallet Balance
+        # Update the target PM's Wallet Balance
         wallet = db.query(models.Caisse).get(tx.caisse_id)
         if wallet:
             # Handle potential NULLs safely
             wallet.balance = (wallet.balance or 0.0) + tx.amount
 
-        # 3. Mark Transaction as COMPLETED (No longer in transit)
+        # Mark Transaction as COMPLETED
         tx.status = models.TransactionStatus.COMPLETED
-        tx.created_at = datetime.now() # Record the confirmation time
-        tx.created_by_id = pd_user_id   # Record that the PD did this
- 
-
-    # 4. Check if the Parent Request should move to COMPLETED
-    req = db.query(models.FundRequest).get(req_id)
-    if req:
-        total_requested = sum(i.requested_amount for i in req.items)
+        tx.created_by_id = pd_user_id # Records who physically confirmed the cash
+        tx.created_at = datetime.now()
         
-        # Are there any other pending transactions for this request that we missed?
-        still_pending_count = db.query(models.Transaction).filter(
-            models.Transaction.related_request_id == req_id,
-            models.Transaction.status == models.TransactionStatus.PENDING
-        ).count()
+    # 4. Finalize the Parent Request
+    req = db.query(models.FundRequest).get(req_id)
+    if not req:
+        raise ValueError("Parent request record not found.")
 
-        # If we have paid out the full amount and all cash is confirmed received
-        if req.paid_amount >= (total_requested - 0.01) and still_pending_count == 0:
-            req.status = models.FundRequestStatus.COMPLETED
-            req.completed_at = datetime.now()
+    # Update Request Header with the proof
+    req.status = models.FundRequestStatus.COMPLETED
+    req.completed_at = datetime.now()
+    
+    # Store the PD's confirmation data (Assumes these columns exist in models.py)
+    if hasattr(req, 'reception_attachment'):
+        req.reception_attachment = filename
+    if hasattr(req, 'confirmed_reception_amount'):
+        req.confirmed_reception_amount = received_amount
 
     db.commit()
-    return {"message": "Funds confirmed. Wallet balances updated."}
+    db.refresh(req)
+    
+    return req
 
 def get_caisse_stats(db: Session, user: models.User):
     wallet = db.query(models.Caisse).filter(models.Caisse.user_id == user.id).first()
