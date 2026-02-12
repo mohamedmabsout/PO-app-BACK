@@ -12,7 +12,7 @@ from sqlalchemy.orm import joinedload,Query
 import sqlalchemy as sa
 from sqlalchemy import func, case, extract, and_,distinct,union_all
 from sqlalchemy.sql.functions import coalesce # More explicit import
-from sqlalchemy.orm import aliased
+from sqlalchemy.orm import aliased,contains_eager
 from .enum import ProjectType, UserRole, SBCStatus, BCStatus, NotificationType, BCType,AssignmentStatus, ValidationState, ItemGlobalStatus, SBCType,TransactionType,TransactionStatus,NotificationModule
 import pandas as pd
 import io
@@ -2822,48 +2822,64 @@ def get_bcs_by_status(db: Session, status: models.BCStatus, search_term: Optiona
 
         )
     return query.all()
-def get_all_bcs(db: Session, current_user: models.User, search: Optional[str] = None, status_filter: Optional[str] = None): # <-- NEW ARGUMENT:
-    query = db.query(models.BonDeCommande).options(
-        joinedload(models.BonDeCommande.sbc),
-        joinedload(models.BonDeCommande.internal_project),
-        joinedload(models.BonDeCommande.creator) 
-    )
-    query = query.join(models.InternalProject)
 
-    # Apply role-based filtering
-    if current_user.role == models.UserRole.PM: 
+
+def get_all_bcs(db: Session, current_user: models.User, search: Optional[str] = None, status_filter: Optional[str] = None):
+    # 1. Start query from BonDeCommande
+    query = db.query(models.BonDeCommande)
+
+    # 2. MANDATORY: Explicit Joins
+    # We join these tables so SQL can actually see the "name" and "short_name" columns
+    query = query.join(models.InternalProject, models.BonDeCommande.project_id == models.InternalProject.id)
+    query = query.join(models.SBC, models.BonDeCommande.sbc_id == models.SBC.id)
+
+    # 3. Role-based filtering
+    role_str = str(current_user.role).upper()
+    if "ADMIN" in role_str or "RAF" in role_str:
+        pass # Admin sees everything
+    elif "PM" in role_str:
         query = query.filter(
             or_(
                 models.BonDeCommande.creator_id == current_user.id,
                 models.InternalProject.project_manager_id == current_user.id
             )
         )
-    elif current_user.role == models.UserRole.SBC:
-        sbcId=query.with_entities(models.BonDeCommande.sbc_id).filter(models.BonDeCommande.id==models.BonDeCommande.id).first()[0]
-        # print("Applying SBC filter for BC retrieval, the selected sbc_id is:", current_user.sbc_id,"for the bc_id:", sbcId)
-        # SBCs see BCs where they are the subcontractor
+    elif "SBC" in role_str:
         if not current_user.sbc_id:
-            return [] # This SBC user is not linked to an SBC profile, return nothing
+            return []
         query = query.filter(
-         models.BonDeCommande.sbc_id == current_user.sbc_id,
-            models.BonDeCommande.status != models.BCStatus.DRAFT # SBCs cannot see DRAFT BCs
+            models.BonDeCommande.sbc_id == current_user.sbc_id,
+            models.BonDeCommande.status != models.BCStatus.DRAFT
         )
 
-    # Apply search filter
+    # 4. SEARCH LOGIC (Now correctly linked to joined tables)
     if search:
         search_term = f"%{search}%"
-        # The joins are already handled by the options, but we can add them here for clarity if needed.
         query = query.filter(
-            (models.BonDeCommande.bc_number.ilike(search_term)) |
-            (models.SBC.short_name.ilike(search_term)) |
-            (models.InternalProject.name.ilike(search_term))
+            or_(
+                models.BonDeCommande.bc_number.ilike(search_term),
+                models.SBC.short_name.ilike(search_term),
+                models.SBC.name.ilike(search_term),
+                models.InternalProject.name.ilike(search_term)
+            )
         )
-    if status_filter:
+
+    # 5. Status Filter
+    if status_filter and status_filter != "ALL":
         query = query.filter(models.BonDeCommande.status == status_filter)
 
-    # Order by newest first and execute
-    return query.order_by(models.BonDeCommande.created_at.desc()).all()
-
+    # 6. EAGER LOADING & EXECUTION
+    # We use contains_eager because we already did .join() above. 
+    # This prevents the Cartesian Product warning.
+    return (
+        query.options(
+            contains_eager(models.BonDeCommande.internal_project),
+            contains_eager(models.BonDeCommande.sbc),
+            joinedload(models.BonDeCommande.creator) # creator wasn't joined manually, so joinedload is fine
+        )
+        .order_by(models.BonDeCommande.created_at.desc())
+        .all()
+    )
     
 def reject_bc(db: Session, bc_id: int, reason: str, rejector_id: int):
     bc = db.query(models.BonDeCommande).get(bc_id)
@@ -3324,72 +3340,97 @@ def get_sbc_by_id(db: Session, sbc_id: int):
         raise HTTPException(status_code=404, detail="SBC not found")
     return sbc
 
-
-def get_bcs_export_dataframe(db: Session, search: Optional[str] = None):
-    # 1. Fetch data
+def get_bc_export_dataframe(db: Session, current_user: models.User, export_type: str = "details", search: str = None):
+    """
+    export_type: 'headers' or 'details'
+    """
+    # 1. Base Query with all necessary joins
     query = db.query(models.BonDeCommande).options(
+        joinedload(models.BonDeCommande.internal_project).joinedload(models.InternalProject.project_manager),
         joinedload(models.BonDeCommande.sbc),
-        joinedload(models.BonDeCommande.internal_project),
-        joinedload(models.BonDeCommande.creator),
-        joinedload(models.BonDeCommande.approver_l1),
-        joinedload(models.BonDeCommande.approver_l2),
-        joinedload(models.BonDeCommande.items).joinedload(models.BCItem.merged_po)
+        joinedload(models.BonDeCommande.creator)
     )
 
-    if search:
-        search_term = f"%{search}%"
-        query = query.join(models.SBC).join(models.InternalProject).filter(
-            (models.BonDeCommande.bc_number.ilike(search_term)) |
-            (models.SBC.short_name.ilike(search_term)) |
-            (models.InternalProject.name.ilike(search_term))
+    # 2. Role-Based Filtering
+    role = str(current_user.role).upper()
+    if "ADMIN" in role or "RAF" in role:
+        pass # See all
+    elif "PM" in role or "PD" in role:
+        # PM/PD see projects they manage or created BCs
+        query = query.join(models.InternalProject).filter(
+            or_(
+                models.InternalProject.project_manager_id == current_user.id,
+                models.BonDeCommande.creator_id == current_user.id
+            )
         )
-    
+    elif "SBC" in role:
+        # SBCs only see their own
+        query = query.filter(models.BonDeCommande.sbc_id == current_user.sbc_id)
+
+    # 3. Apply Search Filter
+    if search:
+        term = f"%{search}%"
+        query = query.filter(
+            or_(
+                models.BonDeCommande.bc_number.ilike(term),
+                models.SBC.name.ilike(term),
+                models.InternalProject.name.ilike(term)
+            )
+        )
+
     bcs = query.order_by(models.BonDeCommande.created_at.desc()).all()
 
-    def get_user_name(user):
-        return f"{user.first_name} {user.last_name}" if user else "N/A"
-
-    # 2. Build the data list
     data = []
     for bc in bcs:
-        for index, item in enumerate(bc.items, start=1):
-            # Safe access to original MergedPO data
-            orig_po = item.merged_po if item.merged_po else None
-            
-            row = {
-                # --- IDENTIFICATION ---
-                "BC Number": bc.bc_number,
-                "BC Line": index,
-                "Internal Project": bc.internal_project.name if bc.internal_project else "N/A",
-                "Site Code": orig_po.site_code if orig_po else "N/A",
-                "PO ID Reference": orig_po.po_id if orig_po else "N/A",
-                "Item Description": orig_po.item_description if orig_po else "N/A",
-                "SBC Name": bc.sbc.name if bc.sbc else "N/A",
-                "Current Status": bc.status,
+        pm_name = f"{bc.internal_project.project_manager.first_name} {bc.internal_project.project_manager.last_name}" if bc.internal_project.project_manager else "N/A"
+        
+        # Base Header Info - ADDED .value here
+        header_info = {
+            "BC ID": bc.bc_number,
+            "Status": bc.status.value if hasattr(bc.status, 'value') else bc.status, # FIX
+            "Type": bc.bc_type.value if hasattr(bc.bc_type, 'value') else bc.bc_type, # FIX
+            "Internal Project": bc.internal_project.name,
+            "Project Manager": pm_name,
+            "Subcontractor": bc.sbc.name,
+            "SBC Code": bc.sbc.sbc_code,
+            "BC Creation Date": bc.created_at.strftime("%d/%m/%Y") if bc.created_at else "",
+            "Total HT": bc.total_amount_ht,
+            "Total TVA": bc.total_tax_amount,
+            "Total TTC": bc.total_amount_ttc,
+            "BC Creator": f"{bc.creator.first_name} {bc.creator.last_name}" if bc.creator else "System"
+        }
 
-                # --- WORKFLOW ---
-                "Created At": bc.created_at.strftime("%d/%m/%Y %H:%M") if bc.created_at else "",
-                "Validated L1 By": get_user_name(bc.approver_l1),
-                "Validated L1 At": bc.approved_l1_at.strftime("%d/%m/%Y %H:%M") if bc.approved_l1_at else "",
+        if export_type == "headers":
+            data.append(header_info)
+        else:
+            # DETAILS Export - ADDED .value for item-level enums
+            items = db.query(models.BCItem).options(
+                joinedload(models.BCItem.merged_po),
+                joinedload(models.BCItem.act)
+            ).filter(models.BCItem.bc_id == bc.id).all()
 
-                "Approved L2 By": get_user_name(bc.approver_l2),
-                "Approved L2 At": bc.approved_l2_at.strftime("%d/%m/%Y %H:%M") if bc.approved_l2_at else "",
-                # --- ORIGINAL PRICES (From MergedPO) ---
-                "Original Unit Price": orig_po.unit_price if orig_po else 0,
-                "Original Line Total": orig_po.line_amount_hw if orig_po else 0,
-
-                # --- SBC NEGOTIATED PRICES (From BCItem) ---
-                "SBC Rate Applied": f"{round(item.rate_sbc * 100, 2):g}%" if item.rate_sbc else "0%",
-                "Quantity": item.quantity_sbc,
-                "SBC Unit Price": item.unit_price_sbc,
-                "SBC Line Total": item.line_amount_sbc,
-                "Global BC Total (HT)": bc.total_amount_ht
-            }
-            data.append(row)
+            for item in items:
+                row = header_info.copy()
+                row.update({
+                    "BC Line": item.merged_po.po_line_no if item.merged_po else "-",
+                    "Site Code / DUID": item.merged_po.site_code if item.merged_po else "-",
+                    "Description": item.merged_po.item_description if item.merged_po else "N/A",
+                    "Qty": item.quantity_sbc,
+                    "Unit Price": item.unit_price_sbc,
+                    "Line Total HT": item.line_amount_sbc,
+                    "Tax Rate BC": f"{int(item.applied_tax_rate * 100)}%",
+                    # --- FIXES FOR ENUMS ---
+                    "QC Approval Status": item.qc_validation_status.value if hasattr(item.qc_validation_status, 'value') else item.qc_validation_status,
+                    "PM Approval Status": item.pm_validation_status.value if hasattr(item.pm_validation_status, 'value') else item.pm_validation_status,
+                    "PD Approval Status": item.global_status.value if hasattr(item.global_status, 'value') else item.global_status,
+                    # -----------------------
+                    "Rejections": item.rejection_count,
+                    "ACT Reference": item.act.act_number if item.act else "Not Generated",
+                    "ACT Date": item.act.created_at.strftime("%d/%m/%Y") if item.act else "-"
+                })
+                data.append(row)
 
     return pd.DataFrame(data)
-
-
 
 def get_aging_analysis(db: Session,user: Optional[models.User] = None):
     """
@@ -3993,62 +4034,103 @@ def approve_fund_request(db: Session, req_id: int, admin_id: int, approved_items
     return req
 
 
-def confirm_fund_reception(db: Session, req_id: int, pd_user_id: int, received_amount: float, filename: str):
+def confirm_fund_reception(db: Session, req_id: int, item_confirmations: dict, file_path: str):
     """
-    Hardened confirmation process:
-    PD must type the amount and upload the signed paper to move money 
-    from 'Pending' to 'Balance'.
+    PD confirms receiving a specific batch of cash.
+    item_confirmations is a dict: {"item_id": "amount"}
+    file_path is the string path to the uploaded voucher.
     """
-    # 1. Find all PENDING transactions linked to this request
-    pending_txs = db.query(models.Transaction).filter(
-        models.Transaction.related_request_id == req_id,
-        models.Transaction.status == models.TransactionStatus.PENDING
-    ).all()
-
-    if not pending_txs:
-        raise ValueError("No pending funds found for this request. It may have already been confirmed.")
-
-    # 2. VALIDATION: Check if typed amount matches system total
-    total_to_confirm = sum(tx.amount for tx in pending_txs)
-    
-    # We use abs() difference < 0.01 to handle potential float precision issues
-    if abs(received_amount - total_to_confirm) > 0.01:
-        raise ValueError(
-            f"Verification Failed: The system expected {total_to_confirm:,.2f} MAD based on approvals, "
-            f"but you declared receiving {received_amount:,.2f} MAD. Please check the cash again."
-        )
-
-    # 3. Process the money movement
-    for tx in pending_txs:
-        # Update the target PM's Wallet Balance
-        wallet = db.query(models.Caisse).get(tx.caisse_id)
-        if wallet:
-            # Handle potential NULLs safely
-            wallet.balance = (wallet.balance or 0.0) + tx.amount
-
-        # Mark Transaction as COMPLETED
-        tx.status = models.TransactionStatus.COMPLETED
-        tx.created_by_id = pd_user_id # Records who physically confirmed the cash
-        tx.created_at = datetime.now()
-        
-    # 4. Finalize the Parent Request
     req = db.query(models.FundRequest).get(req_id)
     if not req:
-        raise ValueError("Parent request record not found.")
+        raise ValueError("Request not found")
 
-    # Update Request Header with the proof
-    req.status = models.FundRequestStatus.COMPLETED
-    req.completed_at = datetime.now()
+    total_received_in_this_batch = 0.0
+    now = datetime.now()   
+
+    # 1. PROCESS EACH ITEM IN THE BATCH
+    for item_id_str, amount_str in item_confirmations.items():
+        item_id = int(item_id_str)
+        # Find the specific line item
+        db_item = next((i for i in req.items if i.id == item_id), None)
+        if not db_item:
+            continue
+
+        try:
+            # The amount PD just typed in the modal
+            current_batch_val = float(amount_str)
+        except (ValueError, TypeError):
+            current_batch_val = 0.0
+
+        # ADDITIVE UPDATE: Old confirmed total + what just arrived
+        db_item.confirmed_amount = (db_item.confirmed_amount or 0.0) + current_batch_val
+        total_received_in_this_batch += current_batch_val
+
+        # 2. WALLET & TRANSACTION UPDATES
+        # Move money from 'Reserved' (Pending In) to 'Balance' in the PM's wallet
+        wallet = db.query(models.Caisse).filter(models.Caisse.user_id == db_item.target_pm_id).first()
+        if wallet:
+            # Shift the balance
+            wallet.reserved_balance = max(0, (wallet.reserved_balance or 0.0) - current_batch_val)
+            wallet.balance = (wallet.balance or 0.0) + current_batch_val
+            # Find the PENDING transaction for this PM/Request and mark it COMPLETED
+            pending_tx = db.query(models.Transaction).filter(
+                models.Transaction.related_request_id == req.id,
+                models.Transaction.caisse_id == wallet.id,
+                models.Transaction.status == models.TransactionStatus.PENDING
+            ).first()
+            
+            if pending_tx:
+                pending_tx.amount = current_batch_val 
+                pending_tx.status = models.TransactionStatus.COMPLETED
+                # SET THE DATE: Now the "Confirmation Date" is when the PD clicked confirm
+                pending_tx.created_at = now 
+
+    # 3. UPDATE PARENT REQUEST
+    # Update the lifetime confirmed amount
+    req.confirmed_reception_amount = (req.confirmed_reception_amount or 0.0) + total_received_in_this_batch
     
-    # Store the PD's confirmation data (Assumes these columns exist in models.py)
-    if hasattr(req, 'reception_attachment'):
-        req.reception_attachment = filename
-    if hasattr(req, 'confirmed_reception_amount'):
-        req.confirmed_reception_amount = received_amount
+    # Store the filename provided by the router
+    req.reception_attachment = file_path
+
+    # 4. STATUS LOGIC
+    # We calculate the total requested by summing the items (fixing the "item" undefined error)
+    total_requested_val = sum(i.requested_amount for i in req.items)
+
+    # If the total physical cash received matches the request, it's COMPLETED
+    if req.confirmed_reception_amount >= (total_requested_val - 1.0):
+        req.status = models.FundRequestStatus.COMPLETED
+        req.completed_at = datetime.now()
+    else:
+        # If it's not fully finished, and it wasn't manually closed by Admin:
+        if req.status != models.FundRequestStatus.CLOSED_PARTIAL:
+            req.status = models.FundRequestStatus.PARTIALLY_PAID
 
     db.commit()
     db.refresh(req)
+    return req
+
+
+def acknowledge_variance(db: Session, req_id: int, note: str):
+    req = db.query(models.FundRequest).get(req_id)
+    if not req:
+        return None
+        
+    req.variance_note = note
+    req.variance_acknowledged = True
     
+    # Calculate the truth from items
+    total_physical_confirmed = sum(item.confirmed_amount or 0.0 for item in req.items)
+    
+    # SYNC THE PARENT: Set Admin's 'Paid' record to match PD's 'Confirmed' record
+    req.paid_amount = total_physical_confirmed
+    req.confirmed_reception_amount = total_physical_confirmed
+    
+    # SYNC THE ITEMS: Set 'Approved' to match 'Confirmed'
+    for item in req.items:
+        item.approved_amount = item.confirmed_amount or 0.0
+        
+    db.commit()
+    db.refresh(req)
     return req
 
 def get_caisse_stats(db: Session, user: models.User):
@@ -4176,13 +4258,6 @@ def get_transactions(
     }
     
 def get_pending_requests(db: Session):
-    """
-    A request stays 'Pending' if:
-    1. It's not Rejected.
-    2. AND (Admin still needs to pay more OR PD still needs to confirm receipt).
-    """
-    # 1. Fetch all requests that aren't rejected or fully archived
-    # We include COMPLETED because it might have unconfirmed transactions
     active_statuses = [
         models.FundRequestStatus.PENDING_APPROVAL,
         models.FundRequestStatus.PARTIALLY_PAID,
@@ -4197,24 +4272,27 @@ def get_pending_requests(db: Session):
     
     results = []
     for r in reqs:
-        # Calculate totals
-        total_req = sum(i.requested_amount for i in r.items)
-        
-        # Check for transactions waiting for PD confirmation
+        total_req = sum(item.requested_amount for item in r.items)
+        confirmed_total = r.confirmed_reception_amount or 0.0
+        paid_total = r.paid_amount or 0.0
+
         pending_tx_count = db.query(models.Transaction).filter(
             models.Transaction.related_request_id == r.id,
             models.Transaction.status == models.TransactionStatus.PENDING
         ).count()
 
-        # --- THE CRITICAL FILTER ---
-        # Admin still has work to do
-        admin_work_pending = r.paid_amount < (total_req - 0.1) and r.status != models.FundRequestStatus.CLOSED_PARTIAL
+        # 1. Admin needs to approve more funds
+        admin_work_pending = paid_total < (total_req - 0.1) and r.status != models.FundRequestStatus.CLOSED_PARTIAL
         
-        # PD still has work to do (Confirmation)
+        # 2. PD needs to click "Confirm Receipt"
         pd_work_pending = pending_tx_count > 0
 
-        # If nobody has work to do, skip this request (don't show in pending)
-        if not admin_work_pending and not pd_work_pending:
+        # 3. NEW: Audit Mismatch exists and hasn't been acknowledged
+        # If there's a gap between what we "paid" and what they "got", keep it visible
+        audit_work_pending = abs(paid_total - confirmed_total) > 1.0 and not r.variance_acknowledged
+
+        # If nobody has work to do, skip
+        if not admin_work_pending and not pd_work_pending and not audit_work_pending:
             continue
 
         results.append({
@@ -4223,15 +4301,18 @@ def get_pending_requests(db: Session):
             "created_at": r.created_at,
             "status": r.status,
             "total_amount": total_req,
-            "paid_amount": r.paid_amount,
+            "paid_amount": paid_total,
+            "confirmed_reception_amount": confirmed_total,
+            "variance_acknowledged": r.variance_acknowledged, # MUST return this
             "requester_name": f"{r.requester.first_name} {r.requester.last_name}",
-            "has_pending_transfer": pd_work_pending # This enables the button for the PD
+            "has_pending_transfer": pd_work_pending 
         })
         
     return results
 
 
 
+# In backend/app/crud.py
 
 def get_request_by_id(db: Session, req_id: int):
     req = db.query(models.FundRequest).get(req_id)
@@ -4248,12 +4329,14 @@ def get_request_by_id(db: Session, req_id: int):
             "requested_amount": i.requested_amount,
             "approved_amount": i.approved_amount or 0.0,
             
-            # --- NEW FIELD ---
-            "remarque": i.remarque, # Pass the remark to the frontend
+            # --- THE FIX: Add this line ---
+            "confirmed_amount": i.confirmed_amount or 0.0, 
+            # ------------------------------
+            
+            "remarque": i.remarque,
             "admin_note": i.admin_note or ""
         })
     
-    # Calculate total requested (for safety/display)
     total_requested = sum(item['requested_amount'] for item in items)
 
     return {
@@ -4268,14 +4351,16 @@ def get_request_by_id(db: Session, req_id: int):
         "approved_at": req.approved_at,
         "completed_at": req.completed_at,
         
-        # --- NEW FIELDS ---
-        "total_amount": total_requested, # Or req.total_amount if you stored it on the parent
+        # New Audit Fields
+        "total_amount": total_requested,
         "paid_amount": req.paid_amount or 0.0,
+        "confirmed_reception_amount": req.confirmed_reception_amount or 0.0, # Add this too
         "admin_comment": req.admin_comment,
+        "reception_attachment": req.reception_attachment,
+        "variance_acknowledged": req.variance_acknowledged,
         
         "items": items
-    }
-
+            }
 
 # In crud.py
 
@@ -4314,6 +4399,7 @@ def get_all_wallets_summary(db: Session):
         
     return sorted(results, key=lambda x: x['balance'], reverse=True)
 
+
 def process_fund_request(
     db: Session, 
     req_id: int, 
@@ -4321,77 +4407,89 @@ def process_fund_request(
     admin_id: int
 ):
     req = db.query(models.FundRequest).get(req_id)
-    if not req: raise ValueError("Request not found")
+    if not req: 
+        raise ValueError("Request not found")
 
-    # 1. HANDLE REJECTION
+    # 1. HANDLE REJECTION (No changes needed)
     if payload.action == "REJECT":
         if not payload.comment:
             raise ValueError("A comment is mandatory when rejecting.")
-        
         req.status = models.FundRequestStatus.REJECTED
         req.admin_comment = payload.comment
         req.approver_id = admin_id
         req.approved_at = datetime.now()
+        db.commit()
+        return req
     
-    # 1. Calculate the total requested by summing the items
+    # 2. CALCULATE REMAINING BUDGET BASED ON SOURCE OF TRUTH (Confirmed)
     total_requested = sum(item.requested_amount for item in req.items)
+    
+    # CHANGE: Use the confirmed amount, not the paid amount.
+    # This represents the money actually in the PD's hands.
+    current_physical_base = sum(item.confirmed_amount or 0.0 for item in req.items)
 
     if payload.action == "APPROVE":
         if not payload.items:
              raise ValueError("Approval requires item details.")
 
-        # Calculate what is being authorized in THIS specific click
         amount_giving_now = sum(i.amount_to_pay for i in payload.items)
         
-        # 2. Update the parent "Paid Amount"
-        # current_paid represents everything authorized in previous sessions
-        current_paid = req.paid_amount or 0.0
-        new_total_paid = current_paid + amount_giving_now
+        # VALIDATION: Check against the confirmed base.
+        # Max allowed = Requested - Confirmed
+        if (current_physical_base + amount_giving_now) > (total_requested + 1.0): 
+            remaining_gap = total_requested - current_physical_base
+            raise ValueError(f"Overpayment! Based on confirmed receipts, the max you can send is {remaining_gap} MAD.")
 
-        # VALIDATION: Block overpayment
-        if new_total_paid > (total_requested + 1.0): 
-            raise ValueError(f"Overpayment! Max allowed is {total_requested - current_paid}")
-
-        req.paid_amount = new_total_paid
+        # Update the parent record tracking
+        # We update paid_amount to reflect the NEW total "sent" (Confirmed + New Batch)
+        req.paid_amount = current_physical_base + amount_giving_now
+        
+        # CLEAR the variance flag because we are starting a new approval session
+        req.variance_acknowledged = False 
+        req.variance_note = None
         req.approver_id = admin_id
         req.approved_at = datetime.now()
 
-        # 3. Create Pending Transactions for the items
+        # 3. CREATE PENDING TRANSACTIONS
         for item_review in payload.items:
             db_item = next((i for i in req.items if i.id == item_review.item_id), None)
-            if not db_item or item_review.amount_to_pay <= 0: continue
+            if not db_item or item_review.amount_to_pay <= 0: 
+                continue
 
-            db_item.approved_amount = (db_item.approved_amount or 0.0) + item_review.amount_to_pay
+            # Update the item's authorized amount (Resetting it to Confirmed + New)
+            db_item.approved_amount = (db_item.confirmed_amount or 0.0) + item_review.amount_to_pay
             
-            # Create the PENDING transaction (wallet balance doesn't change yet)
+            if hasattr(item_review, 'admin_note') and item_review.admin_note:
+                db_item.admin_note = item_review.admin_note
+            
             wallet = db.query(models.Caisse).filter(models.Caisse.user_id == db_item.target_pm_id).first()
+            if not wallet:
+                wallet = models.Caisse(user_id=db_item.target_pm_id, balance=0.0, reserved_balance=0.0)
+                db.add(wallet)
+                db.flush()
+
             trx = models.Transaction(
                 caisse_id=wallet.id,
                 type=models.TransactionType.CREDIT,
                 amount=item_review.amount_to_pay,
-                description=f"Refill #{req.request_number}",
+                description=f"Refill #{req.request_number} (Approval Session)",
                 related_request_id=req.id,
                 created_by_id=admin_id,
-                status=models.TransactionStatus.PENDING # PD must confirm receipt
+                status=models.TransactionStatus.PENDING 
             )
             db.add(trx)
 
-        # --- THE FIX: FINAL STATUS LOGIC ---
-        # If we have reached the total, it is COMPLETED.
-        if req.paid_amount >= (total_requested - 0.1): # 0.1 buffer for float math
-            req.status = models.FundRequestStatus.COMPLETED
+        # 4. FINAL STATUS LOGIC
+        if payload.close_request:
+            req.status = models.FundRequestStatus.CLOSED_PARTIAL
             req.completed_at = datetime.now()
         else:
-            # If the admin checked the "Close Request" box manually
-            if payload.close_request:
-                req.status = models.FundRequestStatus.CLOSED_PARTIAL
-                req.completed_at = datetime.now()
-            else:
-                req.status = models.FundRequestStatus.PARTIALLY_PAID
-    
+            req.status = models.FundRequestStatus.APPROVED_WAITING_FUNDS
+
     db.commit()
     db.refresh(req)
     return req
+    
 # ==================== EXPENSES CRUD ====================
 
 # In backend/app/crud.py
@@ -5189,31 +5287,23 @@ def update_expense(db: Session, expense_id: int, payload: schemas.ExpenseCreate,
     db.refresh(db_expense)
     return db_expense
 
-
 def get_grouped_history(db: Session, page: int = 1, limit: int = 10):
-    """
-    Returns Transactions grouped by their Parent Request.
-    """
-    # 1. Get Requests (Paginated) with Eager Loading of Items
     total_reqs = db.query(models.FundRequest).count()
     
     requests = db.query(models.FundRequest).options(
-        joinedload(models.FundRequest.items) # Load items to calculate total
+        joinedload(models.FundRequest.items)
     ).order_by(
         models.FundRequest.created_at.desc()
     ).offset((page - 1) * limit).limit(limit).all()
     
     data = []
     for req in requests:
-        # 2. Get transactions for this request
         txs = db.query(models.Transaction).filter(
             models.Transaction.related_request_id == req.id
         ).all()
         
-        # Format Transactions
         tx_list = []
         for tx in txs:
-            # Load user name (Wallet Owner)
             user = db.query(models.User).join(models.Caisse).filter(models.Caisse.id == tx.caisse_id).first()
             user_name = f"{user.first_name} {user.last_name}" if user else "Unknown"
             
@@ -5222,25 +5312,29 @@ def get_grouped_history(db: Session, page: int = 1, limit: int = 10):
                 "amount": tx.amount,
                 "type": tx.type,
                 "description": tx.description,
-                "created_at": tx.created_at,
+                # Fix for 1/1/1970: If date is null, send None
+                "created_at": tx.created_at.isoformat() if tx.created_at else None,
                 "status": tx.status,
                 "pm_name": user_name
             })
 
-        # 3. Calculate Total Amount dynamically
-        calculated_total = sum(item.requested_amount for item in req.items)
-            
+        # --- DYNAMIC CALCULATION (The Fix for 0,00 MAD) ---
+        # Instead of req.confirmed_reception_amount, sum the items
+        actual_confirmed_total = sum(item.confirmed_amount or 0.0 for item in req.items)
+        calculated_requested_total = sum(item.requested_amount for item in req.items)
+   
         data.append({
             "request_id": req.id,
             "request_number": req.request_number,
-            "created_at": req.created_at,
-            
-            # --- FIX IS HERE ---
-            "total_amount": calculated_total, 
-            # -------------------
-            
-            "paid_amount": req.paid_amount,
+            "created_at": req.created_at.isoformat() if req.created_at else None,
             "status": req.status,
+            "total_amount": calculated_requested_total, 
+            "paid_amount": req.paid_amount or 0.0,
+            
+            # Use the dynamically summed value here
+            "confirmed_reception_amount": actual_confirmed_total, 
+            
+            "variance_acknowledged": req.variance_acknowledged, 
             "transactions": tx_list
         })
         

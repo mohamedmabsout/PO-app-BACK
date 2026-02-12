@@ -8,7 +8,8 @@ from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
 from sqlalchemy.orm import Session, query, joinedload
 from sqlalchemy import or_
 from typing import Optional
-from fastapi import Query, status
+from fastapi import Query, status,Form
+import json # Ensure this is imported
 
 from app import database
 from app.core.security import is_admin, is_pd, is_pd_or_admin, is_pm
@@ -24,6 +25,8 @@ import shutil
 import os
 from ..utils import pdf_generator 
 from ..utils.email import send_bc_status_email, send_email_background
+from fastapi.temp_pydantic_v1_params import Body
+
 
 import traceback
 
@@ -333,59 +336,39 @@ def get_remaining_pos(
     return {"data": data, "stats": stats}
 
 
-@router.get("/bc/export", status_code=status.HTTP_200_OK)
-def export_bcs(
+@router.get("/export/excel")
+def export_bcs_to_excel(
+    format: str = "details", # or "headers"
     search: Optional[str] = None,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user),
+    current_user: models.User = Depends(auth.get_current_user)
 ):
-    try:
-        # 1) Get DataFrame
-        df = crud.get_bcs_export_dataframe(db, search)
+    """
+    Exports BCs to Excel based on user role and requested format.
+    """
+    df = crud.get_bc_export_dataframe(db, current_user, format, search)
+    
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        df.to_excel(writer, index=False, sheet_name='BC Export')
+        
+        # Auto-adjust columns width for better look
+        worksheet = writer.sheets['BC Export']
+        for i, col in enumerate(df.columns):
+            column_len = max(df[col].astype(str).str.len().max(), len(col)) + 2
+            worksheet.set_column(i, i, column_len)
 
-        if df is None or df.empty:
-            raise HTTPException(status_code=404, detail="No data found to export.")
-
-        # 2) Format dates (robuste: convertit ce qui ressemble à une date)
-        for col in df.columns:
-            if "date" in col.lower() or col.lower().endswith("_at"):
-                try:
-                    s = pd.to_datetime(df[col], errors="coerce")
-                    if s.notna().any():
-                        df[col] = s.dt.strftime("%d/%m/%Y %H:%M").fillna("")
-                except Exception:
-                    # si conversion impossible, on laisse la colonne telle quelle
-                    pass
-
-        # 3) Create Excel (ENGINE OPENPYXL)
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            df.to_excel(writer, sheet_name="BC Details", index=False)
-
-            ws = writer.sheets["BC Details"]
-            # Auto width simple
-            for i, col_name in enumerate(df.columns, start=1):
-                max_len = max(len(str(col_name)), int(df[col_name].astype(str).map(len).max() if len(df) else 0))
-                ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = min(max_len + 2, 40)
-
-        output.seek(0)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-        headers = {
-            "Content-Disposition": f'attachment; filename="BC_Export_{timestamp}.xlsx"'
-        }
-
-        return StreamingResponse(
-            output,
-            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers=headers,
-        )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        print("Export Error:", repr(e))
-        traceback.print_exc()
-        raise  
+    output.seek(0)
+    
+    filename = f"BC_Export_{format}_{datetime.now().strftime('%Y%m%d')}.xlsx"
+    headers = {
+        'Content-Disposition': f'attachment; filename="{filename}"'
+    }
+    return StreamingResponse(
+        output, 
+        media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        headers=headers
+    )
 
 
 @router.get(
@@ -775,25 +758,32 @@ def get_fund_request_details(
     current_user: models.User = Depends(auth.get_current_user)
 ):
     return crud.get_request_by_id(db, req_id)
-@router.post("/request/{req_id}/confirm")
-def confirm_fund_reception_endpoint(
-    req_id: int,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user)
-):
-    """
-    PD confirms receipt of funds. This triggers the wallet updates and transaction creation.
-    """
-    # Security: Only PD can confirm
-    if current_user.role != models.UserRole.PD:
-         # Or allow ADMIN too if needed for testing
-         raise HTTPException(403, "Only Project Directors can confirm receipt.")
 
-    try:
-        crud.confirm_fund_reception(db, req_id, current_user.id)
-        return {"message": "Funds confirmed and wallets updated."}
-    except ValueError as e:
-        raise HTTPException(400, detail=str(e))
+# In backend/app/routers/data.py
+import json
+import logging
+
+logger = logging.getLogger(__name__)
+@router.post("/request/{req_id}/confirm")
+async def confirm_reception(
+    req_id: int, 
+    file: UploadFile = File(...), 
+    item_confirmations: str = Form(...), # JSON string from frontend
+    db: Session = Depends(get_db)
+):
+    # 1. Save file to disk
+    filename = f"CONFIRM_REQ_{req_id}_{file.filename}"
+    file_path = os.path.join("uploads/caisse_reception", filename)
+    with open(file_path, "wb") as buffer:
+        buffer.write(await file.read())
+
+    # 2. Parse the JSON confirmations
+    import json
+    confirm_dict = json.loads(item_confirmations)
+
+    # 3. Call the CRUD (Passing 'filename' as the 'file_path' argument)
+    return crud.confirm_fund_reception(db, req_id, confirm_dict, filename)
+
 
 @router.get("/wallets-summary")
 def get_wallets_summary(
@@ -803,6 +793,9 @@ def get_wallets_summary(
     if current_user.role not in [models.UserRole.ADMIN, models.UserRole.PD]:
         raise HTTPException(403, "Access denied")
     return crud.get_all_wallets_summary(db)
+@router.post("/request/{req_id}/acknowledge-variance")
+def ack_variance(req_id: int, payload: dict = Body(...), db: Session = Depends(get_db)):
+    return crud.acknowledge_variance(db, req_id, payload.get("note"))
 
 @router.post("/request/{req_id}/process")
 def process_request_endpoint(
@@ -877,3 +870,25 @@ def get_bc_items_for_sbc_selection(
         })
         
     return output
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+@router.get("/reception-file/{filename}")
+def get_reception_file(filename: str):
+    # Get the root of your project (where the 'backend' folder usually is)
+    # Since you run 'uvicorn app.main:app' from the 'backend' folder:
+    cwd = os.getcwd() 
+    
+    # Construct path: backend/uploads/caisse_reception/filename
+    file_path = os.path.join(cwd, "uploads", "caisse_reception", filename)
+    
+    # DEBUG: Check your terminal/console after clicking 'View File'
+    # It will show exactly where the code is looking
+    print(f"--- FILE DEBUG ---")
+    print(f"CWD: {cwd}")
+    print(f"Searching for: {file_path}")
+    print(f"Exists: {os.path.exists(file_path)}")
+    
+    if not os.path.exists(file_path):
+        # We return the path in the error so you can see it in the browser
+        raise HTTPException(status_code=404, detail=f"File not found at: {file_path}")
+        
+    return FileResponse(file_path)

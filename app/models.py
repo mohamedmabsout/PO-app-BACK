@@ -3,6 +3,7 @@ from sqlalchemy import Boolean, Column, Date, Enum, ForeignKey, Integer, String,
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 import sqlalchemy as sa
+from sqlalchemy.orm import backref # Ensure this is imported
 
 from .enum import (
     ProjectType, UserRole, SBCStatus, BCStatus, NotificationType, BCType,
@@ -532,7 +533,7 @@ class Caisse(Base):
     reserved_balance = Column(Float, default=0.0) # <-- NEW: Committed Cash (Drafts/Pending)
     
     # Relationships
-    user = relationship("User", backref="caisse")
+    user = relationship("User", backref=backref("caisse", uselist=False))
     transactions = relationship("Transaction", back_populates="caisse")
 
 
@@ -553,7 +554,10 @@ class FundRequest(Base):
     created_at = Column(DateTime, server_default=func.now())
     approved_at = Column(DateTime, nullable=True)
     completed_at = Column(DateTime, nullable=True)
-    reception_attachment = Column(String(500), nullable=True) # Scan of signed paper
+    reception_attachment = Column(String(500), nullable=True)
+    variance_note = Column(Text, nullable=True) # Admin's explanation for mismatch
+    variance_acknowledged = Column(Boolean, default=False)
+
     confirmed_reception_amount = Column(Float, default=0.0)    # Amount PD typed
 
     
@@ -576,6 +580,8 @@ class FundRequestItem(Base):
     approved_amount = Column(Float, nullable=True)   # Amount approved by Admin (can be different)
     remarque = Column(String(255), nullable=True) # Description for this line item
     admin_note = Column(String(255), nullable=True) 
+    confirmed_amount = Column(Float, default=0.0)
+
     # Relationships
     request = relationship("FundRequest", back_populates="items")
     target_pm = relationship("User", foreign_keys=[target_pm_id])

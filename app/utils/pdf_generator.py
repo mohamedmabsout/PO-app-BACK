@@ -23,6 +23,28 @@ SIB_ICE = "001704095000027"
 SIB_IF = "29156258"
 SIB_CNSS = "4312980"
 SIB_WEB = "www.sib.co.ma"
+def format_ice(val):
+    """
+    Cleans ICE from float-like strings (e.g. '123.0') 
+    and pads with leading zeros to 15 digits.
+    """
+    if not val or val == "None" or val == "-":
+        return "-"
+    
+    # 1. Convert to string
+    s = str(val).strip()
+    
+    # 2. Remove .0 if it exists
+    if s.endswith('.0'):
+        s = s[:-2]
+        
+    # 3. Remove any non-digit characters (optional safety)
+    import re
+    s = re.sub(r'\D', '', s)
+    
+    # 4. Pad to 15 digits with leading zeros
+    return s.zfill(15)
+
 
 def generate_bc_pdf(bc):
     buffer = io.BytesIO()
@@ -94,7 +116,7 @@ def generate_bc_pdf(bc):
     sbc_info = [
         [Paragraph("<b>Fournisseur / Prestataire:</b>", style_bold)],
         [Paragraph(f"{bc.sbc.name}", style_normal)],
-        [Paragraph(f"ICE: {bc.sbc.ice or '-'}", style_normal)],
+        [Paragraph(f"ICE: {format_ice(bc.sbc.ice)}", style_normal)], # <--- FIX HERE
         [Paragraph(f"Tél: {bc.sbc.phone_1 or '-'}", style_normal)],
         [Paragraph(f"Email: {bc.sbc.email or '-'}", style_normal)],
     ]
@@ -425,6 +447,7 @@ def generate_invoice_pdf(invoice):
     # Custom Styles
     style_h = ParagraphStyle('Header', parent=styles['Normal'], fontSize=8, leading=10)
     style_title = ParagraphStyle('Title', parent=styles['Normal'], fontSize=16, leading=20, fontName='Helvetica-Bold', alignment=TA_CENTER)
+    supplier_ice = format_ice(invoice.sbc.ice)
 
     # --- 1. TOP HEADER (Bill To vs Supplier) ---
     bill_to = [
@@ -452,7 +475,7 @@ def generate_invoice_pdf(invoice):
         ],
         [
             Paragraph("", style_h), 
-            Paragraph(f"ICE: {escape(invoice.sbc.ice or '-')}", style_h)
+            Paragraph(f"Supplier ICE: {supplier_ice}", style_h) # Cleaned variable
         ],
     ]
     t_top = Table(bill_to, colWidths=[9.5*cm, 9.5*cm])

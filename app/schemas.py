@@ -697,6 +697,8 @@ class FundRequestItemDetail(BaseModel):
     target_pm_name: str
     requested_amount: float
     approved_amount: Optional[float] = 0.0
+    confirmed_amount: float = 0.0 
+
     remarque: Optional[str] = None # Include remark in response
     admin_note: Optional[str] = None # <-- ADD THIS
 
@@ -720,7 +722,7 @@ class FundRequestDetail(BaseModel):
     total_amount: float # Calculated field
     paid_amount: float # New field: How much has been paid so far
     admin_comment: Optional[str] = None # New field: Admin's note
-    
+    reception_attachment: Optional[str] = None # New field: Attachment for payment reception proof
     items: List[FundRequestItemDetail]
 
     model_config = ConfigDict(from_attributes=True)
