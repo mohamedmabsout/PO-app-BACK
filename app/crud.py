@@ -852,7 +852,7 @@ def deduce_category(description: str) -> str:
     # Define keyword maps in order of PRIORITY
     # (Specific categories should be checked before general ones like 'Service')
     mapping = {
-        "Transportation": [
+        "Transport": [
             "transport", "distance<", "km<", "vehicle", "tractor", "driver", 
             "delivery", "logistics", "shipping", "mobilization"
         ],
@@ -889,36 +889,18 @@ def deduce_category(description: str) -> str:
         return "Service"
 
     return "TBD"
+# app/crud.py
 
-def batch_cleanup_po_categories(db: Session):
+def bulk_update_po_categories(db: Session, po_ids: List[int], new_category: str):
     """
-    Finds all MergedPOs with category 'TBD' or NULL and 
-    attempts to re-deduce them based on current keyword logic.
+    Updates the category for a list of MergedPO IDs.
     """
-    # 1. Fetch only the items that need fixing
-    problem_pos = db.query(models.MergedPO).filter(
-        sa.or_(
-            models.MergedPO.category == "TBD",
-            models.MergedPO.category.is_(None),
-            models.MergedPO.category == ""
-        )
-    ).all()
-
-    if not problem_pos:
-        return 0
-
-    count_fixed = 0
-    for po in problem_pos:
-        # Use your existing deduce_category function
-        new_category = deduce_category(po.item_description)
-        
-        # Only update if we found a match that isn't 'TBD'
-        if new_category != "TBD":
-            po.category = new_category
-            count_fixed += 1
-
+    updated_count = db.query(models.MergedPO).filter(
+        models.MergedPO.id.in_(po_ids)
+    ).update({"category": new_category}, synchronize_session=False)
+    
     db.commit()
-    return count_fixed
+    return updated_count
 
 def run_database_category_cleanup(db: Session):
     """
@@ -3485,6 +3467,87 @@ def get_bc_export_dataframe(db: Session, current_user: models.User, export_type:
 
     return pd.DataFrame(data)
 
+def get_acceptance_export_dataframe(db: Session, current_user: models.User, export_type: str = "details", search: str = None):
+    """
+    export_type: 'headers' (One row per ACT) or 'details' (One row per Item in ACT)
+    """
+    # 1. Base Query with full relationship tree
+    query = db.query(models.ServiceAcceptance).options(
+        joinedload(models.ServiceAcceptance.bc).joinedload(models.BonDeCommande.sbc),
+        joinedload(models.ServiceAcceptance.bc).joinedload(models.BonDeCommande.internal_project),
+        joinedload(models.ServiceAcceptance.creator),
+        joinedload(models.ServiceAcceptance.invoice), # To see if invoiced
+        joinedload(models.ServiceAcceptance.expense), # To see if paid via petty cash
+        joinedload(models.ServiceAcceptance.items).joinedload(models.BCItem.merged_po) # For details
+    )
+
+    # 2. Role-Based Filtering
+    role_str = str(current_user.role).upper()
+    if "SBC" in role_str:
+        query = query.join(models.BonDeCommande).filter(models.BonDeCommande.sbc_id == current_user.sbc_id)
+    elif "PM" in role_str or "PD" in role_str:
+        query = query.join(models.BonDeCommande).join(models.InternalProject).filter(
+            or_(
+                models.InternalProject.project_manager_id == current_user.id,
+                models.BonDeCommande.creator_id == current_user.id
+            )
+        )
+
+    # 3. Apply Search Filter
+    if search:
+        term = f"%{search}%"
+        query = query.filter(
+            or_(
+                models.ServiceAcceptance.act_number.ilike(term),
+                models.BonDeCommande.bc_number.ilike(term)
+            )
+        )
+
+    acts = query.order_by(models.ServiceAcceptance.created_at.desc()).all()
+    data = []
+
+    for act in acts:
+        # Determine Payment Method / Status
+        payment_ref = "-"
+        if act.invoice:
+            payment_ref = f"Invoice: {act.invoice.invoice_number} ({act.invoice.status.value})"
+        elif act.expense:
+            payment_ref = f"Expense: #{act.expense.id} ({act.expense.status.value})"
+
+        # Base Header Info
+        header_info = {
+            "ACT Number": act.act_number,
+            "Date Generated": act.created_at.strftime("%d/%m/%Y"),
+            "BC Reference": act.bc.bc_number if act.bc else "N/A",
+            "Project": act.bc.internal_project.name if act.bc else "N/A",
+            "Subcontractor": act.bc.sbc.name if act.bc else "N/A",
+            "Total HT": act.total_amount_ht,
+            "Total Tax": act.total_tax_amount,
+            "Total TTC": act.total_amount_ttc,
+            "Payment Link": payment_ref,
+            "Created By": f"{act.creator.first_name} {act.creator.last_name}" if act.creator else "System"
+        }
+
+        if export_type == "headers":
+            data.append(header_info)
+        else:
+            # DETAILS View: One row per Item in the ACT
+            for item in act.items:
+                row = header_info.copy()
+                row.update({
+                    "Site Code / DUID": item.merged_po.site_code if item.merged_po else "-",
+                    "Item Description": item.merged_po.item_description if item.merged_po else "N/A",
+                    "Category": item.merged_po.category if item.merged_po else "TBD",
+                    "Accepted Qty": item.quantity_sbc,
+                    "Unit Price (SBC)": item.unit_price_sbc,
+                    "Line Total (HT)": item.line_amount_sbc,
+                    "VAT Rate": f"{int(item.applied_tax_rate * 100)}%"
+                })
+                data.append(row)
+
+    return pd.DataFrame(data)
+
+
 def get_aging_analysis(db: Session,user: Optional[models.User] = None):
     """
     Groups the total remaining amount (GAP) into age buckets based on publish_date.
@@ -5094,31 +5157,6 @@ def deduct_from_caisse(db: Session, user_id: int, amount: float, description: st
     )
     db.add(transaction)
     db.commit()
-def get_expenses_export_dataframe(db: Session):
-    # Requête avec toutes les jointures nécessaires
-    query = db.query(models.Expense).options(
-        joinedload(models.Expense.internal_project),
-        joinedload(models.Expense.requester),
-        joinedload(models.Expense.act)
-    ).all()
-
-    data = []
-    for exp in query:
-        data.append({
-            "ID Dépense": exp.id,
-            "Date Création": exp.created_at.strftime("%d/%m/%Y") if exp.created_at else "",
-          "Projet": exp.internal_project.name if exp.internal_project else "N/A",
-            "Demandeur (PM)": f"{exp.requester.first_name} {exp.requester.last_name}" if exp.requester else "N/A",
-            "Type": exp.exp_type,
-            "Bénéficiaire": exp.beneficiary,
-            "Montant (MAD)": exp.amount,
-            "Statut": exp.status,
-            "Référence ACT": exp.act.act_number if exp.act else "N/A",
-            "Remarque": exp.remark,
-            "Motif de Rejet": exp.rejection_reason if exp.rejection_reason else ""
-        })
-
-    return pd.DataFrame(data)
 
 def bulk_update_internal_control(db: Session, identifiers: List[str], new_value: int):
     # Clean input
@@ -5438,6 +5476,73 @@ def get_invoice_by_id(db: Session, invoice_id: int):
         
     return invoice
 
+def get_invoice_export_dataframe(db: Session, current_user: models.User, export_type: str = "details", search: str = None):
+    """
+    export_type: 'headers' (One row per Invoice) or 'details' (One row per item inside the Invoice)
+    """
+    # 1. Base Query with deep loading
+    query = db.query(models.Invoice).options(
+        joinedload(models.Invoice.sbc),
+        joinedload(models.Invoice.acts).joinedload(models.ServiceAcceptance.bc),
+        joinedload(models.Invoice.acts).joinedload(models.ServiceAcceptance.items).joinedload(models.BCItem.merged_po)
+    )
+
+    # 2. Role-Based Filtering
+    role_str = str(current_user.role).upper()
+    if "SBC" in role_str:
+        query = query.filter(models.Invoice.sbc_id == current_user.sbc_id)
+    # RAF/Admin see everything
+
+    # 3. Apply Search Filter
+    if search:
+        term = f"%{search}%"
+        query = query.join(models.SBC).filter(
+            or_(
+                models.Invoice.invoice_number.ilike(term),
+                models.SBC.name.ilike(term)
+            )
+        )
+
+    invoices = query.order_by(models.Invoice.created_at.desc()).all()
+    data = []
+
+    for inv in invoices:
+        # Base Header Info
+        header_info = {
+            "Invoice Number": inv.invoice_number,
+            "SBC Name": inv.sbc.name if inv.sbc else "N/A",
+            "Category": inv.category,
+            "Status": inv.status.value if hasattr(inv.status, 'value') else inv.status,
+            "Amount HT": inv.total_amount_ht,
+            "Amount Tax": inv.total_tax_amount,
+            "Amount TTC": inv.total_amount_ttc,
+            "Created Date": inv.created_at.strftime("%d/%m/%Y"),
+            "Submitted Date": inv.submitted_at.strftime("%d/%m/%Y %H:%M") if inv.submitted_at else "-",
+            "Verified Date": inv.verified_at.strftime("%d/%m/%Y %H:%M") if inv.verified_at else "-",
+            "Paid Date": inv.paid_at.strftime("%d/%m/%Y %H:%M") if inv.paid_at else "-",
+            "Payment Receipt": inv.payment_receipt_filename or "No Receipt"
+        }
+
+        if export_type == "headers":
+            data.append(header_info)
+        else:
+            # DETAILS View: One row per Item inside every ACT linked to this Invoice
+            for act in inv.acts:
+                for item in act.items:
+                    row = header_info.copy()
+                    row.update({
+                        "ACT Reference": act.act_number,
+                        "BC Reference": act.bc.bc_number if act.bc else "-",
+                        "Site Code": item.merged_po.site_code if item.merged_po else "-",
+                        "Description": item.merged_po.item_description if item.merged_po else "-",
+                        "Qty": item.quantity_sbc,
+                        "Unit Price": item.unit_price_sbc,
+                        "Line Total (HT)": item.line_amount_sbc,
+                        "TVA Rate": f"{int(item.applied_tax_rate * 100)}%"
+                    })
+                    data.append(row)
+
+    return pd.DataFrame(data)
 
 
 
@@ -5903,3 +6008,74 @@ def get_bc_items_by_sbc(db: Session, sbc_id: int):
         joinedload(models.BCItem.merged_po),
         joinedload(models.BCItem.bc)
     ).all()
+
+def get_expense_export_dataframe(db: Session, current_user: models.User, export_type: str = "details", search: str = None):
+    """
+    export_type: 'headers' (One row per Expense) or 'details' (One row per ACT in Expense)
+    """
+    # 1. Base Query
+    query = db.query(models.Expense).options(
+        joinedload(models.Expense.internal_project),
+        joinedload(models.Expense.requester),
+        joinedload(models.Expense.l1_approver),
+        joinedload(models.Expense.l2_approver),
+        joinedload(models.Expense.acts) # For details view
+    )
+
+    # 2. Role-Based Filtering (Security)
+    role_str = str(current_user.role).upper()
+    if "ADMIN" in role_str or "RAF" in role_str or "PD" in role_str:
+        pass # Management sees all
+    elif "SBC" in role_str:
+        query = query.filter(models.Expense.beneficiary_user_id == current_user.id)
+    else:
+        # PMs see what they requested
+        query = query.filter(models.Expense.requester_id == current_user.id)
+
+    # 3. Apply Search Filter
+    if search:
+        term = f"%{search}%"
+        query = query.join(models.InternalProject).filter(
+            or_(
+                models.Expense.beneficiary.ilike(term),
+                models.InternalProject.name.ilike(term),
+                models.Expense.exp_type.ilike(term)
+            )
+        )
+
+    expenses = query.order_by(models.Expense.created_at.desc()).all()
+    data = []
+
+    for exp in expenses:
+        # Base Header Info
+        header_info = {
+            "Expense ID": f"#{exp.id}",
+            "Date Created": exp.created_at.strftime("%d/%m/%Y") if exp.created_at else "",
+            "Project": exp.internal_project.name if exp.internal_project else "N/A",
+            "Type": exp.exp_type,
+            "Requester (PM)": f"{exp.requester.first_name} {exp.requester.last_name}" if exp.requester else "System",
+            "Beneficiary": exp.beneficiary,
+            "Total Amount": exp.amount,
+            "Status": exp.status.value if hasattr(exp.status, 'value') else exp.status,
+            "L1 Approved At": exp.l1_at.strftime("%d/%m/%Y %H:%M") if exp.l1_at else "-",
+            "L2 Approved At": exp.l2_at.strftime("%d/%m/%Y %H:%M") if exp.l2_at else "-",
+            "Paid At": exp.payment_confirmed_at.strftime("%d/%m/%Y %H:%M") if exp.payment_confirmed_at else "-",
+            "Receipt Uploaded": "Yes" if exp.is_signed_copy_uploaded else "No",
+            "Remarks": exp.remark
+        }
+
+        if export_type == "headers" or not exp.acts:
+            data.append(header_info)
+        else:
+            # DETAILS View: One row per linked ACT
+            for act in exp.acts:
+                row = header_info.copy()
+                row.update({
+                    "Linked ACT Number": act.act_number,
+                    "ACT Value (HT)": act.total_amount_ht,
+                    "ACT Creation Date": act.created_at.strftime("%d/%m/%Y") if act.created_at else "",
+                    "Original BC": act.bc.bc_number if act.bc else "N/A"
+                })
+                data.append(row)
+
+    return pd.DataFrame(data)

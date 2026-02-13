@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, status
 from fastapi.responses import StreamingResponse, Response
 import pandas as pd
 from sqlalchemy.orm import Session, joinedload
-from typing import List
+from typing import List,Optional
 import mimetypes # Ensure this is imported at the top
 
 from .. import crud, models, schemas, auth
@@ -93,24 +93,37 @@ def run_daily_checks(
     count = crud.check_missing_expense_uploads(db, background_tasks)
     return {"message": f"Sent {count} reminders."}
 
+# backend/app/routers/expenses.py
 
 @router.get("/export/excel")
-def export_expenses(
+def export_expenses_to_excel(
+    format: str = "details", 
+    search: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
-    df = crud.get_expenses_export_dataframe(db)
+    df = crud.get_expense_export_dataframe(db, current_user, format, search)
+    
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df.to_excel(writer, index=False, sheet_name='Expenses')
-    output.seek(0)
-    
-    return StreamingResponse(
-        output,
-        media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        headers={'Content-Disposition': 'attachment; filename="Expenses_Export.xlsx"'}
-    )
+        df.to_excel(writer, index=False, sheet_name='Expense Export')
+        
+        # Formatting
+        worksheet = writer.sheets['Expense Export']
+        workbook = writer.book
+        header_fmt = workbook.add_format({'bold': True, 'bg_color': '#D7E4BC', 'border': 1})
+        
+        for i, col in enumerate(df.columns):
+            column_len = max(df[col].astype(str).str.len().max(), len(col)) + 2
+            worksheet.set_column(i, i, column_len)
 
+    output.seek(0)
+    filename = f"Expenses_{format}_{datetime.now().strftime('%Y%m%d')}.xlsx"
+    return StreamingResponse(
+        output, 
+        media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        headers={'Content-Disposition': f'attachment; filename="{filename}"'}
+    )
 
 # ==========================
 # 5. LISTS (FILTERED)

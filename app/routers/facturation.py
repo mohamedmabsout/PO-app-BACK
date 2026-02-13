@@ -1,5 +1,8 @@
+import io
 import os
 import shutil
+import pandas as pd
+
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, UploadFile, File, Form
 from fastapi.responses import StreamingResponse, FileResponse
 from sqlalchemy.orm import Session
@@ -116,6 +119,31 @@ def get_current_sbc_ledger(
     # Calls the CRUD function we built previously
     return crud.get_sbc_ledger(db, current_user.sbc_id)
 
+@router.get("/export/excel")
+def export_invoices_to_excel(
+    format: str = "details", 
+    search: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    df = crud.get_invoice_export_dataframe(db, current_user, format, search)
+    
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        df.to_excel(writer, index=False, sheet_name='Facturation Export')
+        
+        worksheet = writer.sheets['Facturation Export']
+        for i, col in enumerate(df.columns):
+            column_len = max(df[col].astype(str).str.len().max(), len(col)) + 2
+            worksheet.set_column(i, i, min(column_len, 50))
+
+    output.seek(0)
+    filename = f"Invoices_{format}_{datetime.now().strftime('%Y%m%d')}.xlsx"
+    return StreamingResponse(
+        output, 
+        media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        headers={'Content-Disposition': f'attachment; filename="{filename}"'}
+    )
 
 @router.get("/{id}", response_model=schemas.InvoiceDetail)
 def get_invoice_details(id: int, db: Session = Depends(get_db)):

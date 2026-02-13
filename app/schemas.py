@@ -920,3 +920,7 @@ class InvoiceDetail(InvoiceListItem):
     rejection_reason: Optional[str] = None
     verified_at: Optional[datetime] = None
     paid_at: Optional[datetime] = None
+
+class BulkCategoryUpdate(BaseModel):
+    po_ids: List[int]
+    category: str

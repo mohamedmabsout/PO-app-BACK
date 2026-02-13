@@ -892,14 +892,14 @@ def get_reception_file(filename: str):
         raise HTTPException(status_code=404, detail=f"File not found at: {file_path}")
         
     return FileResponse(file_path)
-
-@router.post("/maintenance/cleanup-categories")
-def run_category_cleanup(
+@router.put("/bulk-update-category")
+def bulk_update_category(
+    payload: schemas.BulkCategoryUpdate,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
     if current_user.role != models.UserRole.ADMIN:
-        raise HTTPException(status_code=403, detail="Admin only")
-        
-    updated_count = crud.batch_cleanup_po_categories(db)
-    return {"message": f"Successfully updated {updated_count} PO lines."}
+        raise HTTPException(status_code=403, detail="Only Admins can manage categories.")
+    
+    count = crud.bulk_update_po_categories(db, payload.po_ids, payload.category)
+    return {"message": f"Successfully updated {count} lines to {payload.category}."}
