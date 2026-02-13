@@ -842,61 +842,114 @@ import re
 
 def deduce_category(description: str) -> str:
     """
-    Robustly deduces the category based on keywords in the item description.
-    Priority is given to specific keywords like 'Transportation', 'Survey', etc.
+    Improved category deduction using keyword priority.
     """
-    if not isinstance(description, str) or not description.strip():
+    if not description or not isinstance(description, str):
         return "TBD"
 
-    desc_lower = description.lower()
+    desc = description.lower()
 
-    # --- CATEGORY RULES ---
-    # The order matters! Put more specific categories first.
-    
-    # 1. Transportation
-    # Keywords: transportation, transport, km<distance, vehicle, tractor, driver
-    if any(k in desc_lower for k in ["transport", "distance<=", "vehicle", "tractor", "driver", "per time"]):
-        return "Transportation"
+    # Define keyword maps in order of PRIORITY
+    # (Specific categories should be checked before general ones like 'Service')
+    mapping = {
+        "Transportation": [
+            "transport", "distance<", "km<", "vehicle", "tractor", "driver", 
+            "delivery", "logistics", "shipping", "mobilization"
+        ],
+        "Survey": [
+            "survey", "tssr", "tss", "site report", "los ", "level a", "level b"
+        ],
+        "Civil Work": [
+            "civil work", "concrete", "masonry", "painting", "wall opening", 
+            "excavation", "foundation", "steel structure", "fencing", "shelter"
+        ],
+        "Material": [
+            "connector", "jumper", "pvc", "bolt", "screw", "packaging", 
+            "battery", "cabinet", "rack", "antenna", "cable", "feeder"
+        ],
+        "Service": [
+            "install", "swap", "dismantle", "commissioning", "integration", 
+            "reconfiguration", "expansion", "upgrade", "maintenance", 
+            "site engineer", "fsc", "rigger", "technical", "work order",
+            "acceptance", "testing", "alignment", "configuration"
+        ]
+    }
 
-    # 2. Site Engineer / FSC
-    # Keywords: fsc, site engineer, work order, rigger
-    if any(k in desc_lower for k in ["fsc", "site engineer", "work order", "rigger"]):
-        return "Site Engineer"
+    # 1. Direct Keyword Check
+    for category, keywords in mapping.items():
+        if any(k in desc for k in keywords):
+            # Special case for Material: if 'install' is also there, it's a Service
+            if category == "Material" and "install" in desc:
+                return "Service"
+            return category
 
-    # 3. Survey
-    # Keywords: survey, report(level
-    if any(k in desc_lower for k in ["survey", "tssr", "level a", "level b"]):
-        return "Survey"
-        
-    # 4. Civil Work (New Category recommended based on your data)
-    # Keywords: civil work, foundation, excavation, concrete, painting, wall opening
-    if any(k in desc_lower for k in ["civil work", "foundation", "excavation", "concrete", "paint", "wall opening", "soil"]):
-        return "Civil Work"
-
-    # 5. Hardware / Material (New Category recommended)
-    # Keywords: supply, cable, antenna, rack, battery, cabinet, pvc, rod, connector
-    # But ONLY if it doesn't say "installation" explicitly (which implies service)
-    # This is tricky. Often "Supply and Install" is Service. 
-    # Pure material: "Connector-Item...", "RF coaxial connector"
-    if any(k in desc_lower for k in ["connector", "jumper", "packaging", "box", "screw", "bolt"]):
-        if "install" not in desc_lower:
-             return "Material"
-
-    # 6. Service (Catch-all for installation/swap/expansion)
-    # Keywords: install, swap, expansion, dismantling, commissioning, integration, upgrade, replacement
-    service_keywords = [
-        "service", "install", "swap", "expansion", "dismantling", 
-        "commissioning", "integration", "upgrade", "replacement", 
-        "zone", "configuration", "acceptance", "testing"
-    ]
-    if any(k in desc_lower for k in service_keywords):
-        return "Service"
-
-    # 7. Fallback for specific equipment mentions that usually imply service
-    if any(k in desc_lower for k in ["rru", "bbu", "aau", "bts", "msan", "olt", "wdm", "microwave"]):
+    # 2. Equipment keywords that usually imply service
+    equipment_keywords = ["rru", "bbu", "aau", "bts", "msan", "olt", "wdm", "microwave", "mw "]
+    if any(k in desc for k in equipment_keywords):
         return "Service"
 
     return "TBD"
+
+def batch_cleanup_po_categories(db: Session):
+    """
+    Finds all MergedPOs with category 'TBD' or NULL and 
+    attempts to re-deduce them based on current keyword logic.
+    """
+    # 1. Fetch only the items that need fixing
+    problem_pos = db.query(models.MergedPO).filter(
+        sa.or_(
+            models.MergedPO.category == "TBD",
+            models.MergedPO.category.is_(None),
+            models.MergedPO.category == ""
+        )
+    ).all()
+
+    if not problem_pos:
+        return 0
+
+    count_fixed = 0
+    for po in problem_pos:
+        # Use your existing deduce_category function
+        new_category = deduce_category(po.item_description)
+        
+        # Only update if we found a match that isn't 'TBD'
+        if new_category != "TBD":
+            po.category = new_category
+            count_fixed += 1
+
+    db.commit()
+    return count_fixed
+
+def run_database_category_cleanup(db: Session):
+    """
+    Force updates all TBD and NULL categories in the database.
+    """
+    # 1. Query all problematic rows
+    pos_to_fix = db.query(models.MergedPO).filter(
+        or_(
+            models.MergedPO.category == "TBD",
+            models.MergedPO.category.is_(None),
+            models.MergedPO.category == ""
+        )
+    ).all()
+
+    stats = {
+        "total_processed": len(pos_to_fix),
+        "fixed": 0,
+        "still_tbd": 0
+    }
+
+    for po in pos_to_fix:
+        new_cat = deduce_category(po.item_description)
+        po.category = new_cat
+        if new_cat != "TBD":
+            stats["fixed"] += 1
+        else:
+            stats["still_tbd"] += 1
+
+    db.commit()
+    return stats
+
 
 def process_acceptances_by_ids(db: Session, raw_acceptance_ids: List[int]):
     """
