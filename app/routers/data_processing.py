@@ -840,9 +840,10 @@ def process_request_endpoint(
 def get_history_grouped(
     page: int = 1,
     limit: int = 10,
+    status: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
-    return crud.get_grouped_history(db, page, limit)
+    return crud.get_grouped_history(db, page, limit, status)
 
 
 @router.get("/by-sbc/{sbc_id}")

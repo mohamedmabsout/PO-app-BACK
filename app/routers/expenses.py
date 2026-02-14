@@ -67,8 +67,18 @@ def get_my_requests(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
 ):
-    """Returns expenses created by the logged-in user."""
-    return crud.list_my_requests(db, current_user)
+    """Personal view: My drafts and my payments."""
+    return crud.list_personal_requests(db, current_user)
+
+
+@router.get("/all-requests", response_model=List[schemas.ExpenseResponse])
+def get_all_requests(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user),
+):
+    """Global view: Management oversight."""
+    require_roles(current_user, ["ADMIN", "PD"])
+    return crud.list_all_requests_global(db, current_user)
 
 
 
@@ -161,6 +171,30 @@ def get_paid_history(
             models.ExpenseStatus.ACKNOWLEDGED
         ])
     ).order_by(models.Expense.updated_at.desc()).all()
+
+@router.get("/summary-counts")
+def get_expense_summary_counts(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """
+    Returns unread counts for each workflow stage.
+    """
+    counts = {
+        "l1": 0,
+        "l2": 0,
+        "pay": 0
+    }
+    
+    # Logic for PD/Admin
+    if current_user.role in [models.UserRole.PD, models.UserRole.ADMIN]:
+        counts["l1"] = db.query(models.Expense).filter(models.Expense.status == models.ExpenseStatus.SUBMITTED).count()
+        counts["l2"] = db.query(models.Expense).filter(models.Expense.status == models.ExpenseStatus.PENDING_L2).count()
+        counts["pay"] = db.query(models.Expense).filter(models.Expense.status == models.ExpenseStatus.APPROVED_L2).count()
+        
+    return counts
+
+
 
 @router.get("/my-reserved-breakdown", response_model=List[schemas.ExpenseResponse])
 def get_my_reserved_breakdown(

@@ -502,110 +502,144 @@ def process_and_merge_pos(db: Session):
     
     db.commit()
     return len(clean_pos_list)
-def process_po_file_background(file_path: str, history_id: int, user_id: int):
-    """
-    Background task to process the PO file.
-    """
-    # Create a NEW database session for this background task
-    db = SessionLocal() 
     
-    try:
-        # 1. Read the file from the temp path
-        df = pd.read_excel(file_path)
-        
-        # 2. Run the existing logic
-        # Note: We pass the db session we just created
-        new_record_ids = create_raw_purchase_orders_from_dataframe(db, df, user_id)
-        processed_count = process_and_merge_pos(db)
-        
-        # 3. Update History to SUCCESS
-        history = db.query(models.UploadHistory).get(history_id)
-        if history:
-            history.status = "SUCCESS"
-            history.total_rows = processed_count # Or updated_count, whichever you prefer to track
-            history.notes = f"Processed {processed_count} MergedPOs"
-            db.commit()
-            
-        # Optional: Send Notification to User here using create_notification
-        create_notification(
-            db, 
-            recipient_id=user_id,
-            type=models.NotificationType.APP,
-            module=models.NotificationModule.SYSTEM,
-            title="Acceptance Import Complete",
-            message=f"File processed successfully. {processed_count} Merged POs updated.",
-            link="/site-dispatcher"
-        )
-        db.commit()
-    except Exception as e:
-        # 4. Handle Errors
-        logger.error(f"Background Task Failed: {e}", exc_info=True) # exc_info gives the traceback
-        db.rollback()
-        history = db.query(models.UploadHistory).get(history_id)
-        if history:
-            history.status = "FAILED"
-            history.error_message = str(e)[:500] # Truncate error if too long
-            db.commit()
-            
-    finally:
-        # 5. Cleanup
-        db.close()
-        # Delete the temp file to save space
-        if os.path.exists(file_path):
-            os.remove(file_path)
-# backend/app/crud.py
-
-def process_acceptance_file_background(file_path: str, history_id: int, user_id: int):
+def process_po_file_background(file_path: str, history_id: int, user_id: int, chained_ac_info: dict = None):
     """
-    Background task: Reads file, saves raw data, triggers processing, updates history.
+    Enhanced PO Background task that can trigger an AC task upon success.
     """
     db = SessionLocal()
     try:
-        # 1. Read and Clean the Excel File
+        df = pd.read_excel(file_path)
+        # 1. Process POs
+        new_record_ids = create_raw_purchase_orders_from_dataframe(db, df, user_id)
+        processed_count = process_and_merge_pos(db)
+        
+        # 2. Update PO History to SUCCESS
+        history = db.query(models.UploadHistory).get(history_id)
+        if history:
+            history.status = "SUCCESS"
+            history.total_rows = processed_count
+            db.commit()
+
+        # 3. CHAINED LOGIC: Trigger Acceptance processing if AC file was also uploaded
+        if chained_ac_info:
+            # Update AC history status from "WAITING" to "PROCESSING"
+            ac_hist = db.query(models.UploadHistory).get(chained_ac_info["history_id"])
+            if ac_hist:
+                ac_hist.status = "PROCESSING"
+                db.commit()
+            
+            # Call the AC processing logic immediately in the same thread
+            # We reuse the existing function
+            process_acceptance_file_background(
+                chained_ac_info["path"], 
+                chained_ac_info["history_id"], 
+                user_id
+            )
+        else:
+            # Normal end: Only PO was uploaded, notify user
+            create_notification(
+                db, recipient_id=user_id, type=models.NotificationType.APP,
+                module=models.NotificationModule.SYSTEM,
+                title="PO Import Complete",
+                message=f"File processed. {processed_count} POs updated.",
+                link="/site-dispatcher"
+            )
+            db.commit()
+
+    except Exception as e:
+        logger.error(f"PO Background Task Failed: {e}", exc_info=True)
+        db.rollback()
+        
+        # 1. Update PO History to FAILED
+        history = db.query(models.UploadHistory).get(history_id)
+        if history:
+            history.status = "FAILED"
+            history.error_message = str(e)[:500]
+            db.commit()
+        
+        # 2. ALSO mark the chained AC as FAILED if it exists
+        if chained_ac_info:
+            ac_hist = db.query(models.UploadHistory).get(chained_ac_info["history_id"])
+            if ac_hist:
+                ac_hist.status = "FAILED"
+                ac_hist.error_message = "Cancelled because the prerequisite PO import failed."
+                db.commit()
+            
+    finally:
+        db.close()
+        if os.path.exists(file_path):
+            os.remove(file_path)
+
+def process_acceptance_file_background(file_path: str, history_id: int, user_id: int):
+    """
+    Background task: Reads file, filters for 'Approved' status, 
+    saves raw data, triggers processing, updates history.
+    """
+    db = SessionLocal()
+    try:
+        # 1. Read the Excel File
         acceptance_df = pd.read_excel(file_path)
         
         # Standardize Headers (Excel -> DB Column Names)
+        # Added 'Status' mapping
         column_mapping = {
             'ShipmentNO.': 'shipment_no', 
             'AcceptanceQty': 'acceptance_qty', 
             'ApplicationProcessed': 'application_processed_date',
             'PONo.': 'po_no', 
-            'POLineNo.': 'po_line_no', 
+            'POLineNo.': 'po_line_no',
+            'Status': 'excel_status'  # We map this to a temporary name for checking
         }
         acceptance_df.rename(columns=column_mapping, inplace=True)
         
-        # Data Type Conversion & Validation
-        acceptance_df['application_processed_date'] = pd.to_datetime(acceptance_df['application_processed_date'], errors='coerce')
+        # --- THE STATUS CHECK: ONLY TREAT 'APPROVED' LINES ---
+        total_rows_received = len(acceptance_df)
+        if 'excel_status' in acceptance_df.columns:
+            # Normalize to string, strip spaces, and lowercase for a robust comparison
+            mask = acceptance_df['excel_status'].astype(str).str.strip().str.lower() == 'approved'
+            acceptance_df = acceptance_df[mask]
+        
+        rows_to_process = len(acceptance_df)
+        skipped_rows = total_rows_received - rows_to_process
+        # -----------------------------------------------------
+
+        # 2. Data Type Conversion & Validation (as before)
+        acceptance_df['application_processed_date'] = pd.to_datetime(
+            acceptance_df['application_processed_date'], errors='coerce'
+        )
         for col in ['acceptance_qty', 'po_line_no', 'shipment_no']:
             acceptance_df[col] = pd.to_numeric(acceptance_df[col], errors='coerce').fillna(0)
 
-        # Drop invalid rows
+        # Drop invalid rows (missing PO keys)
         acceptance_df.dropna(subset=['po_no', 'po_line_no'], inplace=True)
 
-        # 2. Save Raw Data and GET THE IDs
-        # We need the IDs to ensure we only process THIS file's data
+        if acceptance_df.empty:
+            raise ValueError("No valid 'Approved' rows found in the file.")
+
+        # 3. Save Raw Data and GET THE IDs
         new_record_ids = create_raw_acceptances_from_dataframe(db, acceptance_df, user_id)
 
-        # 3. Process Only These Specific Records
+        # 4. Process Only These Specific Records
         updated_count = process_acceptances_by_ids(db, new_record_ids)
 
-        # 4. Success: Update History & Notify
+        # 5. Success: Update History & Notify
         history_record = db.query(models.UploadHistory).get(history_id)
         if history_record:
             history_record.status = "SUCCESS"
-            history_record.total_rows = len(new_record_ids)
-            # Optional: Add details about how many POs were actually updated
-            # history_record.error_message = f"Updated {updated_count} POs." 
+            history_record.total_rows = rows_to_process
+            # Add a clear note about filtered rows
+            if skipped_rows > 0:
+                history_record.error_message = f"Processed {rows_to_process} approved rows. Skipped {skipped_rows} rows not in 'Approved' status."
             db.commit()
 
-        # Create Notification
         create_notification(
             db, 
             recipient_id=user_id,
             type=models.NotificationType.APP,
             module=models.NotificationModule.SYSTEM,
             title="Acceptance Import Complete",
-            message=f"File processed successfully. {updated_count} Merged POs updated.",
+            message=f"File processed. {updated_count} Merged POs updated. ({skipped_rows} lines skipped).",
             link="/site-dispatcher"
         )
         db.commit()
@@ -4542,7 +4576,16 @@ def process_fund_request(
     
     # CHANGE: Use the confirmed amount, not the paid amount.
     # This represents the money actually in the PD's hands.
-    current_physical_base = sum(item.confirmed_amount or 0.0 for item in req.items)
+    total_confirmed = sum(item.confirmed_amount or 0.0 for item in req.items)
+    total_in_flight = db.query(func.sum(models.Transaction.amount)).filter(
+        models.Transaction.related_request_id == req.id,
+        models.Transaction.status == models.TransactionStatus.PENDING
+    ).scalar() or 0.0
+
+    # The "Real" Gap is what is left after considering what was sent
+    authorized_so_far = total_confirmed + total_in_flight
+    remaining_allocatable_gap = total_requested - authorized_so_far
+
 
     if payload.action == "APPROVE":
         if not payload.items:
@@ -4552,15 +4595,14 @@ def process_fund_request(
         
         # VALIDATION: Check against the confirmed base.
         # Max allowed = Requested - Confirmed
-        if (current_physical_base + amount_giving_now) > (total_requested + 1.0): 
-            remaining_gap = total_requested - current_physical_base
-            raise ValueError(f"Overpayment! Based on confirmed receipts, the max you can send is {remaining_gap} MAD.")
+        if amount_giving_now > (remaining_allocatable_gap + 1.0): 
+            raise ValueError(
+                f"Validation Error: You already have {total_in_flight} MAD pending confirmation. "
+                f"The maximum additional amount you can approve now is {remaining_allocatable_gap} MAD."
+            )
 
-        # Update the parent record tracking
-        # We update paid_amount to reflect the NEW total "sent" (Confirmed + New Batch)
-        req.paid_amount = current_physical_base + amount_giving_now
-        
-        # CLEAR the variance flag because we are starting a new approval session
+        # Update parent record
+        req.paid_amount = authorized_so_far + amount_giving_now # Total authorized by Admin
         req.variance_acknowledged = False 
         req.variance_note = None
         req.approver_id = admin_id
@@ -4588,19 +4630,19 @@ def process_fund_request(
                 caisse_id=wallet.id,
                 type=models.TransactionType.CREDIT,
                 amount=item_review.amount_to_pay,
-                description=f"Refill #{req.request_number} (Approval Session)",
+                description=f"Refill {req.request_number} (Approval Session)",
                 related_request_id=req.id,
                 created_by_id=admin_id,
+                created_at=datetime.now(),
                 status=models.TransactionStatus.PENDING 
             )
             db.add(trx)
 
         # 4. FINAL STATUS LOGIC
-        if payload.close_request:
-            req.status = models.FundRequestStatus.CLOSED_PARTIAL
-            req.completed_at = datetime.now()
-        else:
+        if payload.close_request or (authorized_so_far + amount_giving_now >= total_requested - 0.1):
             req.status = models.FundRequestStatus.APPROVED_WAITING_FUNDS
+        else:
+            req.status = models.FundRequestStatus.PARTIALLY_PAID
 
     db.commit()
     db.refresh(req)
@@ -4972,46 +5014,46 @@ def reject_expense(db: Session, expense_id: int, reason: str, rejector_id: int, 
     db.refresh(expense)
     return expense
 
-
-def list_my_requests(db: Session, current_user: models.User):
+def list_personal_requests(db: Session, current_user: models.User):
     """
-    Returns expenses where:
-    1. User is Admin/PD: All non-drafts (plus their own drafts).
-    2. User is PM (Requester): Everything they created (including Drafts).
-    3. User is SBC (Beneficiary): Only items assigned to them that are SUBMITTED or later (No Drafts).
+    STRICTLY PERSONAL: 
+    Returns expenses where the user is the Requester (PM) OR the Beneficiary (SBC).
+    Shows Drafts because this is the user's private workspace.
     """
     query = db.query(models.Expense).options(
         joinedload(models.Expense.internal_project),
         joinedload(models.Expense.requester)
     )
     
-    role_str = str(current_user.role).upper()
-    
-    # --- 1. ADMIN / PD View ---
-    if "ADMIN" in role_str or "PD" in role_str or "PROJECT DIRECTOR" in role_str:
-        # See my own requests (even drafts) OR others' requests (if submitted)
-        query = query.filter(or_(
+    return query.filter(
+        or_(
             models.Expense.requester_id == current_user.id,
-            models.Expense.status != models.ExpenseStatus.DRAFT
-        ))
-    
-    # --- 2. PM / SBC View ---
-    else:
-        query = query.filter(
-            or_(
-                # Case A: I am the Creator (PM) -> See everything (Drafts included)
-                models.Expense.requester_id == current_user.id,
-                
-                # Case B: I am the Beneficiary (SBC) -> See only if NOT Draft
-                and_(
-                    models.Expense.beneficiary_user_id == current_user.id,
-                    models.Expense.status != models.ExpenseStatus.DRAFT
-                )
-            )
+            models.Expense.beneficiary_user_id == current_user.id
         )
-    
-    return query.order_by(models.Expense.created_at.desc()).all()
+    ).order_by(models.Expense.created_at.desc()).all()
 
+
+def list_all_requests_global(db: Session, current_user: models.User):
+    """
+    MANAGEMENT VIEW:
+    Returns everything in the system.
+    - Includes own drafts.
+    - Includes everyone else's SUBMITTED, APPROVED, PAID, etc.
+    - Excludes other people's DRAFTs.
+    """
+    query = db.query(models.Expense).options(
+        joinedload(models.Expense.internal_project),
+        joinedload(models.Expense.requester)
+    )
+
+    return query.filter(
+        or_(
+            # My own stuff (Drafts included)
+            models.Expense.requester_id == current_user.id,
+            # Everyone else's stuff (BUT NO DRAFTS)
+            models.Expense.status != models.ExpenseStatus.DRAFT
+        )
+    ).order_by(models.Expense.created_at.desc()).all()
 def list_pending_l1(db: Session):
     """Liste toutes les dépenses en attente de validation L1 (PD)"""
     return db.query(models.Expense).filter(
@@ -5378,55 +5420,62 @@ def update_expense(db: Session, expense_id: int, payload: schemas.ExpenseCreate,
     db.refresh(db_expense)
     return db_expense
 
-def get_grouped_history(db: Session, page: int = 1, limit: int = 10):
-    total_reqs = db.query(models.FundRequest).count()
+def get_grouped_history(db: Session, page: int = 1, limit: int = 10, status_filter: str = "ALL"):
+    # 1. Base Query with full relationship loading
+    query = db.query(models.FundRequest).options(
+        joinedload(models.FundRequest.items).joinedload(models.FundRequestItem.target_pm)
+    )
+
+    if status_filter != "ALL":
+        query = query.filter(models.FundRequest.status == status_filter)
+
+    total_reqs = query.count()
     
-    requests = db.query(models.FundRequest).options(
-        joinedload(models.FundRequest.items)
-    ).order_by(
+    requests = query.order_by(
         models.FundRequest.created_at.desc()
     ).offset((page - 1) * limit).limit(limit).all()
     
     data = []
     for req in requests:
-        txs = db.query(models.Transaction).filter(
-            models.Transaction.related_request_id == req.id
-        ).all()
-        
+        # --- THE FIX: Build the ledger from ITEMS, not just Transactions ---
         tx_list = []
-        for tx in txs:
-            user = db.query(models.User).join(models.Caisse).filter(models.Caisse.id == tx.caisse_id).first()
-            user_name = f"{user.first_name} {user.last_name}" if user else "Unknown"
-            
+        for item in req.items:
+             # 1. Access the caisse directly as an object, not a list
+            # We use a safety check in case the PM doesn't have a wallet yet
+            user_caisse = item.target_pm.caisse if item.target_pm else None
+            caisse_id = user_caisse.id if user_caisse else None
+
+            tx = None
+            if caisse_id:
+                tx = db.query(models.Transaction).filter(
+                    models.Transaction.related_request_id == req.id,
+                    models.Transaction.caisse_id == caisse_id
+                ).first()
+
             tx_list.append({
-                "id": tx.id,
-                "amount": tx.amount,
-                "type": tx.type,
-                "description": tx.description,
-                # Fix for 1/1/1970: If date is null, send None
-                "created_at": tx.created_at.isoformat() if tx.created_at else None,
-                "status": tx.status,
-                "pm_name": user_name
+                "id": item.id,
+                "pm_name": f"{item.target_pm.first_name} {item.target_pm.last_name}" if item.target_pm else "Unknown PM",
+                "description": item.admin_note or "Refill Request",
+                "approved_amount": item.approved_amount or 0.0,
+                "received_amount": item.confirmed_amount or 0.0,
+                "status": tx.status if tx else "PENDING",
+                "confirmed_at": tx.created_at.isoformat() if (tx and tx.status == "COMPLETED") else None
             })
 
-        # --- DYNAMIC CALCULATION (The Fix for 0,00 MAD) ---
-        # Instead of req.confirmed_reception_amount, sum the items
+        # Calculate Parent Totals
+        total_requested = sum(item.requested_amount for item in req.items)
         actual_confirmed_total = sum(item.confirmed_amount or 0.0 for item in req.items)
-        calculated_requested_total = sum(item.requested_amount for item in req.items)
    
         data.append({
             "request_id": req.id,
             "request_number": req.request_number,
             "created_at": req.created_at.isoformat() if req.created_at else None,
             "status": req.status,
-            "total_amount": calculated_requested_total, 
+            "total_amount": total_requested, 
             "paid_amount": req.paid_amount or 0.0,
-            
-            # Use the dynamically summed value here
             "confirmed_reception_amount": actual_confirmed_total, 
-            
             "variance_acknowledged": req.variance_acknowledged, 
-            "transactions": tx_list
+            "transactions": tx_list # This now contains approved_amount AND received_amount
         })
         
     return {
@@ -5435,9 +5484,7 @@ def get_grouped_history(db: Session, page: int = 1, limit: int = 10):
         "page": page,
         "pages": (total_reqs + limit - 1) // limit
     }
-
-
-
+    
 def verify_invoice_physical(db: Session, invoice_id: int, raf_id: int):
     """RAF confirms they received the signed paper folder."""
     inv = db.query(models.Invoice).get(invoice_id)
