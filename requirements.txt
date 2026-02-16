@@ -3,6 +3,7 @@ alembic==1.17.1
 annotated-doc==0.0.3
 annotated-types==0.7.0
 anyio==4.11.0
+APScheduler==3.11.2
 argon2-cffi==25.1.0
 argon2-cffi-bindings==25.1.0
 bcrypt==5.0.0
@@ -69,13 +70,11 @@ typer==0.20.0
 typing-inspection==0.4.2
 typing_extensions==4.15.0
 tzdata==2025.2
+tzlocal==5.3.1
 ujson==5.11.0
 urllib3==2.5.0
 uvicorn==0.38.0
-uvloop==0.22.1; platform_system != "Windows"
+uvloop==0.22.1
 watchfiles==1.1.1
 websockets==15.0.1
 xlsxwriter==3.2.9
-
-
-
