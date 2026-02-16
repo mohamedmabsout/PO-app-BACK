@@ -76,12 +76,16 @@ async def import_purchase_orders(
     }
 
 
-@router.get("/import/history", response_model=List[schemas.UploadHistory])
+@router.get("/import/history", response_model=schemas.PageUploadHistory)
 def read_upload_history(
     db: Session = Depends(get_db),
+    page: int = Query(1, gt=0),
+    limit: int = Query(20, gt=0),
+    status: str = Query(None),
+    search: str = Query(None),
     current_user: models.User = Depends(auth.get_current_user),
 ):
-    return crud.get_upload_history(db=db)
+    return crud.get_upload_history_paginated(db, page=page, limit=limit, status=status, search=search)
 
 
 @router.get("/staging/purchase-orders", response_model=List[schemas.RawPurchaseOrder])
@@ -496,6 +500,7 @@ def approve_l1(
             title="Final Approval Required",
             message=f"BC {bc.bc_number} validated L1. Pending final approval.",
             link=f"/configuration/bc/detail/{bc.id}",
+            created_at=datetime.now(),
         )
         send_bc_status_email(bc, admin.email, "VALIDATED L1 (Waiting L2)", background_tasks)
 
@@ -522,6 +527,7 @@ def approve_l2(
         title="BC Approved",
         message=f"Your BC {bc.bc_number} has been fully approved.",
         link=f"/configuration/bc/detail/{bc.id}",
+        created_at=datetime.now(),
     )
     if bc.sbc and bc.sbc.email:
         send_bc_status_email(bc, bc.sbc.email, "APPROVED", background_tasks)
@@ -606,6 +612,7 @@ def submit_bon_de_commande(
             title="Approval Required",
             message=f"BC {bc.bc_number} submitted by {current_user.first_name} requires L1 validation.",
             link=f"/configuration/bc/detail/{bc.id}",
+            created_at=datetime.now(),
         )
         send_bc_status_email(bc, pd.email, "SUBMITTED (Waiting L1)", background_tasks)
 
@@ -669,22 +676,22 @@ def get_stats(
     """Returns the 3 cards data: Balance, Pending, Spent"""
     return crud.get_caisse_stats(db, current_user)
 
-
 @router.get("/transactions")
 def list_transactions(
     page: int = 1,
     limit: int = 20,
     type: Optional[str] = None,
+    status: str = "ALL", # ADDED
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     search: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
-    """Returns the history table data"""
     return crud.get_transactions(
-        db, current_user, page, limit, type, start_date, end_date, search
+        db, current_user, page, limit, type, status, start_date, end_date, search
     )
+
 
 @router.get("/requests/pending")
 def read_pending_requests(

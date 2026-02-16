@@ -79,3 +79,16 @@ def update_target_cell(payload: schemas.TargetUpdate, db: Session = Depends(get_
     # 5. Return a simple success message (Dict, not ORM object)
     return {"status": "success", "updated_field": payload.field, "new_value": payload.value}
 
+
+
+@router.post("/planning/auto-fill")
+def auto_fill_planning(
+    year: int, 
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    if current_user.role != models.UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Only Admins can auto-fill data.")
+    
+    updated = crud.auto_fill_planning_from_history(db, year)
+    return {"message": f"Auto-filled {updated} monthly records from {year-1} history."}

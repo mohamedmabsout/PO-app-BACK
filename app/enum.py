@@ -42,6 +42,20 @@ class NotificationType(str, enum.Enum):
     APP = "APP"         # Status Update (e.g., Your BC was approved)
     SYSTEM = "SYSTEM"  
     ALERT = "ALERT" 
+
+
+class NotificationModule(str, enum.Enum):
+    BC = "BC"                 # Purchase Orders
+    EXP = "EXP"               # Expenses / Petty Cash
+    CAISSE = "CAISSE"         # Fund Requests / Refills
+    ACCEPTANCE = "ACCEPTANCE" # ACT / Work Validation
+    DISPATCH = "DISPATCH"     # Site Assignments
+    SYSTEM = "SYSTEM"         # SBC Approval, Targets, Compliance
+    FACTURATION = "FACTURATION"
+    SBC_ACCOUNT = "SBC_ACCOUNT" # New module for Ledger/Balance alerts
+
+
+
 class AssignmentStatus(str, enum.Enum):
     APPROVED = "APPROVED" # Normal state
     PENDING_APPROVAL = "PENDING_APPROVAL" # Waiting for PM
@@ -94,16 +108,6 @@ class ExpenseStatus(str, enum.Enum):
 class TransactionStatus(str, enum.Enum):
     PENDING = "PENDING"
     COMPLETED = "COMPLETED"
-
-class NotificationModule(str, enum.Enum):
-    BC = "BC"                 # Purchase Orders
-    EXP = "EXP"               # Expenses / Petty Cash
-    CAISSE = "CAISSE"         # Fund Requests / Refills
-    ACCEPTANCE = "ACCEPTANCE" # ACT / Work Validation
-    DISPATCH = "DISPATCH"     # Site Assignments
-    SYSTEM = "SYSTEM"         # SBC Approval, Targets, Compliance
-    FACTURATION = "FACTURATION"
-    SBC_ACCOUNT = "SBC_ACCOUNT" # New module for Ledger/Balance alerts
 
 
 class InvoiceStatus(str, enum.Enum):

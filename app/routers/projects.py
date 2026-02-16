@@ -207,7 +207,8 @@ def assign_site_to_internal_project(
                 module=models.NotificationModule.DISPATCH,
                 title="New Site Assignments",
                 message=f"{current_user.first_name} has assigned {updated_rows} new sites to project '{target_project.name}'. Please review.",
-                link="/projects/approvals"
+                link="/projects/approvals",
+                created_at=datetime.now()
             )
             db.commit()
             print(f"Notification sent to PM ID {target_project.project_manager_id}")

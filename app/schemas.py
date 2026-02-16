@@ -924,3 +924,12 @@ class InvoiceDetail(InvoiceListItem):
 class BulkCategoryUpdate(BaseModel):
     po_ids: List[int]
     category: str
+
+
+class PageUploadHistory(BaseModel):
+    items: List[UploadHistory]
+    total: int
+    page: int
+    pages: int
+
+    model_config = ConfigDict(from_attributes=True)

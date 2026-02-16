@@ -543,7 +543,8 @@ def process_po_file_background(file_path: str, history_id: int, user_id: int, ch
                 module=models.NotificationModule.SYSTEM,
                 title="PO Import Complete",
                 message=f"File processed. {processed_count} POs updated.",
-                link="/site-dispatcher"
+                link="/dataimportation/DoubleImport",
+                created_at=datetime.now()
             )
             db.commit()
 
@@ -640,7 +641,9 @@ def process_acceptance_file_background(file_path: str, history_id: int, user_id:
             module=models.NotificationModule.SYSTEM,
             title="Acceptance Import Complete",
             message=f"File processed. {updated_count} Merged POs updated. ({skipped_rows} lines skipped).",
-            link="/site-dispatcher"
+            link="/dataimportation/DoubleImport",
+                            created_at=datetime.now()
+
         )
         db.commit()
 
@@ -743,15 +746,36 @@ def create_upload_history_record(
     return history_record
 
 
-def get_upload_history(db: Session, skip: int = 0, limit: int = 100):
-    # Use order_by to get the most recent uploads first
-    return (
-        db.query(models.UploadHistory)
-        .order_by(models.UploadHistory.uploaded_at.desc())
-        .offset(skip)
-        .limit(limit)
-        .all()
-    )
+def get_upload_history_paginated(
+    db: Session, 
+    page: int = 1, 
+    limit: int = 10, 
+    status: str = None, 
+    search: str = None
+):
+    query = db.query(models.UploadHistory)
+
+    # 1. Filters
+    if status and status != "ALL":
+        query = query.filter(models.UploadHistory.status == status)
+    
+    if search:
+        query = query.filter(models.UploadHistory.original_filename.ilike(f"%{search}%"))
+
+    total_count = query.count()
+
+    # 2. Pagination & Sorting (Newest first)
+    items = query.order_by(models.UploadHistory.uploaded_at.desc()) \
+                 .offset((page - 1) * limit) \
+                 .limit(limit) \
+                 .all()
+
+    return {
+        "items": items,
+        "total": total_count,
+        "page": page,
+        "pages": (total_count + limit - 1) // limit
+    }
 
 def get_eligible_pos_for_bc(
     db: Session, 
@@ -3111,7 +3135,8 @@ def bulk_assign_sites(db: Session, site_ids: List[int], target_project_id: int, 
                 module=models.NotificationModule.DISPATCH,
                 title="Bulk Site Assignment",
                 message=f"{admin_user.first_name} has assigned {result_count} PO lines (across {len(valid_site_ids)} sites) to project '{target_project.name}'. Please review.",
-                link="/projects/approvals"
+                link="/site-assignment",
+                created_at=datetime.now()
             )
             db.commit()
         except Exception as e:
@@ -3178,7 +3203,8 @@ def auto_approve_old_assignments(db: Session):
             mmodule=models.NotificationModule.DISPATCH,
             title="Auto-Approval Notice",
             message=f"{count} sites assigned to '{project_name}' were auto-approved due to inactivity (>7 days).",
-            link="/projects/list" # Link to their project list to see the new sites
+            link="/projects/list", # Link to their project list to see the new sites
+            created_at=datetime.now()
         )
         total_approved += count
 
@@ -3203,7 +3229,8 @@ def auto_approve_old_assignments(db: Session):
             module=models.NotificationModule.SYSTEM,
             title="System Auto-Approval",
             message=f"System auto-approved {total_approved} overdue site assignments.",
-            link=None
+            link="/site-dispatcher",
+            crated_at=datetime.now()
         )
 
     db.commit()
@@ -3278,7 +3305,8 @@ def process_assignment_review(db: Session, merged_po_ids: List[int], action: str
                 module=models.NotificationModule.DISPATCH,
                 title=f"Site Assignment {action_text}",
                 message=f"PM {pm_user.first_name} {pm_user.last_name} has {action.lower()}ed {count} sites.",
-                link="/site-dispatcher" # Link them back to dispatcher to see results
+                link="/site-assignment", # Link them back to dispatcher to see results
+                created_at=datetime.now()
             )
         
         db.commit()
@@ -3644,7 +3672,8 @@ def create_notification(
     module: models.NotificationModule,
     title: str, 
     message: str, 
-    link: str = None
+    link: str = None,
+    created_at: Optional[datetime] = None
 ):
     notif = models.Notification(
         recipient_id=recipient_id,
@@ -3652,7 +3681,9 @@ def create_notification(
         module=module,
         title=title,
         message=message,
-        link=link
+        link=link,
+        created_at=datetime.now(),
+        is_read=False
     )
     db.add(notif)
     # We usually commit in the main flow, but you can commit here if you want it instant
@@ -3996,11 +4027,12 @@ def check_rejections_and_notify(db: Session, background_tasks: BackgroundTasks =
         admins = db.query(models.User).filter(models.User.role == "ADMIN").all()
         for admin in admins:
             create_notification(
-                db, recipient_id=admin.id, type=models.NotificationType.SYSTEM,
-                module=models.NotificationModule.SYSTEM,
+                db, recipient_id=admin.id, type=models.NotificationType.ALERT,
+                module=models.NotificationModule.ACCEPTANCE,
                 title="Permanent Rejection Alert",
                 message=f"Item {item.id} has reached 5 rejections.",
-                link=f"/configuration/acceptance/workflow/{item.bc_id}"
+                link=f"/configuration/acceptance/workflow/{item.bc_id}",
+                created_at=datetime.now()
             )
             
     # --- 2. HANDLE 3-WEEK POSTPONEMENT REMINDERS ---
@@ -4031,11 +4063,12 @@ def check_rejections_and_notify(db: Session, background_tasks: BackgroundTasks =
             if rejector:
                 # 1. App Notification
                 create_notification(
-                    db, recipient_id=rejector.id, type=models.NotificationType.TODO,
+                    db, recipient_id=rejector.id, type=models.NotificationType.SYSTEM,
                     module=models.NotificationModule.ACCEPTANCE,
                     title="Rejection Period Ended",
                     message=f"Item {item.id} is ready for re-inspection (3 weeks passed).",
-                    link=f"/configuration/acceptance/workflow/{item.bc_id}"
+                    link=f"/configuration/acceptance/workflow/{item.bc_id}",
+                    created_at=datetime.now()
                 )
                 
                 # 2. Email Notification
@@ -4332,78 +4365,88 @@ def get_caisse_stats(db: Session, user: models.User):
         "spent_month": float(spent_month)
     }
 
-    
 def get_transactions(
     db: Session, 
     user: models.User, 
     page: int = 1, 
     limit: int = 20,
     type_filter: str = None,
+    status_filter: str = "ALL", # NEW
     start_date: str = None,
     end_date: str = None,
     search: str = None
 ):
-    """
-    Fetches paginated transactions with filters.
-    Security: PMs see only their own. Admins/PDs see all.
-    """
+    # Base query
     query = db.query(models.Transaction).join(models.Caisse).join(models.User, models.Caisse.user_id == models.User.id)
     
     # 1. Security Filter
-    # If not Admin/PD, restrict to own wallet
     if user.role not in [models.UserRole.ADMIN, models.UserRole.PD]:
         query = query.filter(models.Caisse.user_id == user.id)
     
-    # 2. Apply Filters
+    # 2. Status Filter (Filtering based on the related Fund Request)
+    if status_filter != "ALL":
+        query = query.join(models.FundRequest, models.Transaction.related_request_id == models.FundRequest.id)
+        query = query.filter(models.FundRequest.status == status_filter)
+
+    # 3. Standard Filters
     if type_filter and type_filter != "ALL":
         query = query.filter(models.Transaction.type == type_filter)
-        
     if start_date:
         query = query.filter(func.date(models.Transaction.created_at) >= start_date)
-        
     if end_date:
         query = query.filter(func.date(models.Transaction.created_at) <= end_date)
-        
     if search:
         term = f"%{search}%"
-        # Search in description OR user name (for admins)
-        query = query.filter(
-            (models.Transaction.description.ilike(term)) |
-            (models.User.first_name.ilike(term)) |
-            (models.User.last_name.ilike(term))
-        )
+        query = query.filter(or_(
+            models.Transaction.description.ilike(term),
+            models.User.first_name.ilike(term),
+            models.User.last_name.ilike(term)
+        ))
 
-    # 3. Pagination
     total_items = query.count()
-    
-    # Order by newest first
     transactions = query.order_by(models.Transaction.created_at.desc())\
-                        .offset((page - 1) * limit)\
-                        .limit(limit)\
-                        .all()
+                        .offset((page - 1) * limit).limit(limit).all()
     
-    # 4. Format Result
-    # We need to flatten the user info for the frontend
     items = []
     for t in transactions:
-        t_dict = t.__dict__.copy()
-        if '_sa_instance_state' in t_dict: del t_dict['_sa_instance_state']
+        t_dict = {
+            "id": t.id,
+            "created_at": t.created_at,
+            "type": t.type,
+            "description": t.description,
+            "amount": t.amount,
+            "status": t.status,
+            "user_name": f"{t.caisse.user.first_name} {t.caisse.user.last_name}",
+            "created_by_name": "System"
+        }
         
-        # Add User Name (Owner of the wallet)
-        t_dict['user_name'] = f"{t.caisse.user.first_name} {t.caisse.user.last_name}"
-        
-        # Add Creator Name (Who made the transaction)
-        # Note: You might need to join 'created_by' relationship or fetch it if lazy loaded
+        # Pull creator info
         creator = db.query(models.User).get(t.created_by_id)
-        t_dict['created_by_name'] = f"{creator.first_name} {creator.last_name}" if creator else "System"
-        
+        if creator: t_dict['created_by_name'] = f"{creator.first_name} {creator.last_name}"
+
+        # --- AUDIT LOGIC: Approved vs Received ---
+        # Default: Approved and Received are the same (for Expenses/Debits)
+        t_dict["approved_by_ceo"] = t.amount
+        t_dict["received_by_pd"] = t.amount if t.status == "COMPLETED" else 0.0
+
+        # If it's a Refill (CREDIT), get the specific amounts from the request item
+        if t.type == models.TransactionType.CREDIT and t.related_request_id:
+            item = db.query(models.FundRequestItem).filter(
+                models.FundRequestItem.request_id == t.related_request_id,
+                models.FundRequestItem.target_pm_id == t.caisse.user_id
+            ).first()
+            if item:
+                t_dict["approved_by_ceo"] = item.approved_amount or 0.0
+                t_dict["received_by_pd"] = item.confirmed_amount or 0.0
+                # Use PD Remark if available
+                if item.remarque: t_dict["description"] = item.remarque
+
         items.append(t_dict)
 
     return {
         "items": items,
         "total_items": total_items,
         "page": page,
-        "limit": limit,
         "total_pages": (total_items + limit - 1) // limit
     }
     
@@ -4795,7 +4838,8 @@ def create_expense(db: Session, payload: schemas.ExpenseCreate, user_id: int, ba
                 module=models.NotificationModule.EXP,
                 title="Expense L1 Approval Required",
                 message=f"PM {db_expense.requester.first_name} submitted an expense of {db_expense.amount} MAD.",
-                link=f"/expenses/details/{db_expense.id}"
+                link="/expenses?tab=l1",
+                created_at=datetime.now()
             )
         
         send_notification_email(background_tasks, pd_emails, "Expense Pending L1 Approval", "", {
@@ -4827,7 +4871,8 @@ def approve_expense_l1(db: Session, expense_id: int, pd_id: int, background_task
             module=models.NotificationModule.EXP,
             title="Expense L2 Finance Approval",
             message=f"Expense #{expense.id} passed L1. Please validate for payment.",
-            link=f"/expenses/details/{expense.id}"
+            link=f"/expenses?tab=l2",
+            created_at=datetime.now()
         )
     
     send_notification_email(background_tasks, admin_emails, "Expense Pending L2 Approval", "", {
@@ -4852,6 +4897,9 @@ def approve_expense_l2(db: Session, expense_id: int, admin_id: int, background_t
     # NOTIFY PD (The L1 Approver is usually the one who pays)
     pd_id = expense.l1_approver_id
     pd = db.query(models.User).get(pd_id)
+    # beneficiary = db.query(models.User).get(expense.beneficiary_user_id)
+    
+    
     
     if pd:
         create_notification(
@@ -4859,7 +4907,8 @@ def approve_expense_l2(db: Session, expense_id: int, admin_id: int, background_t
             module=models.NotificationModule.EXP,
             title="Proceed with Payment",
             message=f"Expense #{expense.id} is fully approved. Print voucher and pay beneficiary.",
-            link=f"/expenses/details/{expense.id}"
+            link=f"/expenses?tab=l1",
+            created_at=datetime.now()
         )
         if pd.email:
             send_notification_email(background_tasks, [pd.email], "Expense Ready for Payment", "", {
@@ -4873,7 +4922,7 @@ def approve_expense_l2(db: Session, expense_id: int, admin_id: int, background_t
 
 def confirm_expense_payment(db: Session, expense_id: int, filename: str, pd_id: int, background_tasks: BackgroundTasks):
     expense = db.query(models.Expense).get(expense_id)
-    if not expense or expense.status in [models.ExpenseStatus.PAID, models.ExpenseStatus.ACKNOWLEDGED]:
+    if not expense or expense.status in [models.ExpenseStatus.ACKNOWLEDGED]:
         return expense
 
     # 1. SETTLEMENT: Consume the Pool
@@ -4915,7 +4964,8 @@ def confirm_expense_payment(db: Session, expense_id: int, filename: str, pd_id: 
             module=models.NotificationModule.EXP,
             title="Confirm Receipt of Funds",
             message=f"A payment of {expense.amount} MAD has been marked as paid to you. Please acknowledge.",
-            link=f"/expenses/details/{expense.id}"
+            link=f"/expenses?tab=l1",
+            created_at=datetime.now()
         )
         beneficiary = db.query(models.User).get(expense.beneficiary_user_id)
         if beneficiary and beneficiary.email:
@@ -4947,7 +4997,8 @@ def acknowledge_payment(db: Session, expense_id: int, user_id: int, background_t
             module=models.NotificationModule.EXP, # <--- Ensure this Enum exists in Python
             title="Expense Fully Acknowledged",
             message=f"Beneficiary {expense.beneficiary} confirmed receipt for Expense #{expense.id}.",
-            link=f"/expenses/details/{expense.id}"
+            link=f"/expenses?tab=l1",
+            created_at=datetime.now()
         )
     
     db.commit()
@@ -4994,7 +5045,8 @@ def reject_expense(db: Session, expense_id: int, reason: str, rejector_id: int, 
         module=models.NotificationModule.EXP,
         title="Expense Rejected ❌",
         message=f"Your expense for {expense.amount} MAD was rejected. Reason: {reason}",
-        link=f"/expenses/details/{expense.id}"
+        link=f"/expenses/details/{expense.id}",
+        created_at=datetime.now()
     )
     
     # 6. NOTIFY PM (Email)
@@ -5094,6 +5146,7 @@ def submit_expense(db: Session, expense_id: int, background_tasks: BackgroundTas
             title="Nouvelle dépense à valider 📝",
             message=f"Le PM {expense.requester.first_name} a soumis une dépense de {expense.amount} MAD pour le projet {expense.internal_project.name}.",
             link="/expenses?tab=l1",
+            created_at=datetime.now(),
             background_tasks=background_tasks
         )
 
@@ -5493,7 +5546,7 @@ def verify_invoice_physical(db: Session, invoice_id: int, raf_id: int):
     
     # Notify SBC
     create_notification(db, inv.sbc.users[0].id, NotificationType.APP, NotificationModule.FACTURATION, 
-                        "Invoice Verified", f"Your invoice {inv.invoice_number} has been verified by RAF.")
+                        "Invoice Verified", f"Your invoice {inv.invoice_number} has been verified by RAF.", created_at=datetime.now())
     db.commit()
     return inv
 
@@ -5731,7 +5784,7 @@ def mark_invoice_paid(db: Session, invoice_id: int, filename: str):
     
     # Notify SBC
     create_notification(db, inv.sbc.users[0].id, NotificationType.APP, NotificationModule.FACTURATION,
-                        "Payment Confirmed", f"Invoice {inv.invoice_number} has been paid. View receipt in portal.")
+                        "Payment Confirmed", f"Invoice {inv.invoice_number} has been paid. View receipt in portal.", created_at=datetime.now())
     db.commit()
     return inv
 
@@ -5825,7 +5878,8 @@ def notify_raf_new_invoice(db: Session, invoice: models.Invoice, background_task
             module=models.NotificationModule.FACTURATION,
             title="Facture verification required",
             message=f"SBC {invoice.sbc.short_name} has submitted Invoice {invoice.invoice_number} ({invoice.total_amount_ttc:,.2f} MAD).",
-            link=f"/raf/facturation/verify/{invoice.id}"
+            link=f"/raf/facturation/verify/{invoice.id}",
+            created_at=datetime.now()
         )
     
     # Commit the DB notifications
@@ -6126,3 +6180,47 @@ def get_expense_export_dataframe(db: Session, current_user: models.User, export_
                 data.append(row)
 
     return pd.DataFrame(data)
+
+
+def auto_fill_planning_from_history(db: Session, year: int):
+    """
+    For all users, if a planning target for a month in 'year' is missing/zero,
+    copy the target from 'year - 1'.
+    """
+    # 1. Get all PMs/Users who have at least one target in the system
+    user_ids = db.query(models.UserPerformanceTarget.user_id).distinct().all()
+    user_ids = [u[0] for u in user_ids]
+
+    count_updated = 0
+
+    for uid in user_ids:
+        # Fetch targets for both years
+        current_targets = {t.month: t for t in db.query(models.UserPerformanceTarget).filter_by(user_id=uid, year=year).all()}
+        prev_targets = {t.month: t for t in db.query(models.UserPerformanceTarget).filter_by(user_id=uid, year=year-1).all()}
+
+        for month in range(1, 13):
+            # Does a previous value exist?
+            prev = prev_targets.get(month)
+            if not prev:
+                continue
+
+            # Does current value need filling? (Missing or both updates are 0)
+            curr = current_targets.get(month)
+            
+            # Logic: If current doesn't exist OR current has zero values, fill from previous
+            needs_filling = not curr or (curr.po_master_plan == 0 and curr.acceptance_master_plan == 0)
+
+            if needs_filling:
+                if not curr:
+                    curr = models.UserPerformanceTarget(user_id=uid, year=year, month=month)
+                    db.add(curr)
+                
+                # Copy values
+                curr.po_master_plan = prev.po_master_plan
+                curr.po_monthly_update = prev.po_monthly_update
+                curr.acceptance_master_plan = prev.acceptance_master_plan
+                curr.acceptance_monthly_update = prev.acceptance_monthly_update
+                count_updated += 1
+
+    db.commit()
+    return count_updated
