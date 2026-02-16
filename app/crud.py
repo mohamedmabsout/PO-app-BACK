@@ -1,5 +1,5 @@
 from datetime import datetime, date, timedelta, timezone as dt_timezone # Renommé pour éviter le conflit
-
+import os
 from select import select
 from fastapi import BackgroundTasks
 from pytz import timezone
@@ -29,7 +29,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import func,or_
 from fastapi import UploadFile, File, Form,HTTPException
 from fastapi.responses import FileResponse
-
+from .utils.email import send_bc_status_email, send_email_background, LOGOS,send_notification_email
 
 logger = logging.getLogger(__name__)
 
@@ -50,54 +50,54 @@ PAYMENT_TERM_MAP = {
 def format_currency_python(value):
     """Formats a number to '10 000,00 MAD' style in Python"""
     return f"{value:,.2f} MAD".replace(",", " ").replace(".", ",")
-def send_notification_email(
-    background_tasks: BackgroundTasks,
-    recipients: List[str],
-    subject: str,
-    template_name: str,
-    context: dict
-):
-    """
-    Generic helper to send HTML emails via background tasks.
-    """
-    if not recipients:
-        return
+# def send_notification_email(
+#     background_tasks: BackgroundTasks,
+#     recipients: List[str],
+#     subject: str,
+#     template_name: str,
+#     context: dict
+# ):
+#     """
+#     Generic helper to send HTML emails via background tasks.
+#     """
+#     if not recipients:
+#         return
 
-    # Basic HTML builder (In a production app, use Jinja2 templates)
-    html_content = f"""
-    <html>
-        <body style="font-family: Arial, sans-serif; color: #333;">
-            <div style="background-color: #f8f9fa; padding: 20px; border-bottom: 2px solid #007bff;">
-                <h2 style="color: #007bff; margin: 0;">SIB Portal Notification</h2>
-            </div>
-            <div style="padding: 20px;">
-                <h3>{subject}</h3>
-                <p>Hello,</p>
-                <p>{context.get('message', '')}</p>
-                <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
-                    { "".join([f"<tr><td style='padding:8px; border:1px solid #ddd;'><b>{k}:</b></td><td style='padding:8px; border:1px solid #ddd;'>{v}</td></tr>" for k, v in context.get('details', {}).items()]) }
-                </table>
-                <p>Please log in to the portal to take action.</p>
-                <a href="{os.getenv('FRONTEND_URL', 'http://localhost:3000')}{context.get('link', '')}" 
-                   style="display: inline-block; padding: 10px 20px; background-color: #007bff; color: white; text-decoration: none; border-radius: 5px;">
-                   View in Portal
-                </a>
-            </div>
-            <div style="padding: 20px; font-size: 12px; color: #777;">
-                This is an automated message from the SIB Management System.
-            </div>
-        </body>
-    </html>
-    """
+#     # Basic HTML builder (In a production app, use Jinja2 templates)
+#     html_content = f"""
+#     <html>
+#         <body style="font-family: Arial, sans-serif; color: #333;">
+#             <div style="background-color: #f8f9fa; padding: 20px; border-bottom: 2px solid #007bff;">
+#                 <h2 style="color: #007bff; margin: 0;">SIB Portal Notification</h2>
+#             </div>
+#             <div style="padding: 20px;">
+#                 <h3>{subject}</h3>
+#                 <p>Hello,</p>
+#                 <p>{context.get('message', '')}</p>
+#                 <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
+#                     { "".join([f"<tr><td style='padding:8px; border:1px solid #ddd;'><b>{k}:</b></td><td style='padding:8px; border:1px solid #ddd;'>{v}</td></tr>" for k, v in context.get('details', {}).items()]) }
+#                 </table>
+#                 <p>Please log in to the portal to take action.</p>
+#                 <a href="{os.getenv('FRONTEND_URL', 'http://localhost:3000')}{context.get('link', '')}" 
+#                    style="display: inline-block; padding: 10px 20px; background-color: #007bff; color: white; text-decoration: none; border-radius: 5px;">
+#                    View in Portal
+#                 </a>
+#             </div>
+#             <div style="padding: 20px; font-size: 12px; color: #777;">
+#                 This is an automated message from the SIB Management System.
+#             </div>
+#         </body>
+#     </html>
+#     """
 
-    message = MessageSchema(
-        subject=f"SIB Portal: {subject}",
-        recipients=recipients,
-        body=html_content,
-        subtype=MessageType.html
-    )
-    fm = FastMail(conf)
-    background_tasks.add_task(fm.send_message, message)
+#     message = MessageSchema(
+#         subject=f"SIB Portal: {subject}",
+#         recipients=recipients,
+#         body=html_content,
+#         subtype=MessageType.html
+#     )
+#     fm = FastMail(conf)
+#     background_tasks.add_task(fm.send_message, message)
 
 # --- ROLE HELPER ---
 def get_emails_by_role(db: Session, role: UserRole) -> List[str]:
@@ -4791,7 +4791,7 @@ def create_expense(db: Session, payload: schemas.ExpenseCreate, user_id: int, ba
     caisse = db.query(models.Caisse).filter(models.Caisse.user_id == user_id).first()
     if not caisse or (caisse.balance or 0) < net_amount:
         raise ValueError(f"Insufficient balance. Net needed: {net_amount} MAD.")
-
+    pm_full_name = f"{user.first_name} {user.last_name}"
     db_expense = models.Expense(
         project_id=payload.project_id,
         sbc_id=sbc_id,
@@ -4842,11 +4842,27 @@ def create_expense(db: Session, payload: schemas.ExpenseCreate, user_id: int, ba
                 created_at=datetime.now()
             )
         
-        send_notification_email(background_tasks, pd_emails, "Expense Pending L1 Approval", "", {
-            "message": "A new expense requires your operational validation.",
-            "details": {"Amount": f"{db_expense.amount} MAD", "Project": db_expense.internal_project.name},
-            "link": f"/expenses/details/{db_expense.id}"
-        })
+        details = {
+            "id": db_expense.id,
+            "project": db_expense.internal_project.name,
+            "pm": f"{db_expense.internal_project.project_manager.first_name} {db_expense.internal_project.project_manager.last_name}",
+            "creator": pm_full_name,
+            "date": db_expense.created_at.strftime("%d/%m/%Y"),
+            "beneficiary": db_expense.beneficiary,
+            "category": db_expense.exp_type,
+            "total": f"{db_expense.amount:,.2f} MAD",
+            "remark": db_expense.remark
+        }
+
+        send_notification_email(
+            background_tasks=background_tasks,
+            recipients=pd_emails,
+            subject="New Expense Submission",
+            module="EXP",
+            status_text="SUBMITTED",
+            details=details,
+            link=f"/expenses/details/{db_expense.id}"
+        )
 
     db.commit()
     return db_expense
@@ -5919,6 +5935,45 @@ def acknowledge_invoice_receipt(db: Session, invoice_id: int, sbc_user_id: int):
     db.commit()
     return inv
 
+def generate_invoice_excel_bytes(invoice):
+    """
+    Generates an Excel file (bytes) containing the detailed rows of the invoice.
+    """
+    data = []
+    
+    for act in invoice.acts:
+        for item in act.items:
+            data.append({
+                "Invoice Number": invoice.invoice_number,
+                "BC Number": act.bc.bc_number,
+                "BC Line": item.merged_po.po_line_no,
+                "DUID / Site Code": item.merged_po.site_code,
+                "Description": item.merged_po.item_description,
+                "Quantity": item.quantity_sbc,
+                "Unit Price (HT)": item.unit_price_sbc,
+                "Amount (HT)": item.line_amount_sbc,
+                "VAT Rate": f"{int(item.applied_tax_rate * 100)}%",
+                "VAT Amount": item.line_amount_sbc * item.applied_tax_rate,
+                "Total (TTC)": item.line_amount_sbc * (1 + item.applied_tax_rate),
+                "Category": invoice.category,
+                "SBC": invoice.sbc.name,
+                "Project": act.bc.internal_project.name
+            })
+
+    df = pd.DataFrame(data)
+    
+    # Use BytesIO to create the file in memory
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        df.to_excel(writer, index=False, sheet_name='Invoice Details')
+        
+        # Auto-adjust columns width
+        worksheet = writer.sheets['Invoice Details']
+        for i, col in enumerate(df.columns):
+            column_len = max(df[col].astype(str).str.len().max(), len(col)) + 2
+            worksheet.set_column(i, i, min(column_len, 50))
+
+    return output.getvalue()
 
 def create_sbc_advance_record(db: Session, expense: models.Expense):
     """

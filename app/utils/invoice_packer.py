@@ -1,7 +1,7 @@
 import zipfile
 import io
 from .pdf_generator import generate_invoice_pdf, generate_bc_pdf, generate_act_pdf
-
+from .. import crud
 def create_invoice_zip(invoice):
     zip_buffer = io.BytesIO()
     
@@ -9,11 +9,11 @@ def create_invoice_zip(invoice):
         # 1. The Main Invoice
         inv_pdf = generate_invoice_pdf(invoice)
         zip_file.writestr(f"INVOICE_{invoice.invoice_number}.pdf", inv_pdf.getvalue())
+        excel_data = crud.generate_invoice_excel_bytes(invoice)
+        zip_file.writestr(f"DATA_DETAILS_{invoice.invoice_number}.xlsx", excel_data)
         
-        # 2. Loop through ACTs
-        # Set to track BCs to avoid adding the same BC PDF multiple times
+        # 3. Add all related ACT PDFs
         added_bcs = set()
-        
         for act in invoice.acts:
             # Add ACT PDF
             act_pdf = generate_act_pdf(act)
