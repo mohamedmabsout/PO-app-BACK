@@ -29,7 +29,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import func,or_
 from fastapi import UploadFile, File, Form,HTTPException
 from fastapi.responses import FileResponse
-from .utils.email import send_bc_status_email, send_email_background, LOGOS,send_notification_email
+from .utils.email import send_bc_status_email, send_email_background, LOGOS
 
 logger = logging.getLogger(__name__)
 
@@ -50,54 +50,54 @@ PAYMENT_TERM_MAP = {
 def format_currency_python(value):
     """Formats a number to '10 000,00 MAD' style in Python"""
     return f"{value:,.2f} MAD".replace(",", " ").replace(".", ",")
-# def send_notification_email(
-#     background_tasks: BackgroundTasks,
-#     recipients: List[str],
-#     subject: str,
-#     template_name: str,
-#     context: dict
-# ):
-#     """
-#     Generic helper to send HTML emails via background tasks.
-#     """
-#     if not recipients:
-#         return
+def send_notification_email(
+    background_tasks: BackgroundTasks,
+    recipients: List[str],
+    subject: str,
+    template_name: str,
+    context: dict
+):
+    """
+    Generic helper to send HTML emails via background tasks.
+    """
+    if not recipients:
+        return
 
-#     # Basic HTML builder (In a production app, use Jinja2 templates)
-#     html_content = f"""
-#     <html>
-#         <body style="font-family: Arial, sans-serif; color: #333;">
-#             <div style="background-color: #f8f9fa; padding: 20px; border-bottom: 2px solid #007bff;">
-#                 <h2 style="color: #007bff; margin: 0;">SIB Portal Notification</h2>
-#             </div>
-#             <div style="padding: 20px;">
-#                 <h3>{subject}</h3>
-#                 <p>Hello,</p>
-#                 <p>{context.get('message', '')}</p>
-#                 <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
-#                     { "".join([f"<tr><td style='padding:8px; border:1px solid #ddd;'><b>{k}:</b></td><td style='padding:8px; border:1px solid #ddd;'>{v}</td></tr>" for k, v in context.get('details', {}).items()]) }
-#                 </table>
-#                 <p>Please log in to the portal to take action.</p>
-#                 <a href="{os.getenv('FRONTEND_URL', 'http://localhost:3000')}{context.get('link', '')}" 
-#                    style="display: inline-block; padding: 10px 20px; background-color: #007bff; color: white; text-decoration: none; border-radius: 5px;">
-#                    View in Portal
-#                 </a>
-#             </div>
-#             <div style="padding: 20px; font-size: 12px; color: #777;">
-#                 This is an automated message from the SIB Management System.
-#             </div>
-#         </body>
-#     </html>
-#     """
+    # Basic HTML builder (In a production app, use Jinja2 templates)
+    html_content = f"""
+    <html>
+        <body style="font-family: Arial, sans-serif; color: #333;">
+            <div style="background-color: #f8f9fa; padding: 20px; border-bottom: 2px solid #007bff;">
+                <h2 style="color: #007bff; margin: 0;">SIB Portal Notification</h2>
+            </div>
+            <div style="padding: 20px;">
+                <h3>{subject}</h3>
+                <p>Hello,</p>
+                <p>{context.get('message', '')}</p>
+                <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
+                    { "".join([f"<tr><td style='padding:8px; border:1px solid #ddd;'><b>{k}:</b></td><td style='padding:8px; border:1px solid #ddd;'>{v}</td></tr>" for k, v in context.get('details', {}).items()]) }
+                </table>
+                <p>Please log in to the portal to take action.</p>
+                <a href="{os.getenv('FRONTEND_URL', 'http://localhost:3000')}{context.get('link', '')}" 
+                   style="display: inline-block; padding: 10px 20px; background-color: #007bff; color: white; text-decoration: none; border-radius: 5px;">
+                   View in Portal
+                </a>
+            </div>
+            <div style="padding: 20px; font-size: 12px; color: #777;">
+                This is an automated message from the SIB Management System.
+            </div>
+        </body>
+    </html>
+    """
 
-#     message = MessageSchema(
-#         subject=f"SIB Portal: {subject}",
-#         recipients=recipients,
-#         body=html_content,
-#         subtype=MessageType.html
-#     )
-#     fm = FastMail(conf)
-#     background_tasks.add_task(fm.send_message, message)
+    message = MessageSchema(
+        subject=f"SIB Portal: {subject}",
+        recipients=recipients,
+        body=html_content,
+        subtype=MessageType.html
+    )
+    fm = FastMail(conf)
+    background_tasks.add_task(fm.send_message, message)
 
 # --- ROLE HELPER ---
 def get_emails_by_role(db: Session, role: UserRole) -> List[str]:
@@ -5178,15 +5178,6 @@ def submit_expense(db: Session, expense_id: int, background_tasks: BackgroundTas
         pd_emails,
         "Expense Approval Required (L1)",
         "",
-        {
-            "message": f"PM {expense.requester.first_name} has submitted an expense for project {expense.internal_project.name}.",
-            "details": {
-                "Amount": f"{expense.amount} MAD",
-                "Type": expense.exp_type,
-                "Beneficiary": expense.beneficiary
-            },
-            "link": "/expenses?tab=l1"
-        }
     )
     return expense
 
