@@ -4148,6 +4148,7 @@ def get_sbc_acceptances(db: Session, user: models.User):
     ).order_by(models.ServiceAcceptance.created_at.desc()).all()
     
     return acts
+
 def create_fund_request(db: Session, pd_user: int, items: list):
     now = datetime.now()
     year = now.year
@@ -4198,6 +4199,7 @@ def create_fund_request(db: Session, pd_user: int, items: list):
     db.refresh(new_req) # Refresh to load relationships/IDs
 
     return new_req
+    
 def approve_fund_request(db: Session, req_id: int, admin_id: int, approved_items: dict):
     # approved_items is a dict: { item_id: approved_amount }
     

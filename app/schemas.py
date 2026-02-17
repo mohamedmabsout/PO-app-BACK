@@ -933,3 +933,32 @@ class PageUploadHistory(BaseModel):
     pages: int
 
     model_config = ConfigDict(from_attributes=True)
+
+
+# PM SUBMISSION
+class FundRequestItemCreate(BaseModel):
+    amount: float
+    remark: str
+
+class FundRequestCreate(BaseModel):
+    items: List[FundRequestItemCreate]
+    comment: Optional[str] = None
+
+# PD REVIEW
+class PDItemReview(BaseModel):
+    item_id: int
+    approved_amount: float # The "Trimmed" amount
+
+class PDReviewAction(BaseModel):
+    action: str # "APPROVE" or "REJECT"
+    items: Optional[List[PDItemReview]] = None
+    comment: Optional[str] = None
+
+# ADMIN REVIEW
+class AdminItemReview(BaseModel):
+    item_id: int
+    amount_to_pay: float
+
+class AdminReviewAction(BaseModel):
+    items: List[AdminItemReview]
+    comment: Optional[str] = None
