@@ -3829,7 +3829,7 @@ def validate_bc_item(db: Session, item_id: int, user: models.User, action: str, 
 
     # 1. Determine Role
     is_qc = user.role == UserRole.QUALITY # Adjust to your Enum
-    is_pm = user.role == UserRole.PM
+    is_pm = user.role in [UserRole.PM, UserRole.ADMIN] # PMs and Admins can approve as PM
     is_pd = user.role in [UserRole.PD, UserRole.ADMIN]
     print(f"DEBUG: User Role: {user.role}, is_qc: {is_qc}, is_pm: {is_pm}, is_pd: {is_pd}")
         
