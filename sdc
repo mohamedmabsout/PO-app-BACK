@@ -33,7 +33,7 @@ docker compose up -d --build
 
 # Step 3: Now that the container is running with the corrected file,
 # execute the migration.
-  docker compose exec backend alembic upgrade head
+docker compose exec backend alembic upgrade head
 
 
 DELETE FROM merged_pos;

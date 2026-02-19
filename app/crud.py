@@ -4149,6 +4149,232 @@ def get_sbc_acceptances(db: Session, user: models.User):
     
     return acts
 
+
+
+def create_pm_fund_request(db: Session, pm_id: int, payload: schemas.FundRequestCreate):
+    # Calculate initial total from PM input
+    total = sum(item.amount for item in payload.items)
+    now = datetime.now()
+    year = now.year
+    month = now.month
+    
+    # Generate ID based on Year-Month
+    # Count requests in this specific month to restart sequence or just keep global sequence?
+    # Global sequence is safer: REQ-2026-01-001
+    
+    # Find last request from this month
+    pattern = f"REQ-{year}-{month:02d}-%"
+    last_req = db.query(models.FundRequest).filter(
+        models.FundRequest.request_number.like(pattern)
+    ).order_by(models.FundRequest.id.desc()).first()
+    
+    if last_req:
+        try:
+            last_seq = int(last_req.request_number.split('-')[-1])
+            new_seq = last_seq + 1
+        except:
+            new_seq = 1
+    else:
+        new_seq = 1
+        
+    req_num = f"REQ-{year}-{month:02d}-{new_seq:03d}"
+
+    db_req = models.FundRequest(
+        request_number=req_num,
+        requester_id=pm_id,
+        status=models.FundRequestStatus.SUBMITTED,
+        created_at=datetime.now(),
+        admin_comment=payload.comment # Initial PM comment
+    )
+    db.add(db_req)
+    db.flush()
+
+    for item in payload.items:
+        db_item = models.FundRequestItem(
+            request_id=db_req.id,
+            target_pm_id=pm_id,
+            requested_amount=item.amount,
+            # --- FIX: Start these at 0.0 ---
+            pd_approved_amount=0.0, 
+            admin_approved_amount=0.0,
+            confirmed_amount=0.0,
+            # -------------------------------
+            remarque=item.remark
+        )
+        db.add(db_item)
+
+    
+    db.commit()
+    return db_req
+
+def pd_validate_request(db: Session, req_id: int, pd_id: int, payload: schemas.PDReviewAction):
+    req = db.query(models.FundRequest).get(req_id)
+    if not req: return None
+
+    if payload.action == "REJECT":
+        req.status = models.FundRequestStatus.REJECTED
+        req.admin_comment = payload.comment
+
+    else:
+        req.status = models.FundRequestStatus.VALIDATED_PD
+        req.pd_approver_id = pd_id
+        req.pd_approved_at = datetime.now()
+        
+        for item_update in payload.items:
+            db_item = db.query(models.FundRequestItem).get(item_update.item_id)
+            
+            current_limit = db_item.pd_approved_amount or 0.0
+            pm_goal = db_item.requested_amount or 0.0
+            
+            # The payload item 'approved_amount' is the DELTA (amount to add)
+            amount_to_add = float(item_update.approved_amount)
+            
+            new_total = current_limit + amount_to_add
+            
+            # Safety: Cannot exceed original request
+            if new_total > (pm_goal + 0.1):
+                raise ValueError(f"Cannot exceed PM request of {pm_goal}")
+            
+            # Update the lifetime validation total
+            db_item.pd_approved_amount = new_total
+            
+        # Update parent total
+        req.pd_validated_amount = sum(i.pd_approved_amount for i in req.items)
+        
+    db.commit()
+    return req
+
+
+def admin_authorize_request(db: Session, req_id: int, admin_id: int, payload: schemas.AdminReviewAction):
+    req = db.query(models.FundRequest).get(req_id)
+    if not req: return None
+
+    # 1. Status Transition
+    req.status = models.FundRequestStatus.TO_TRANSFER
+    req.admin_approver_id = admin_id
+    req.admin_approved_at = datetime.now()
+    if payload.comment:
+        req.admin_comment = payload.comment
+
+    total_released_this_session = 0.0
+
+    for item_update in payload.items:
+        db_item = db.query(models.FundRequestItem).get(item_update.item_id)
+        
+        # how much are we adding now?
+        amount_to_add = float(item_update.amount_to_pay)
+        
+        # EDGE CASE VALIDATION: (Already Authorized + New) cannot exceed (PD Validated)
+        current_auth = db_item.admin_approved_amount or 0.0
+        pd_limit = db_item.pd_approved_amount or 0.0
+        
+        if (current_auth + amount_to_add) > (pd_limit + 0.1):
+            pm_name = f"{db_item.target_pm.first_name} {db_item.target_pm.last_name}" if db_item.target_pm else "PM"
+            raise ValueError(
+                f"Limit Exceeded for {pm_name}. "
+                f"PD total limit is {pd_limit} MAD. "
+                f"You previously authorized {current_auth} MAD. "
+                f"Remaining available: {pd_limit - current_auth} MAD."
+            )
+
+        # 2. Update Item Record (Lifetime)
+        db_item.admin_approved_amount = current_auth + amount_to_add
+        total_released_this_session += amount_to_add
+        
+        # 3. PM Wallet Logic (Pending In)
+        wallet = db.query(models.Caisse).filter(models.Caisse.user_id == db_item.target_pm_id).first()
+        if wallet:
+            wallet.reserved_balance = (wallet.reserved_balance or 0.0) + amount_to_add
+            
+            # Create the PENDING transaction for RAF to confirm later
+            new_tx = models.Transaction(
+                caisse_id=wallet.id,
+                amount=amount_to_add, # Just this batch
+                type=models.TransactionType.CREDIT,
+                status=models.TransactionStatus.PENDING,
+                related_request_id=req.id,
+                created_by_id=admin_id,
+                description=f"Refill Batch: {req.request_number}",
+                created_at=datetime.now()
+            )
+            db.add(new_tx)
+
+    # 4. Update Parent Lifetime Paid Total
+    req.paid_amount = sum(i.admin_approved_amount for i in req.items)
+    
+    # Reset variance flags because new money is traveling
+    req.variance_acknowledged = False 
+    
+    db.commit()
+    db.refresh(req)
+    return req
+
+
+
+def raf_confirm_reception(db: Session, req_id: int, raf_id: int, item_confirmations: dict, file_name: str):
+    req = db.query(models.FundRequest).get(req_id)
+    if not req:
+        raise ValueError("Request not found")
+
+    total_received_in_this_batch = 0.0
+    now = datetime.now()
+
+    for item_id_str, amount_str in item_confirmations.items():
+        item_id = int(item_id_str)
+        db_item = db.query(models.FundRequestItem).get(item_id)
+        if not db_item: continue
+
+        # This is the amount the RAF just typed in the modal (e.g., 3000)
+        current_batch_val = float(amount_str)
+        if current_batch_val <= 0: continue
+
+        # 1. Update the Item's lifetime confirmed total
+        db_item.confirmed_amount = (db_item.confirmed_amount or 0.0) + current_batch_val
+        total_received_in_this_batch += current_batch_val
+
+        # 2. Update the PM Wallet
+        wallet = db.query(models.Caisse).filter(models.Caisse.user_id == db_item.target_pm_id).first()
+        if wallet:
+            # --- CRITICAL FIX HERE ---
+            # ONLY add the current batch value to the balance.
+            # DO NOT add db_item.confirmed_amount (which is the lifetime total).
+            wallet.balance = (wallet.balance or 0.0) + current_batch_val
+            
+            # Decrease 'Pending In' by exactly what was received
+            wallet.reserved_balance = max(0, (wallet.reserved_balance or 0.0) - current_batch_val)
+
+            # 3. Complete the Transaction for this batch
+            # Look for the oldest PENDING transaction for this PM/Request
+            pending_tx = db.query(models.Transaction).filter(
+                models.Transaction.related_request_id == req.id,
+                models.Transaction.caisse_id == wallet.id,
+                models.Transaction.status == models.TransactionStatus.PENDING
+            ).order_by(models.Transaction.created_at.asc()).first()
+            
+            if pending_tx:
+                pending_tx.amount = current_batch_val # Sync transaction to reality
+                pending_tx.status = models.TransactionStatus.COMPLETED
+                pending_tx.created_at = now # Set the actual reception date
+
+    # 4. Update Parent Request Totals
+    req.confirmed_reception_amount = (req.confirmed_reception_amount or 0.0) + total_received_in_this_batch
+    req.reception_attachment = file_name
+    req.raf_id = raf_id
+    
+    # 5. Correct Status Logic
+    # Calculate goal based on what PD validated (or what PM requested, depending on your policy)
+    total_pd_validated = sum(i.pd_approved_amount for i in req.items)
+    
+    if req.confirmed_reception_amount >= (total_pd_validated - 0.1):
+        req.status = models.FundRequestStatus.COMPLETED
+        req.completed_at = now
+    else:
+        req.status = models.FundRequestStatus.PARTIALLY_PAID
+
+    db.commit()
+    db.refresh(req)
+    return req
+
 def create_fund_request(db: Session, pd_user: int, items: list):
     now = datetime.now()
     year = now.year
@@ -4296,29 +4522,42 @@ def confirm_fund_reception(db: Session, req_id: int, item_confirmations: dict, f
 
 
 def acknowledge_variance(db: Session, req_id: int, note: str):
+    """
+    Admin acknowledges that physical reception (RAF) was different 
+    than authorization (Admin). Synchronizes records to the physical truth.
+    """
     req = db.query(models.FundRequest).get(req_id)
     if not req:
         return None
         
+    # 1. Store the audit trail
     req.variance_note = note
     req.variance_acknowledged = True
     
-    # Calculate the truth from items
-    total_physical_confirmed = sum(item.confirmed_amount or 0.0 for item in req.items)
-    
-    # SYNC THE PARENT: Set Admin's 'Paid' record to match PD's 'Confirmed' record
-    req.paid_amount = total_physical_confirmed
-    req.confirmed_reception_amount = total_physical_confirmed
-    
-    # SYNC THE ITEMS: Set 'Approved' to match 'Confirmed'
+    # 2. THE SYNC: Reset the 'Authorized' amount to the 'Confirmed' amount
+    # This removes the "Ghost Money" (money sent but never received)
+    # so the Admin can re-approve the difference later.
     for item in req.items:
-        item.approved_amount = item.confirmed_amount or 0.0
+        # We synchronize the Admin's record to the RAF's counting
+        item.admin_approved_amount = item.confirmed_amount or 0.0
         
+        # NOTE: We do NOT lower item.pd_approved_amount. 
+        # The PD's validated limit stays the same so the Admin 
+        # has room to send the remainder.
+
+    # 3. SYNC THE PARENT TOTALS
+    # Recalculate based on the new item values
+    total_physical_truth = sum(item.confirmed_amount or 0.0 for item in req.items)
+    
+    req.paid_amount = total_physical_truth
+    req.confirmed_reception_amount = total_physical_truth
+    
     db.commit()
     db.refresh(req)
     return req
 
 def get_caisse_stats(db: Session, user: models.User):
+    # 1. Get/Create Wallet
     wallet = db.query(models.Caisse).filter(models.Caisse.user_id == user.id).first()
     if not wallet:
         wallet = models.Caisse(user_id=user.id, balance=0.0, reserved_balance=0.0)
@@ -4326,66 +4565,83 @@ def get_caisse_stats(db: Session, user: models.User):
         db.commit()
         db.refresh(wallet)
 
-    # --- THE FIX: Calculate the total gap across all active requests ---
-    # We sum (Requested Amount - Approved Amount) for all "Open" requests
-    pending_total = db.query(
-        func.sum(models.FundRequestItem.requested_amount - func.coalesce(models.FundRequestItem.approved_amount, 0))
-    ).join(models.FundRequest).filter(
-        models.FundRequestItem.target_pm_id == user.id,
+    # 2. PENDING IN (Future Gap)
+    # Logic: Amount approved by PD that the Admin has NOT yet paid.
+    # This acts as a "Forecast" for the PM.
+    pending_in_pd_gap = 0.0
+    active_requests = db.query(models.FundRequest).filter(
+        models.FundRequest.requester_id == user.id,
         models.FundRequest.status.in_([
-            models.FundRequestStatus.PENDING_APPROVAL,
-            models.FundRequestStatus.PARTIALLY_PAID,
-            models.FundRequestStatus.APPROVED_WAITING_FUNDS
+            models.FundRequestStatus.VALIDATED_PD,
+            models.FundRequestStatus.TO_TRANSFER,
+            models.FundRequestStatus.PARTIALLY_PAID
         ])
-    ).scalar() or 0.0
+    ).all()
 
-    # Also add money that is "In the air" (Admin approved it, but PD hasn't confirmed receipt)
-    # Status is PENDING in transactions
-    in_transit = db.query(func.sum(models.Transaction.amount)).filter(
+    for req in active_requests:
+        # Gap = PD Limit - Admin Paid
+        gap = (req.pd_validated_amount or 0.0) - (req.paid_amount or 0.0)
+        if gap > 0:
+            pending_in_pd_gap += gap
+
+    # 3. RESERVED ALIMENTATION (In Transit)
+    # Logic: Amount Authorized by Admin (Transaction Created) but not Confirmed by RAF.
+    reserved_alimentation = db.query(func.sum(models.Transaction.amount)).filter(
         models.Transaction.caisse_id == wallet.id,
+        models.Transaction.type == models.TransactionType.CREDIT,
         models.Transaction.status == models.TransactionStatus.PENDING
     ).scalar() or 0.0
 
-    # Combined Incoming = Future Approvals needed + Current Confirmations needed
-    total_incoming = float(pending_total) + float(in_transit)
+    # 4. RESERVED EXPENSES (Liabilities)
+    # Logic: Expenses that are active (SUBMITTED/VALIDATED/APPROVED) 
+    # but NOT yet PAID or ACKNOWLEDGED (Finalized).
+    reserved_expenses = db.query(func.sum(models.Expense.amount)).filter(
+        models.Expense.requester_id == user.id,
+        # Exclude finalized states and rejected ones
+        models.Expense.status.notin_([
+            models.ExpenseStatus.PAID, 
+            models.ExpenseStatus.ACKNOWLEDGED,
+            models.ExpenseStatus.REJECTED
+        ])
+    ).scalar() or 0.0
 
-    # Calculate spent this month (Existing logic)
+    # 5. SPENT MONTH
     today = datetime.now()
     month_start = today.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    spent_month = db.query(func.sum(models.Transaction.amount))\
-        .filter(
-            models.Transaction.caisse_id == wallet.id,
-            models.Transaction.type == models.TransactionType.DEBIT,
-            models.Transaction.created_at >= month_start,
-            models.Transaction.status == models.TransactionStatus.COMPLETED
-        ).scalar() or 0.0
+    spent_month = db.query(func.sum(models.Transaction.amount)).filter(
+        models.Transaction.caisse_id == wallet.id,
+        models.Transaction.type == models.TransactionType.DEBIT,
+        models.Transaction.status == models.TransactionStatus.COMPLETED,
+        models.Transaction.created_at >= month_start
+    ).scalar() or 0.0
 
     return {
         "balance": float(wallet.balance),
-        "reserved": float(wallet.reserved_balance or 0.0),
-        "pending_in": total_incoming,
+        "pending_in": float(pending_in_pd_gap),
+        "reserved_alimentation": float(reserved_alimentation),
+        "reserved_expenses": float(reserved_expenses),
         "spent_month": float(spent_month)
     }
-
 def get_transactions(
     db: Session, 
     user: models.User, 
     page: int = 1, 
     limit: int = 20,
     type_filter: str = None,
-    status_filter: str = "ALL", # NEW
+    status_filter: str = "ALL", 
     start_date: str = None,
     end_date: str = None,
     search: str = None
 ):
-    # Base query
+    # Base query joining Wallet and User
     query = db.query(models.Transaction).join(models.Caisse).join(models.User, models.Caisse.user_id == models.User.id)
     
-    # 1. Security Filter
-    if user.role not in [models.UserRole.ADMIN, models.UserRole.PD]:
+    # 1. Security: PMs see only their own wallet. PD/Admin/RAF see all.
+    user_role = user.role.upper()
+    if user_role not in ["ADMIN", "PD", "RAF", "CEO"]:
         query = query.filter(models.Caisse.user_id == user.id)
     
-    # 2. Status Filter (Filtering based on the related Fund Request)
+    # 2. Status Filter (Linked to the FundRequest state)
     if status_filter != "ALL":
         query = query.join(models.FundRequest, models.Transaction.related_request_id == models.FundRequest.id)
         query = query.filter(models.FundRequest.status == status_filter)
@@ -4397,6 +4653,7 @@ def get_transactions(
         query = query.filter(func.date(models.Transaction.created_at) >= start_date)
     if end_date:
         query = query.filter(func.date(models.Transaction.created_at) <= end_date)
+    
     if search:
         term = f"%{search}%"
         query = query.filter(or_(
@@ -4413,7 +4670,7 @@ def get_transactions(
     for t in transactions:
         t_dict = {
             "id": t.id,
-            "created_at": t.created_at,
+            "created_at": t.created_at.isoformat() if t.created_at else None,
             "type": t.type,
             "description": t.description,
             "amount": t.amount,
@@ -4422,26 +4679,33 @@ def get_transactions(
             "created_by_name": "System"
         }
         
-        # Pull creator info
+        # Auditor/Creator info
         creator = db.query(models.User).get(t.created_by_id)
         if creator: t_dict['created_by_name'] = f"{creator.first_name} {creator.last_name}"
 
-        # --- AUDIT LOGIC: Approved vs Received ---
-        # Default: Approved and Received are the same (for Expenses/Debits)
-        t_dict["approved_by_ceo"] = t.amount
-        t_dict["received_by_pd"] = t.amount if t.status == "COMPLETED" else 0.0
+        # --- WATERFALL AUDIT LOGIC ---
+        # Default for expenses (Debits)
+        t_dict["requested_amount"] = t.amount
+        t_dict["pd_validated_amount"] = t.amount
+        t_dict["admin_authorized_amount"] = t.amount
+        t_dict["raf_confirmed_amount"] = t.amount if t.status == "COMPLETED" else 0.0
 
-        # If it's a Refill (CREDIT), get the specific amounts from the request item
+        # If it's a Refill (CREDIT), fetch the specific waterfall data from Request Item
         if t.type == models.TransactionType.CREDIT and t.related_request_id:
             item = db.query(models.FundRequestItem).filter(
                 models.FundRequestItem.request_id == t.related_request_id,
                 models.FundRequestItem.target_pm_id == t.caisse.user_id
             ).first()
+            
             if item:
-                t_dict["approved_by_ceo"] = item.approved_amount or 0.0
-                t_dict["received_by_pd"] = item.confirmed_amount or 0.0
-                # Use PD Remark if available
-                if item.remarque: t_dict["description"] = item.remarque
+                t_dict["requested_amount"] = item.requested_amount or 0.0
+                t_dict["pd_validated_amount"] = item.pd_approved_amount or 0.0
+                t_dict["admin_authorized_amount"] = item.admin_approved_amount or 0.0
+                t_dict["raf_confirmed_amount"] = item.confirmed_amount or 0.0
+                
+                # If transaction is PENDING, show the 'Admin's intent' as the main description
+                if t.status == "PENDING":
+                    t_dict["description"] = f"Transfer Pending: {t.description}"
 
         items.append(t_dict)
 
@@ -4450,14 +4714,18 @@ def get_transactions(
         "total_items": total_items,
         "page": page,
         "total_pages": (total_items + limit - 1) // limit
-    }
-    
+    }   
 def get_pending_requests(db: Session):
+    """
+    Identifies requests that require action from PD, Admin, or RAF.
+    Supports partial payment cycles and audit variances.
+    """
     active_statuses = [
-        models.FundRequestStatus.PENDING_APPROVAL,
-        models.FundRequestStatus.PARTIALLY_PAID,
-        models.FundRequestStatus.APPROVED_WAITING_FUNDS,
-        models.FundRequestStatus.COMPLETED,
+        models.FundRequestStatus.SUBMITTED,
+        models.FundRequestStatus.VALIDATED_PD,
+        models.FundRequestStatus.PARTIALLY_PAID,    # Included to allow "Approve Remainder"
+        models.FundRequestStatus.TO_TRANSFER,
+        models.FundRequestStatus.COMPLETED,         # Included for Audit Audit
         models.FundRequestStatus.CLOSED_PARTIAL
     ]
     
@@ -4467,27 +4735,45 @@ def get_pending_requests(db: Session):
     
     results = []
     for r in reqs:
-        total_req = sum(item.requested_amount for item in r.items)
-        confirmed_total = r.confirmed_reception_amount or 0.0
+        # 1. CALCULATE TOTALS
+        total_goal = sum(item.requested_amount for item in r.items)
+        pd_total = r.pd_validated_amount or 0.0
         paid_total = r.paid_amount or 0.0
+        confirmed_total = r.confirmed_reception_amount or 0.0
 
+        # Check for money currently "In Transit"
         pending_tx_count = db.query(models.Transaction).filter(
             models.Transaction.related_request_id == r.id,
             models.Transaction.status == models.TransactionStatus.PENDING
         ).count()
 
-        # 1. Admin needs to approve more funds
-        admin_work_pending = paid_total < (total_req - 0.1) and r.status != models.FundRequestStatus.CLOSED_PARTIAL
+        # 2. PD ACTION LOGIC
+        # PD needs to act if: 
+        # - Status is fresh SUBMITTED
+        # - OR Status is PARTIALLY_PAID but they haven't validated up to the PM's Goal yet
+        pd_work_pending = (r.status == models.FundRequestStatus.SUBMITTED) or \
+                          (r.status == models.FundRequestStatus.PARTIALLY_PAID and pd_total < (total_goal - 0.1))
+
+        # 3. ADMIN ACTION LOGIC
+        # Admin needs to act if:
+        # - PD just validated something (VALIDATED_PD)
+        # - OR Status is PARTIALLY_PAID but they paid less than what the PD validated
+        # - OR there is a physical discrepancy (Admin Sent != RAF Received) that needs acknowledgment
+        admin_audit_pending = abs(paid_total - confirmed_total) > 1.0 and not r.variance_acknowledged
         
-        # 2. PD needs to click "Confirm Receipt"
-        pd_work_pending = pending_tx_count > 0
+        admin_approval_pending = (r.status == models.FundRequestStatus.VALIDATED_PD) or \
+                                 (r.status == models.FundRequestStatus.PARTIALLY_PAID and paid_total < (pd_total - 0.1))
+        
+        admin_work_pending = admin_approval_pending or admin_audit_pending
 
-        # 3. NEW: Audit Mismatch exists and hasn't been acknowledged
-        # If there's a gap between what we "paid" and what they "got", keep it visible
-        audit_work_pending = abs(paid_total - confirmed_total) > 1.0 and not r.variance_acknowledged
+        # 4. RAF ACTION LOGIC
+        # RAF needs to act if:
+        # - Admin just sent money (TO_TRANSFER)
+        # - OR there are pending transactions in the ledger
+        raf_work_pending = (r.status == models.FundRequestStatus.TO_TRANSFER) or (pending_tx_count > 0)
 
-        # If nobody has work to do, skip
-        if not admin_work_pending and not pd_work_pending and not audit_work_pending:
+        # 5. FILTERING: If nobody has any work to do, skip this request
+        if not pd_work_pending and not admin_work_pending and not raf_work_pending:
             continue
 
         results.append({
@@ -4495,12 +4781,21 @@ def get_pending_requests(db: Session):
             "request_number": r.request_number,
             "created_at": r.created_at,
             "status": r.status,
-            "total_amount": total_req,
+            "requester_name": f"{r.requester.first_name} {r.requester.last_name}" if r.requester else "Unknown",
+            
+            "total_amount": total_goal,
+            "pd_validated_amount": pd_total,
             "paid_amount": paid_total,
             "confirmed_reception_amount": confirmed_total,
-            "variance_acknowledged": r.variance_acknowledged, # MUST return this
-            "requester_name": f"{r.requester.first_name} {r.requester.last_name}",
-            "has_pending_transfer": pd_work_pending 
+            "variance_acknowledged": r.variance_acknowledged,
+            
+            # These flags drive the 'Action' column in CaisseDashboard.jsx
+            "pd_action_required": pd_work_pending,
+            "admin_action_required": admin_work_pending,
+            "raf_action_required": raf_work_pending,
+            
+            # Keeping for backward compatibility with your existing RAF modal logic
+            "has_pending_transfer": raf_work_pending 
         })
         
     return results
@@ -4508,31 +4803,38 @@ def get_pending_requests(db: Session):
 
 
 # In backend/app/crud.py
-
 def get_request_by_id(db: Session, req_id: int):
     req = db.query(models.FundRequest).get(req_id)
     if not req:
         return None
     
-    # Format Items
+    # 1. Format Items using the new Waterfall structure
     items = []
     for i in req.items:
         items.append({
             "id": i.id,
             "target_pm_id": i.target_pm_id,
-            "target_pm_name": f"{i.target_pm.first_name} {i.target_pm.last_name}",
-            "requested_amount": i.requested_amount,
-            "approved_amount": i.approved_amount or 0.0,
+            "target_pm_name": f"{i.target_pm.first_name} {i.target_pm.last_name}" if i.target_pm else "Unknown",
             
-            # --- THE FIX: Add this line ---
-            "confirmed_amount": i.confirmed_amount or 0.0, 
-            # ------------------------------
+            # THE WATERFALL
+            "requested_amount": i.requested_amount or 0.0,
+            "pd_approved_amount": i.pd_approved_amount or 0.0,
+            "admin_approved_amount": i.admin_approved_amount or 0.0, # Final amount sent
+            "confirmed_amount": i.confirmed_amount or 0.0,           # Physical amount counted
             
             "remarque": i.remarque,
             "admin_note": i.admin_note or ""
         })
     
+    # Calculate totals from items to ensure perfect mathematical consistency
     total_requested = sum(item['requested_amount'] for item in items)
+    total_pd_validated = sum(item['pd_approved_amount'] for item in items)
+    total_admin_paid = sum(item['admin_approved_amount'] for item in items)
+    total_confirmed = sum(item['confirmed_amount'] for item in items)
+
+    # Helper function to safely get user names
+    def get_name(user_obj):
+        return f"{user_obj.first_name} {user_obj.last_name}" if user_obj else ""
 
     return {
         "id": req.id,
@@ -4540,61 +4842,82 @@ def get_request_by_id(db: Session, req_id: int):
         "created_at": req.created_at,
         "status": req.status,
         "requester_id": req.requester_id,
-        "requester_name": f"{req.requester.first_name} {req.requester.last_name}",
-        "approver_id": req.approver_id,
-        "approver_name": f"{req.approver.first_name} {req.approver.last_name}" if req.approver else "",
-        "approved_at": req.approved_at,
+        # ACTORS
+        "requester_name": get_name(req.requester),
+        "pd_approver_name": get_name(req.pd_approver) if hasattr(req, 'pd_approver') else "",
+        "admin_approver_name": get_name(req.admin_approver) if hasattr(req, 'admin_approver') else "",
+        
+        # TIMESTAMPS
+        "pd_approved_at": req.pd_approved_at,
+        "admin_approved_at": req.admin_approved_at,
         "completed_at": req.completed_at,
         
-        # New Audit Fields
-        "total_amount": total_requested,
-        "paid_amount": req.paid_amount or 0.0,
-        "confirmed_reception_amount": req.confirmed_reception_amount or 0.0, # Add this too
+        # WATERFALL TOTALS
+        "total_amount": total_requested,                # Original PM Ask
+        "pd_validated_amount": total_pd_validated,      # PD Technical Check
+        "paid_amount": total_admin_paid,                # Admin Financial Send
+        "confirmed_reception_amount": total_confirmed,  # RAF Physical Truth
+        
+        # AUDIT & VARIANCE
         "admin_comment": req.admin_comment,
         "reception_attachment": req.reception_attachment,
         "variance_acknowledged": req.variance_acknowledged,
+        "variance_note": req.variance_note,
         
         "items": items
-            }
+    }
 
-# In crud.py
 
 def get_all_wallets_summary(db: Session):
-    pms = db.query(models.User).filter(
-        models.User.role.in_([models.UserRole.PM, models.UserRole.PD, models.UserRole.ADMIN])
-    ).all()
+    """
+    Overview of all PM wallets for Admin/PD oversight.
+    """
+    # Fetch all users who possess a Caisse (PMs)
+    pms = db.query(models.User).join(models.Caisse).all()
     
     results = []
     for pm in pms:
-        wallet = db.query(models.Caisse).filter(models.Caisse.user_id == pm.id).first()
+        wallet = pm.caisse # Access relationship
         
-        # 1. Money not yet approved by Admin
-        unapproved = db.query(
-            func.sum(models.FundRequestItem.requested_amount - func.coalesce(models.FundRequestItem.approved_amount, 0))
-        ).join(models.FundRequest).filter(
-            models.FundRequestItem.target_pm_id == pm.id,
-            models.FundRequest.status != models.FundRequestStatus.COMPLETED,
-            models.FundRequest.status != models.FundRequestStatus.REJECTED,
-            models.FundRequest.status != models.FundRequestStatus.CLOSED_PARTIAL
+        # 1. PENDING GAP (Future Potential)
+        # Validated by PD but not yet Authorized by Admin
+        active_reqs = db.query(models.FundRequest).filter(
+            models.FundRequest.requester_id == pm.id,
+            models.FundRequest.status.in_([
+                models.FundRequestStatus.VALIDATED_PD,
+                models.FundRequestStatus.PARTIALLY_PAID
+            ])
+        ).all()
+        
+        pending_gap = sum(max(0, (r.pd_validated_amount or 0.0) - (r.paid_amount or 0.0)) for r in active_reqs)
+
+        # 2. IN TRANSIT (Alimentation)
+        # Authorized by Admin (Transaction Created) but not Confirmed by RAF
+        in_transit = db.query(func.sum(models.Transaction.amount)).filter(
+            models.Transaction.caisse_id == wallet.id,
+            models.Transaction.type == models.TransactionType.CREDIT,
+            models.Transaction.status == models.TransactionStatus.PENDING
         ).scalar() or 0.0
 
-        # 2. Money approved but not yet confirmed by PD (In-Transit)
-        in_transit = db.query(func.sum(models.Transaction.amount)).filter(
-            models.Transaction.caisse_id == (wallet.id if wallet else -1),
-            models.Transaction.status == models.TransactionStatus.PENDING
+        # 3. RESERVED EXPENSES (Liability)
+        # Expenses active but not paid/closed
+        reserved_expenses = db.query(func.sum(models.Expense.amount)).filter(
+            models.Expense.requester_id == pm.id,
+            models.Expense.status.notin_([
+                "PAID", "ACKNOWLEDGED", "REJECTED"
+            ])
         ).scalar() or 0.0
 
         results.append({
             "user_id": pm.id,
             "user_name": f"{pm.first_name} {pm.last_name}",
-            "balance": wallet.balance if wallet else 0.0,
-            "reserved": wallet.reserved_balance if wallet else 0.0,
-            "pending_in": float(unapproved) + float(in_transit) # Sum of both
+            "balance": float(wallet.balance),
+            "reserved_expenses": float(reserved_expenses),
+            "in_transit": float(in_transit),
+            "pending_gap": float(pending_gap)
         })
         
     return sorted(results, key=lambda x: x['balance'], reverse=True)
-
-
 def process_fund_request(
     db: Session, 
     req_id: int, 
@@ -5257,7 +5580,8 @@ def deduct_from_caisse(db: Session, user_id: int, amount: float, description: st
         caisse_id=caisse.id,
         type=models.TransactionType.DEBIT,
         amount=amount,
-        description=description
+        description=description,
+        created_at= datetime.now()
     )
     db.add(transaction)
     db.commit()
@@ -5518,24 +5842,32 @@ def get_grouped_history(db: Session, page: int = 1, limit: int = 10, status_filt
                 "id": item.id,
                 "pm_name": f"{item.target_pm.first_name} {item.target_pm.last_name}" if item.target_pm else "Unknown PM",
                 "description": item.admin_note or "Refill Request",
-                "approved_amount": item.approved_amount or 0.0,
-                "received_amount": item.confirmed_amount or 0.0,
+                "requested_amount": item.requested_amount or 0.0,
+                "pd_approved": item.pd_approved_amount or 0.0,
+                "admin_approved": item.admin_approved_amount or 0.0,
+                "confirmed_amount": item.confirmed_amount or 0.0,
+
                 "status": tx.status if tx else "PENDING",
                 "confirmed_at": tx.created_at.isoformat() if (tx and tx.status == "COMPLETED") else None
             })
 
-        # Calculate Parent Totals
-        total_requested = sum(item.requested_amount for item in req.items)
-        actual_confirmed_total = sum(item.confirmed_amount or 0.0 for item in req.items)
-   
+        calculated_requested_total = sum(item.requested_amount for item in req.items)
+        
+        # Use admin_approved_amount as the "Paid" reference 
+        # (what the admin intended to send)
+        paid_total = sum(item.admin_approved_amount or 0.0 for item in req.items)
+        
+        # Use confirmed_amount as the "Physical" reference
+        confirmed_total = sum(item.confirmed_amount or 0.0 for item in req.items)
+
         data.append({
             "request_id": req.id,
             "request_number": req.request_number,
             "created_at": req.created_at.isoformat() if req.created_at else None,
             "status": req.status,
-            "total_amount": total_requested, 
+            "total_amount": calculated_requested_total, 
             "paid_amount": req.paid_amount or 0.0,
-            "confirmed_reception_amount": actual_confirmed_total, 
+            "confirmed_reception_amount": confirmed_total, 
             "variance_acknowledged": req.variance_acknowledged, 
             "transactions": tx_list # This now contains approved_amount AND received_amount
         })
@@ -5931,13 +6263,17 @@ def acknowledge_invoice_receipt(db: Session, invoice_id: int, sbc_user_id: int):
 def generate_invoice_excel_bytes(invoice):
     """
     Generates an Excel file (bytes) containing the detailed rows of the invoice.
+    Includes the related ACT Number for each row.
     """
     data = []
     
+    # Iterate through each Acceptance (ACT) linked to the invoice
     for act in invoice.acts:
+        # Iterate through each item inside that ACT
         for item in act.items:
             data.append({
                 "Invoice Number": invoice.invoice_number,
+                "ACT Number": act.act_number,  # <--- NEW COLUMN ADDED HERE
                 "BC Number": act.bc.bc_number,
                 "BC Line": item.merged_po.po_line_no,
                 "DUID / Site Code": item.merged_po.site_code,
@@ -5953,18 +6289,23 @@ def generate_invoice_excel_bytes(invoice):
                 "Project": act.bc.internal_project.name
             })
 
-    df = pd.DataFrame(data)
+    if not data:
+        # Fallback if no items found
+        df = pd.DataFrame(columns=["Invoice Number", "ACT Number", "BC Number", "Amount (HT)"])
+    else:
+        df = pd.DataFrame(data)
     
     # Use BytesIO to create the file in memory
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         df.to_excel(writer, index=False, sheet_name='Invoice Details')
         
-        # Auto-adjust columns width
+        # Professional Formatting: Auto-adjust columns width
         worksheet = writer.sheets['Invoice Details']
         for i, col in enumerate(df.columns):
+            # Calculate width based on max content length or header length
             column_len = max(df[col].astype(str).str.len().max(), len(col)) + 2
-            worksheet.set_column(i, i, min(column_len, 50))
+            worksheet.set_column(i, i, min(column_len, 50)) # Cap at 50 chars width
 
     return output.getvalue()
 

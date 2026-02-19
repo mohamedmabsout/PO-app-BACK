@@ -545,10 +545,22 @@ class FundRequest(Base):
     request_number = Column(String(50), unique=True, index=True) # e.g. REQ-2025-001
     
     requester_id = Column(Integer, ForeignKey("users.id")) # The PD
-    approver_id = Column(Integer, ForeignKey("users.id"), nullable=True) # The Admin
+    pd_approver_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    pd_approved_at = Column(DateTime, nullable=True)
     
-    status = Column(String(50), default=FundRequestStatus.PENDING_APPROVAL)
-    paid_amount = Column(Float, default=0.0) 
+    admin_approver_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    admin_approved_at = Column(DateTime, nullable=True)
+    
+    # Physical receiver
+    raf_id = Column(Integer, ForeignKey("users.id"), nullable=True) 
+    
+
+    status = Column(String(50), default=FundRequestStatus.SUBMITTED)
+    total_amount = Column(Float, default=0.0)
+    pd_validated_amount = Column(Float, default=0.0)
+    paid_amount = Column(Float, default=0.0)
+    confirmed_reception_amount = Column(Float, default=0.0)
+
     admin_comment = Column(Text, nullable=True) # For rejection or partial notes
 
     created_at = Column(DateTime, server_default=func.now())
@@ -558,12 +570,13 @@ class FundRequest(Base):
     variance_note = Column(Text, nullable=True) # Admin's explanation for mismatch
     variance_acknowledged = Column(Boolean, default=False)
 
-    confirmed_reception_amount = Column(Float, default=0.0)    # Amount PD typed
 
     
     # Relationships
     requester = relationship("User", foreign_keys=[requester_id])
-    approver = relationship("User", foreign_keys=[approver_id])
+    pd_approver = relationship("User", foreign_keys=[pd_approver_id])
+    admin_approver = relationship("User", foreign_keys=[admin_approver_id])
+    raf = relationship("User", foreign_keys=[raf_id])
     items = relationship("FundRequestItem", back_populates="request")
 
 
@@ -577,7 +590,9 @@ class FundRequestItem(Base):
     target_pm_id = Column(Integer, ForeignKey("users.id"), nullable=False) # Who gets the money?
     
     requested_amount = Column(Float, nullable=False) # Amount asked by PD
-    approved_amount = Column(Float, nullable=True)   # Amount approved by Admin (can be different)
+    pd_approved_amount = Column(Float, nullable=True)   # Amount approved by PD (can be different)
+    admin_approved_amount = Column(Float, nullable=True)   # Amount approved by Admin (can be different)
+
     remarque = Column(String(255), nullable=True) # Description for this line item
     admin_note = Column(String(255), nullable=True) 
     confirmed_amount = Column(Float, default=0.0)

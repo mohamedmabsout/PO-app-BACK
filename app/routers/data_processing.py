@@ -309,6 +309,74 @@ def export_merged_pos_report(
             status_code=500, detail="Could not generate the Excel report."
         )
 
+@router.get("/caisse/reserved-breakdown")
+def get_reserved_breakdown_endpoint(
+    db: Session = Depends(get_db), 
+    current_user: models.User = Depends(get_current_user)
+):
+    """
+    Returns the 3-bucket breakdown of funds for the current user.
+    """
+    # 1. PENDING IN (Future Gap): PD Validated - Admin Paid
+    pd_gap_reqs = db.query(models.FundRequest).filter(
+        models.FundRequest.requester_id == current_user.id,
+        models.FundRequest.status.in_([
+            models.FundRequestStatus.VALIDATED_PD,
+            models.FundRequestStatus.PARTIALLY_PAID
+        ])
+    ).all()
+    
+    pending_in_list = []
+    for r in pd_gap_reqs:
+        # Calculate gap using the new waterfall fields
+        pd_val = r.pd_validated_amount or 0.0
+        adm_paid = r.paid_amount or 0.0
+        gap = pd_val - adm_paid
+        
+        if gap > 0.1:
+            pending_in_list.append({
+                "ref": r.request_number, 
+                "amount": gap, 
+                "desc": "Validated by PD, waiting for Admin release"
+            })
+
+    # 2. RESERVED ALIMENTATION (In Transit): Admin Paid - RAF Confirmed
+    # We find PENDING CREDIT transactions in the user's wallet
+    wallet = db.query(models.Caisse).filter(models.Caisse.user_id == current_user.id).first()
+    alimentation_list = []
+    
+    if wallet:
+        transit_txs = db.query(models.Transaction).filter(
+            models.Transaction.caisse_id == wallet.id,
+            models.Transaction.type == models.TransactionType.CREDIT,
+            models.Transaction.status == models.TransactionStatus.PENDING
+        ).all()
+        
+        alimentation_list = [
+            {"ref": t.description, "amount": t.amount, "date": t.created_at}
+            for t in transit_txs
+        ]
+
+    # 3. RESERVED EXPENSES (Liability): Active Expenses
+    active_expenses = db.query(models.Expense).filter(
+        models.Expense.requester_id == current_user.id,
+        models.Expense.status.notin_([
+            "PAID", 
+            "ACKNOWLEDGED", 
+            "REJECTED"
+        ])
+    ).all()
+    
+    expense_list = [
+        {"id": e.id, "desc": e.remark, "beneficiary": e.beneficiary, "amount": e.amount, "status": e.status} 
+        for e in active_expenses
+    ]
+
+    return {
+        "pending_in": pending_in_list,
+        "reserved_alimentation": alimentation_list,
+        "reserved_expenses": expense_list
+    }
 
 @router.get("/remaining-to-accept")
 def get_remaining_pos(
@@ -705,58 +773,121 @@ def read_pending_requests(
     data = crud.get_pending_requests(db)
     return data
 
-    
+# --- STEP 1: PM SUBMITS ---
 @router.post("/request")
-def create_fund_request(    background_tasks: BackgroundTasks, 
+def pm_submit_request(
+    payload: schemas.FundRequestCreate, 
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user) # Helper for PM role
+):
+    return crud.create_pm_fund_request(db, current_user.id, payload)
 
-    payload: schemas.FundRequestCreate,
+
+# --- STEP 2: PD VALIDATES ---
+@router.post("/request/{req_id}/pd-validate")
+def pd_validate(
+    req_id: int,
+    payload: schemas.PDReviewAction,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user) # Helper for PD role
+):
+    req = db.query(models.FundRequest).get(req_id)
+    if req.status not in [models.FundRequestStatus.SUBMITTED, models.FundRequestStatus.PARTIALLY_PAID]:
+        raise HTTPException(status_code=400, detail="Request not at the PD level.")
+    
+    return crud.pd_validate_request(db, req_id, current_user.id, payload)
+
+
+# --- STEP 3: ADMIN AUTHORIZES ---
+@router.post("/request/{req_id}/admin-authorize")
+def admin_authorize(
+    req_id: int,
+    payload: schemas.AdminReviewAction,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
-    if current_user.role not in [models.UserRole.PD, models.UserRole.ADMIN]:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only Project Directors or Admins can create fund requests."
-        )
-
-    req = crud.create_fund_request(db, current_user.id, payload.items) 
-    admins = db.query(models.User).filter(models.User.role == "ADMIN").all()
-    admin_emails = [u.email for u in admins if u.email]
+    req = db.query(models.FundRequest).get(req_id)
+    if req.status not in [models.FundRequestStatus.VALIDATED_PD, models.FundRequestStatus.PARTIALLY_PAID]:
+        raise HTTPException(status_code=400, detail="Request must be validated by PD first.")
     
-    if admin_emails:
-        send_email_background(
-            background_tasks=background_tasks,
-            subject="New Fund Request",
-            email_to=admin_emails,
-            body=f"PD {current_user.last_name} requested funds. Ref: {req.request_number}"
-        )
-
-    return req
+    return crud.admin_authorize_request(db, req_id, current_user.id, payload)
 
 
-@router.post("/request/{req_id}/review")
-def review_fund_request(
-    req_id: int, 
-    payload: schemas.FundRequestReview,
+# --- STEP 4: RAF CONFIRMS ---
+@router.post("/request/{req_id}/raf-confirm")
+async def raf_confirm(
+    req_id: int,
+    item_confirmations: str = Form(...), # JSON string
+    file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user)
+    current_user: models.User = Depends(auth.get_current_user) # Helper for RAF role
 ):
-    if current_user.role not in [models.UserRole.ADMIN]:
-        raise HTTPException(403, "Only Admins can review requests")
+    req = db.query(models.FundRequest).get(req_id)
+    if req.status != models.FundRequestStatus.TO_TRANSFER:
+        raise HTTPException(status_code=400, detail="Request not ready for reception.")
 
-    if payload.action == "REJECT":
-        # Handle rejection (simple status update)
-        req = db.query(models.FundRequest).get(req_id)
-        req.status = models.FundRequestStatus.REJECTED
-        db.commit()
-        return {"message": "Request Rejected"}
+    # 1. Save File
+    file_name = f"RAF_CONFIRM_{req_id}_{file.filename}"
+    save_path = f"uploads/caisse_reception/{file_name}"
+    with open(save_path, "wb") as buffer:
+        buffer.write(await file.read())
+
+    # 2. Parse confirmations
+    confirm_dict = json.loads(item_confirmations)
+
+    return crud.raf_confirm_reception(db, req_id, current_user.id, confirm_dict, file_name)
+
+# @router.post("/request")
+# def create_fund_request(    background_tasks: BackgroundTasks, 
+
+#     payload: schemas.FundRequestCreate,
+#     db: Session = Depends(get_db),
+#     current_user: models.User = Depends(auth.get_current_user)
+# ):
+#     if current_user.role not in [models.UserRole.PD, models.UserRole.ADMIN]:
+#         raise HTTPException(
+#             status_code=status.HTTP_403_FORBIDDEN,
+#             detail="Only Project Directors or Admins can create fund requests."
+#         )
+
+#     req = crud.create_fund_request(db, current_user.id, payload.items) 
+#     admins = db.query(models.User).filter(models.User.role == "ADMIN").all()
+#     admin_emails = [u.email for u in admins if u.email]
     
-    # Handle Approval
-    # Convert list to dict for easier lookup {item_id: amount}
-    approved_map = {str(i.item_id): i.approved_amount for i in payload.items}
+#     if admin_emails:
+#         send_email_background(
+#             background_tasks=background_tasks,
+#             subject="New Fund Request",
+#             email_to=admin_emails,
+#             body=f"PD {current_user.last_name} requested funds. Ref: {req.request_number}"
+#         )
+
+#     return req
+
+
+# @router.post("/request/{req_id}/review")
+# def review_fund_request(
+#     req_id: int, 
+#     payload: schemas.FundRequestReview,
+#     db: Session = Depends(get_db),
+#     current_user: models.User = Depends(auth.get_current_user)
+# ):
+#     if current_user.role not in [models.UserRole.ADMIN]:
+#         raise HTTPException(403, "Only Admins can review requests")
+
+#     if payload.action == "REJECT":
+#         # Handle rejection (simple status update)
+#         req = db.query(models.FundRequest).get(req_id)
+#         req.status = models.FundRequestStatus.REJECTED
+#         db.commit()
+#         return {"message": "Request Rejected"}
     
-    crud.approve_fund_request(db, req_id, current_user.id, approved_map)
-    return {"message": "Request Approved"}
+#     # Handle Approval
+#     # Convert list to dict for easier lookup {item_id: amount}
+#     approved_map = {str(i.item_id): i.approved_amount for i in payload.items}
+    
+#     crud.approve_fund_request(db, req_id, current_user.id, approved_map)
+#     return {"message": "Request Approved"}
 
 @router.get("/request/{req_id}", response_model=schemas.FundRequestDetail) # <--- USE THE NEW SCHEMA
 def get_fund_request_details(
@@ -766,30 +897,30 @@ def get_fund_request_details(
 ):
     return crud.get_request_by_id(db, req_id)
 
-# In backend/app/routers/data.py
-import json
-import logging
+# # In backend/app/routers/data.py
+# import json
+# import logging
 
-logger = logging.getLogger(__name__)
-@router.post("/request/{req_id}/confirm")
-async def confirm_reception(
-    req_id: int, 
-    file: UploadFile = File(...), 
-    item_confirmations: str = Form(...), # JSON string from frontend
-    db: Session = Depends(get_db)
-):
-    # 1. Save file to disk
-    filename = f"CONFIRM_REQ_{req_id}_{file.filename}"
-    file_path = os.path.join("uploads/caisse_reception", filename)
-    with open(file_path, "wb") as buffer:
-        buffer.write(await file.read())
+# logger = logging.getLogger(__name__)
+# @router.post("/request/{req_id}/confirm")
+# async def confirm_reception(
+#     req_id: int, 
+#     file: UploadFile = File(...), 
+#     item_confirmations: str = Form(...), # JSON string from frontend
+#     db: Session = Depends(get_db)
+# ):
+#     # 1. Save file to disk
+#     filename = f"CONFIRM_REQ_{req_id}_{file.filename}"
+#     file_path = os.path.join("uploads/caisse_reception", filename)
+#     with open(file_path, "wb") as buffer:
+#         buffer.write(await file.read())
 
-    # 2. Parse the JSON confirmations
-    import json
-    confirm_dict = json.loads(item_confirmations)
+#     # 2. Parse the JSON confirmations
+#     import json
+#     confirm_dict = json.loads(item_confirmations)
 
-    # 3. Call the CRUD (Passing 'filename' as the 'file_path' argument)
-    return crud.confirm_fund_reception(db, req_id, confirm_dict, filename)
+#     # 3. Call the CRUD (Passing 'filename' as the 'file_path' argument)
+#     return crud.confirm_fund_reception(db, req_id, confirm_dict, filename)
 
 
 @router.get("/wallets-summary")
@@ -797,50 +928,50 @@ def get_wallets_summary(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
-    if current_user.role not in [models.UserRole.ADMIN, models.UserRole.PD]:
+    if current_user.role not in [models.UserRole.ADMIN, models.UserRole.PD, models.UserRole.RAF]:
         raise HTTPException(403, "Access denied")
     return crud.get_all_wallets_summary(db)
 @router.post("/request/{req_id}/acknowledge-variance")
 def ack_variance(req_id: int, payload: dict = Body(...), db: Session = Depends(get_db)):
     return crud.acknowledge_variance(db, req_id, payload.get("note"))
 
-@router.post("/request/{req_id}/process")
-def process_request_endpoint(
-    req_id: int, 
-    payload: schemas.FundRequestReviewAction,
-        background_tasks: BackgroundTasks, # <--- Add this
+# @router.post("/request/{req_id}/process")
+# def process_request_endpoint(
+#     req_id: int, 
+#     payload: schemas.FundRequestReviewAction,
+#         background_tasks: BackgroundTasks, # <--- Add this
 
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user)
-):
-    if current_user.role != models.UserRole.ADMIN:
-        raise HTTPException(403, "Admins only")
+#     db: Session = Depends(get_db),
+#     current_user: models.User = Depends(auth.get_current_user)
+# ):
+#     if current_user.role != models.UserRole.ADMIN:
+#         raise HTTPException(403, "Admins only")
         
-    try:
-        req = crud.process_fund_request(db, req_id, payload, current_user.id)
+#     try:
+#         req = crud.process_fund_request(db, req_id, payload, current_user.id)
         
-        # 2. Send Notifications (If Approved)
-        if payload.action == "APPROVE":
-            # Find unique PMs involved in this request to notify them
-            # We can get them from the items
-            pm_ids = set(i.target_pm_id for i in req.items)
-            pms = db.query(models.User).filter(models.User.id.in_(pm_ids)).all()
+#         # 2. Send Notifications (If Approved)
+#         if payload.action == "APPROVE":
+#             # Find unique PMs involved in this request to notify them
+#             # We can get them from the items
+#             pm_ids = set(i.target_pm_id for i in req.items)
+#             pms = db.query(models.User).filter(models.User.id.in_(pm_ids)).all()
             
-            emails = [pm.email for pm in pms if pm.email]
+#             emails = [pm.email for pm in pms if pm.email]
             
-            if emails:
-                subject = f"Funds Approved: Request #{req.request_number}"
-                body = f"""
-                <h3>Funds Approved</h3>
-                <p>The Admin has approved a payment for request <strong>{req.request_number}</strong>.</p>
-                <p>Please log in to your Caisse Dashboard to confirm receipt.</p>
-                """
-                send_email_background(background_tasks, subject, emails, body)
+#             if emails:
+#                 subject = f"Funds Approved: Request #{req.request_number}"
+#                 body = f"""
+#                 <h3>Funds Approved</h3>
+#                 <p>The Admin has approved a payment for request <strong>{req.request_number}</strong>.</p>
+#                 <p>Please log in to your Caisse Dashboard to confirm receipt.</p>
+#                 """
+#                 send_email_background(background_tasks, subject, emails, body)
 
-        return {"message": "Request processed and notifications sent."}
+#         return {"message": "Request processed and notifications sent."}
         
-    except ValueError as e:
-        raise HTTPException(400, str(e))
+#     except ValueError as e:
+#         raise HTTPException(400, str(e))
 
 
 @router.get("/history/grouped")

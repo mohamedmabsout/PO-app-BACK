@@ -88,7 +88,7 @@ def get_wallets_summary(
     current_user: models.User = Depends(auth.get_current_user)
 ):
     """Admin view of all wallets."""
-    require_roles(current_user, [models.UserRole.ADMIN, models.UserRole.PD])
+    require_roles(current_user, [models.UserRole.ADMIN, models.UserRole.PD, models.UserRole.RAF])
     return crud.get_all_wallets_summary(db)
 
 
@@ -194,32 +194,61 @@ def get_expense_summary_counts(
         
     return counts
 
-
-
-@router.get("/my-reserved-breakdown", response_model=List[schemas.ExpenseResponse])
-def get_my_reserved_breakdown(
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user)
-):
-    """
-    Returns the list of individual expenses currently contributing 
-    to the user's reserved_balance.
-    """
-    reserved_statuses = [
-        models.ExpenseStatus.DRAFT,
-        models.ExpenseStatus.SUBMITTED,
-        models.ExpenseStatus.PENDING_L2, # Note: includes PENDING_L1/APPROVED_L1 depending on your enum usage
-        models.ExpenseStatus.APPROVED_L2
-    ]
+# @router.get("/caisse/reserved-breakdown")
+# def get_reserved_breakdown(db: Session = Depends(get_db), current_user = Depends(get_current_user)):
     
-    return db.query(models.Expense).options(
-        joinedload(models.Expense.internal_project)
-    ).filter(
-        models.Expense.requester_id == current_user.id,
-        models.Expense.status.in_(reserved_statuses)
-    ).order_by(models.Expense.created_at.desc()).all()
+#     # 1. Pending In (PD Gap)
+#     pd_gap_reqs = db.query(models.FundRequest).filter(
+#         models.FundRequest.requester_id == current_user.id,
+#         models.FundRequest.status.in_([
+#             models.FundRequestStatus.VALIDATED_PD,
+#             models.FundRequestStatus.PARTIALLY_PAID
+#         ])
+#     ).all()
+    
+#     pending_in_list = []
+#     for r in pd_gap_reqs:
+#         gap = (r.pd_validated_amount or 0.0) - (r.paid_amount or 0.0)
+#         if gap > 0.1:
+#             pending_in_list.append({
+#                 "ref": r.request_number, 
+#                 "amount": gap, 
+#                 "desc": "PD Validated, awaiting Admin"
+#             })
 
-   
+#     # 2. Reserved Alimentation (In Transit)
+#     transit_txs = db.query(models.Transaction).join(models.FundRequest).filter(
+#         models.Transaction.caisse_id == current_user.caisse.id,
+#         models.Transaction.type == models.TransactionType.CREDIT,
+#         models.Transaction.status == models.TransactionStatus.PENDING
+#     ).all()
+    
+#     alimentation_list = [
+#         {"ref": t.related_request.request_number, "amount": t.amount, "date": t.created_at}
+#         for t in transit_txs
+#     ]
+
+#     # 3. Reserved Expenses
+#     active_expenses = db.query(models.Expense).filter(
+#         models.Expense.requester_id == current_user.id,
+#         models.Expense.status.notin_([
+#             models.ExpenseStatus.PAID, 
+#             models.ExpenseStatus.ACKNOWLEDGED,
+#             models.ExpenseStatus.REJECTED
+#         ])
+#     ).all()
+    
+#     expense_list = [
+#         {"id": e.id, "desc": e.description, "amount": e.amount, "status": e.status} 
+#         for e in active_expenses
+#     ]
+
+#     return {
+#         "pending_in": pending_in_list,
+#         "reserved_alimentation": alimentation_list,
+#         "reserved_expenses": expense_list
+#     }
+
 @router.get("/sbc/{sbc_id}/ledger", response_model=List[dict])
 def get_sbc_financial_status(
     sbc_id: int, 

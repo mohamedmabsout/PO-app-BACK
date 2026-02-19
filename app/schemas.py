@@ -696,7 +696,9 @@ class FundRequestItemDetail(BaseModel):
     target_pm_id: int
     target_pm_name: str
     requested_amount: float
-    approved_amount: Optional[float] = 0.0
+    pd_approved_amount: Optional[float] = 0.0
+    admin_approved_amount: Optional[float] = 0.0
+
     confirmed_amount: float = 0.0 
 
     remarque: Optional[str] = None # Include remark in response
@@ -712,7 +714,16 @@ class FundRequestDetail(BaseModel):
     status: str
     requester_id: int
     requester_name: str
-    approver_id: Optional[int] = None
+    pd_approver_id: Optional[int] = None
+    pd_approver_name: Optional[str] = None
+
+    pd_approved_at: Optional[datetime] = None
+    admin_approver_id: Optional[int] = None
+    admin_approved_at: Optional[datetime] = None
+    admin_approver_name: Optional[str] = None
+
+    raf_id: Optional[int] = None
+    pd_validated_amount: Optional[float] = 0.0
     approver_name: Optional[str] = None
     
     created_at: datetime
@@ -723,6 +734,8 @@ class FundRequestDetail(BaseModel):
     paid_amount: float # New field: How much has been paid so far
     admin_comment: Optional[str] = None # New field: Admin's note
     reception_attachment: Optional[str] = None # New field: Attachment for payment reception proof
+    confirmed_reception_amount: float = 0.0 # New field: Amount confirmed as received by finance
+
     items: List[FundRequestItemDetail]
 
     model_config = ConfigDict(from_attributes=True)
@@ -933,3 +946,32 @@ class PageUploadHistory(BaseModel):
     pages: int
 
     model_config = ConfigDict(from_attributes=True)
+
+
+# PM SUBMISSION
+class FundRequestItemCreate(BaseModel):
+    amount: float
+    remark: str
+
+class FundRequestCreate(BaseModel):
+    items: List[FundRequestItemCreate]
+    comment: Optional[str] = None
+
+# PD REVIEW
+class PDItemReview(BaseModel):
+    item_id: int
+    approved_amount: float # The "Trimmed" amount
+
+class PDReviewAction(BaseModel):
+    action: str # "APPROVE" or "REJECT"
+    items: Optional[List[PDItemReview]] = None
+    comment: Optional[str] = None
+
+# ADMIN REVIEW
+class AdminItemReview(BaseModel):
+    item_id: int
+    amount_to_pay: float
+
+class AdminReviewAction(BaseModel):
+    items: List[AdminItemReview]
+    comment: Optional[str] = None
