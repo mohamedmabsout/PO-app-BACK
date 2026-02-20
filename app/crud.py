@@ -2479,6 +2479,28 @@ def create_bon_de_commande(db: Session, bc_data: schemas.BCCreate, creator_id: i
     if not sbc:
         raise ValueError("SBC not found")
         
+    # ---------------------------------------------------------
+    # NEW: CATEGORY MIXING VALIDATION
+    # ---------------------------------------------------------
+    # 1. Fetch all related PO lines at once for validation and processing
+    requested_po_ids = [item.merged_po_id for item in bc_data.items]
+    po_records = db.query(models.MergedPO).filter(models.MergedPO.id.in_(requested_po_ids)).all()
+    po_map = {po.id: po for po in po_records}
+
+    if len(po_records) != len(set(requested_po_ids)):
+        raise ValueError("One or more PO Lines provided were not found in the database.")
+
+    # 2. Identify unique categories in this request
+    unique_categories = {po.category for po in po_records if po.category}
+
+    # 3. Apply the rule: Transport cannot be mixed with anything else
+    if "Transport" in unique_categories:
+        if len(unique_categories) > 1:
+            raise ValueError(
+                f"Forbidden: 'Transport' items cannot be mixed with other categories in the same BC. "
+                f"Current mix includes: {', '.join(unique_categories)}. "
+                "Please create a separate BC specifically for Transport."
+            )      
     # Map SBC type to BC type
     bc_type_to_set = BCType.PERSONNE_PHYSIQUE if sbc.sbc_type == SBCType.PP else BCType.STANDARD
 
@@ -5180,14 +5202,17 @@ def create_expense(db: Session, payload: schemas.ExpenseCreate, user_id: int, ba
         }
 
         send_notification_email(
-            background_tasks=background_tasks,
-            recipients=pd_emails,
-            subject="New Expense Submission",
-            module="EXP",
-            status_text="SUBMITTED",
-            details=details,
-            link=f"/expenses/details/{db_expense.id}"
+            background_tasks,
+            pd_emails,
+            "Expense Submitted for L1 Approval",
+            "",
+            {
+                "message": "An expense has been submitted and is now pending L1 approval.",
+                "details": details,
+                "link": f"/expenses/details/{db_expense.id}"
+            }
         )
+
 
     db.commit()
     return db_expense
