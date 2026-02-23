@@ -2314,7 +2314,7 @@ def get_internal_project_selector_for_user(db: Session, user: models.User, searc
     query = db.query(models.InternalProject)
     
     # 1. Apply Security Filter
-    if user.role != UserRole.ADMIN:
+    if user.role not in [UserRole.ADMIN, UserRole.PD]:
         # If not admin, restrict to own projects
         # (Assuming only PMs/PDs use this selector to see their work)
         query = query.filter(models.InternalProject.project_manager_id == user.id)
