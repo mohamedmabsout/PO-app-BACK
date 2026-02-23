@@ -84,7 +84,7 @@ def send_notification_email(
         "BC": "iPo.png",
         "ACCEPTANCE": "iAcceptance.png",
         "CAISSE": "iExpense.png",
-        "LOGISTIC": "iLogistic.png",
+        "LOGISTIC": "iLogistic  .png",
         "SYSTEM": "sib_logo.png"
     }
     

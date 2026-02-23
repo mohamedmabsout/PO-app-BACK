@@ -61,6 +61,37 @@ def create_expense(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+@router.get("/search", response_model=schemas.PaginatedResponse)
+def search_expenses_endpoint(
+    scope: str = "my",
+    page: int = 1,
+    limit: int = 20,
+    project_id: Optional[int] = None,
+    exp_type: Optional[str] = None,
+    beneficiary: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    # Security check for scopes
+    if scope in ["l1", "l2", "pay", "all", "history"]:
+        allowed_roles = ["ADMIN", "PD"]
+        # Allow PMs to see 'history' and 'pay' (if applicable) logic can be adjusted here
+        if scope == "history" or scope == "pay":
+            allowed_roles.append("PM")
+            
+        require_roles(current_user, allowed_roles)
+
+    filters = {
+        "project_id": project_id,
+        "exp_type": exp_type,
+        "beneficiary": beneficiary,
+        "start_date": start_date,
+        "end_date": end_date
+    }
+    
+    return crud.search_expenses(db, current_user, scope, page, limit, filters)
 
 @router.get("/my-requests", response_model=List[schemas.ExpenseResponse])
 def get_my_requests(
