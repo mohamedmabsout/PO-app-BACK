@@ -2491,16 +2491,16 @@ def create_bon_de_commande(db: Session, bc_data: schemas.BCCreate, creator_id: i
         raise ValueError("One or more PO Lines provided were not found in the database.")
 
     # 2. Identify unique categories in this request
-    unique_categories = {po.category for po in po_records if po.category}
+    # unique_categories = {po.category for po in po_records if po.category}
 
-    # 3. Apply the rule: Transport cannot be mixed with anything else
-    if "Transport" in unique_categories:
-        if len(unique_categories) > 1:
-            raise ValueError(
-                f"Forbidden: 'Transport' items cannot be mixed with other categories in the same BC. "
-                f"Current mix includes: {', '.join(unique_categories)}. "
-                "Please create a separate BC specifically for Transport."
-            )      
+    # # 3. Apply the rule: Transport cannot be mixed with anything else
+    # if "Transport" in unique_categories:
+    #     if len(unique_categories) > 1:
+    #         raise ValueError(
+    #             f"Forbidden: 'Transport' items cannot be mixed with other categories in the same BC. "
+    #             f"Current mix includes: {', '.join(unique_categories)}. "
+    #             "Please create a separate BC specifically for Transport."
+    #         )      
     # Map SBC type to BC type
     bc_type_to_set = BCType.PERSONNE_PHYSIQUE if sbc.sbc_type == SBCType.PP else BCType.STANDARD
 
