@@ -78,7 +78,7 @@ def send_notification_email(
                     { "".join([f"<tr><td style='padding:8px; border:1px solid #ddd;'><b>{k}:</b></td><td style='padding:8px; border:1px solid #ddd;'>{v}</td></tr>" for k, v in context.get('details', {}).items()]) }
                 </table>
                 <p>Please log in to the portal to take action.</p>
-                <a href="{os.getenv('FRONTEND_URL', 'http://localhost:3000')}{context.get('link', '')}" 
+                <a href="{os.getenv('FRONTEND_URL', 'https://expense.sib.co.ma')}{context.get('link', '')}" 
                    style="display: inline-block; padding: 10px 20px; background-color: #007bff; color: white; text-decoration: none; border-radius: 5px;">
                    View in Portal
                 </a>
@@ -2314,7 +2314,7 @@ def get_internal_project_selector_for_user(db: Session, user: models.User, searc
     query = db.query(models.InternalProject)
     
     # 1. Apply Security Filter
-    if user.role != UserRole.ADMIN:
+    if user.role not in [UserRole.ADMIN, UserRole.PD]:
         # If not admin, restrict to own projects
         # (Assuming only PMs/PDs use this selector to see their work)
         query = query.filter(models.InternalProject.project_manager_id == user.id)
@@ -2673,9 +2673,10 @@ def create_sbc(db: Session, form_data: dict, contract_file, tax_file, creator_id
         background_tasks,
         admin_emails,
         "New Subcontractor Pending Approval",
-        "",
+        "SBC Registration Alert",
+
         {
-            "message": "A new subcontractor has been registered and requires validation.",
+            "message": "",
             "details": {
                 "SBC Name": new_sbc.name, 
                 "SBC Code": new_sbc.sbc_code, 
@@ -5472,6 +5473,85 @@ def list_all_requests_global(db: Session, current_user: models.User):
             models.Expense.status != models.ExpenseStatus.DRAFT
         )
     ).order_by(models.Expense.created_at.desc()).all()
+
+def search_expenses(
+    db: Session, 
+    user: models.User, 
+    scope: str,  # 'my', 'l1', 'l2', 'pay', 'history', 'all'
+    page: int = 1, 
+    limit: int = 20,
+    filters: dict = {}
+):
+    query = db.query(models.Expense).options(
+        joinedload(models.Expense.internal_project),
+        joinedload(models.Expense.requester),
+        joinedload(models.Expense.sbc)
+    )
+
+    # --- 1. APPLY SECURITY SCOPE (The logic from your old endpoints) ---
+    if scope == "my":
+        # My creations OR where I am beneficiary
+        query = query.filter(or_(
+            models.Expense.requester_id == user.id,
+            models.Expense.beneficiary_user_id == user.id
+        ))
+    
+    elif scope == "l1":
+        # PD View: Submitted items
+        query = query.filter(models.Expense.status == models.ExpenseStatus.SUBMITTED)
+    
+    elif scope == "l2":
+        # Admin View: L1 Approved items
+        query = query.filter(models.Expense.status == models.ExpenseStatus.PENDING_L2)
+    
+    elif scope == "pay":
+        # Payment View: L2 Approved items
+        query = query.filter(models.Expense.status == models.ExpenseStatus.APPROVED_L2)
+    
+    elif scope == "history":
+        # Paid items
+        query = query.filter(models.Expense.status.in_([
+            models.ExpenseStatus.PAID, models.ExpenseStatus.ACKNOWLEDGED
+        ]))
+    
+    elif scope == "all":
+        # Admin Global View (No drafts)
+        query = query.filter(models.Expense.status != models.ExpenseStatus.DRAFT)
+
+    # --- 2. APPLY USER FILTERS ---
+    if filters.get("project_id"):
+        query = query.filter(models.Expense.project_id == filters["project_id"])
+    
+    if filters.get("exp_type") and filters["exp_type"] != "ALL":
+        query = query.filter(models.Expense.exp_type == filters["exp_type"])
+        
+    if filters.get("beneficiary"):
+        term = f"%{filters['beneficiary']}%"
+        query = query.filter(models.Expense.beneficiary.ilike(term))
+        
+    if filters.get("start_date"):
+        query = query.filter(models.Expense.created_at >= filters["start_date"])
+        
+    if filters.get("end_date"):
+        # Add 1 day to include the end date fully
+        query = query.filter(models.Expense.created_at <= f"{filters['end_date']} 23:59:59")
+
+    # --- 3. PAGINATION ---
+    total = query.count()
+    items = query.order_by(models.Expense.created_at.desc())\
+                 .offset((page - 1) * limit)\
+                 .limit(limit)\
+                 .all()
+                 
+    return {
+        "items": items,
+        "total": total,
+        "page": page,
+        "size": limit,
+        "pages": (total + limit - 1) // limit if limit > 0 else 1
+    }
+
+
 def list_pending_l1(db: Session):
     """Liste toutes les dépenses en attente de validation L1 (PD)"""
     return db.query(models.Expense).filter(

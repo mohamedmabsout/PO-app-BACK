@@ -286,6 +286,9 @@ class PaginatedMergedPO(BaseModel):
     per_page: int
     total_pages: int
 
+
+
+
 class PageSite(BaseModel):
     items: List["Site"]
     total_items: int
@@ -827,7 +830,13 @@ class ExpenseResponse(BaseModel):
             return [act.id for act in info.data.acts]
         return v
 
-
+class PaginatedResponse(BaseModel):
+    items: List[ExpenseResponse] # Reusing your existing ExpenseResponse
+    total: int
+    page: int
+    size: int
+    pages: int
+    
 class ExpenseUpdate(BaseModel):
     exp_type: str | None = None
     beneficiary: str | None = None
