@@ -809,6 +809,8 @@ class ExpenseResponse(BaseModel):
     l1_at: Optional[datetime] = None
     l2_approver: Optional[UserInfo] = None
     l2_at: Optional[datetime] = None
+    l1_comment: Optional[str] = None # <-- ADD THIS
+    l2_comment: Optional[str] = None # <-- ADD THIS
     
     payment_confirmed_at: Optional[datetime] = None
     signed_doc_url: Optional[str] = None 
@@ -830,6 +832,10 @@ class ExpenseResponse(BaseModel):
             return [act.id for act in info.data.acts]
         return v
 
+
+class ExpenseApproveAction(BaseModel):
+    comment: Optional[str] = None
+    
 class PaginatedResponse(BaseModel):
     items: List[ExpenseResponse] # Reusing your existing ExpenseResponse
     total: int
