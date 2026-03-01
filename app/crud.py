@@ -50,6 +50,37 @@ PAYMENT_TERM_MAP = {
 def format_currency_python(value):
     """Formats a number to '10 000,00 MAD' style in Python"""
     return f"{value:,.2f} MAD".replace(",", " ").replace(".", ",")
+
+def get_project_users_by_role(db: Session, project_id: int, role: str):
+    """
+    Fetches users assigned to a specific project with a specific role.
+    Example: Who is the PD for Project #12?
+    """
+    return db.query(models.User).join(models.ProjectStakeholder).filter(
+        models.ProjectStakeholder.project_id == project_id,
+        models.ProjectStakeholder.role == role
+    ).all()
+
+def is_user_project_lead(db: Session, user_id: int, project_id: int, role: str):
+    """
+    Security Check: Is this user the LEAD (L1) for this role on this project?
+    Admins bypass this check.
+    """
+    # 1. Admin Override
+    user = db.query(models.User).get(user_id)
+    if user.role == models.UserRole.ADMIN:
+        return True
+
+    # 2. Stakeholder Check
+    exists = db.query(models.ProjectStakeholder).filter(
+        models.ProjectStakeholder.user_id == user_id,
+        models.ProjectStakeholder.project_id == project_id,
+        models.ProjectStakeholder.role == role,
+        models.ProjectStakeholder.is_lead == True
+    ).first()
+    
+    return exists is not None
+
 def send_notification_email(
     background_tasks: BackgroundTasks,
     recipients: List[str],
@@ -2300,31 +2331,37 @@ def get_internal_projects_for_user(db: Session, user: models.User):
     """
     query = db.query(models.InternalProject)
     
-    if user.role == UserRole.ADMIN:
-        return query.order_by(models.InternalProject.name).all()
-    
-    elif user.role in [UserRole.PM]:
-        return query.filter(models.InternalProject.project_manager_id == user.id).order_by(models.InternalProject.name).all()
-    
-    else:
-        return [] # Or raise error
+    if user.role in [models.UserRole.ADMIN, models.UserRole.RAF]:
+        return db.query(models.InternalProject).order_by(models.InternalProject.name).all()
+    return db.query(models.InternalProject).join(
+        models.ProjectStakeholder
+    ).filter(
+        models.ProjectStakeholder.user_id == user.id
+    ).order_by(models.InternalProject.name).distinct().all() # Or raise error
 
 # Update the selector too
 def get_internal_project_selector_for_user(db: Session, user: models.User, search: str = None):
+    """
+    Returns projects for dropdowns.
+    - ADMIN/RAF: See ALL projects.
+    - Others (PM/PD): See only assigned projects.
+    """
     query = db.query(models.InternalProject)
     
-    # 1. Apply Security Filter
-    if user.role not in [UserRole.ADMIN, UserRole.PD]:
-        # If not admin, restrict to own projects
-        # (Assuming only PMs/PDs use this selector to see their work)
-        query = query.filter(models.InternalProject.project_manager_id == user.id)
+    # 1. Security Filter
+    # If NOT Admin/RAF, restrict to assigned projects
+    if user.role not in [models.UserRole.ADMIN, models.UserRole.RAF]:
+        query = query.join(models.ProjectStakeholder).filter(
+            models.ProjectStakeholder.user_id == user.id
+        )
 
-    # 2. Apply Search Filter
+    # 2. Apply Search Filter (Applied to everyone)
     if search:
         query = query.filter(models.InternalProject.name.ilike(f"%{search}%"))
         
-    return query.limit(20).all()
+    return query.order_by(models.InternalProject.name).limit(20).all()
 
+    
 def get_remaining_to_accept_dataframe(
     db: Session,
     filter_stage: str = "ALL",
@@ -5177,10 +5214,19 @@ def create_expense(db: Session, payload: schemas.ExpenseCreate, user_id: int, ba
 
     # NOTIFICATIONS (If Submitted)
     if not payload.is_draft:
-        pds = db.query(models.User).filter(models.User.role == UserRole.PD).all()
-        pd_emails = [u.email for u in pds if u.email]
+        target_pds = get_project_users_by_role(
+            db, 
+            db_expense.project_id, 
+            models.ProjectRoleType.PD
+        )
+
+        # Fallback: If no PD assigned to this project, notify Global Admins
+        if not target_pds:
+            target_pds = db.query(models.User).filter(models.User.role == models.UserRole.ADMIN).all()
+
+        pd_emails = [u.email for u in target_pds if u.email]
         
-        for pd in pds:
+        for pd in target_pds:
             create_notification(
                 db, recipient_id=pd.id, type=NotificationType.TODO,
                 module=models.NotificationModule.EXP,
@@ -5224,6 +5270,28 @@ def approve_expense_l1(db: Session, expense_id: int, pd_id: int, background_task
     Action: Notify Admin (L2).
     """
     expense = db.query(models.Expense).get(expense_id)
+    if not expense:
+        raise ValueError("Expense not found")
+        
+    if expense.status != models.ExpenseStatus.SUBMITTED:
+        raise ValueError("Expense not in submitted state.")
+
+    # --- NEW SECURITY CHECK ---
+    # Check if the approver is the PD (Lead) for THIS specific project
+    is_allowed = is_user_project_lead(
+        db, 
+        pd_id, 
+        expense.project_id, 
+        models.ProjectRoleType.PD
+    )
+
+    if not is_allowed:
+        # Optional: Allow if user has Global PD Role? 
+        # Ideally no, we want strict project assignment.
+        raise ValueError("Permission Denied: You are not the assigned Project Director for this project.")
+    # --------------------------
+   
+   
     expense.status = models.ExpenseStatus.PENDING_L2
     expense.l1_approver_id = pd_id
     expense.l1_at = datetime.now()
@@ -5261,28 +5329,34 @@ def approve_expense_l2(db: Session, expense_id: int, admin_id: int, background_t
     expense.l2_approver_id = admin_id
     expense.l2_at = datetime.now()
 
-    # NOTIFY PD (The L1 Approver is usually the one who pays)
-    pd_id = expense.l1_approver_id
-    pd = db.query(models.User).get(pd_id)
-    # beneficiary = db.query(models.User).get(expense.beneficiary_user_id)
-    
-    
-    
-    if pd:
+    # 1. Fetch all RAF users
+    rafs = db.query(models.User).filter(models.User.role == models.UserRole.RAF).all()
+    raf_emails = [u.email for u in rafs if u.email]
+
+    # 2. Send System Notifications
+    for raf in rafs:
         create_notification(
-            db, recipient_id=pd.id, type=NotificationType.TODO,
+            db, recipient_id=raf.id, type=NotificationType.TODO,
             module=models.NotificationModule.EXP,
-            title="Proceed with Payment",
-            message=f"Expense #{expense.id} is fully approved. Print voucher and pay beneficiary.",
-            link=f"/expenses?tab=l1",
-            created_at=datetime.now()
+            title="Cash Disbursement Required",
+            message=f"Expense #{expense.id} (Amount: {expense.amount} MAD) is approved. Please proceed with payment.",
+            link=f"/expenses/details/{expense.id}"
         )
-        if pd.email:
-            send_notification_email(background_tasks, [pd.email], "Expense Ready for Payment", "", {
-                "message": "Admin has authorized payment. You can now generate the PDF and hand over the cash.",
-                "details": {"Beneficiary": expense.beneficiary, "Amount": expense.amount},
-                "link": f"/expenses/details/{expense.id}"
-            })
+
+    # 3. Send Email
+    if raf_emails:
+        send_notification_email(
+            background_tasks, 
+            raf_emails, 
+            "Expense Approved (L2) - Ready for Payment", 
+            "EXP", 
+            {
+                "id": expense.id,
+                "project": expense.internal_project.name,
+                "beneficiary": expense.beneficiary,
+                "amount": f"{expense.amount} MAD",
+            }
+        )
 
     db.commit()
     return expense
@@ -5454,25 +5528,26 @@ def list_personal_requests(db: Session, current_user: models.User):
 
 def list_all_requests_global(db: Session, current_user: models.User):
     """
-    MANAGEMENT VIEW:
-    Returns everything in the system.
-    - Includes own drafts.
-    - Includes everyone else's SUBMITTED, APPROVED, PAID, etc.
-    - Excludes other people's DRAFTs.
+    Returns global list.
+    - Admin/RAF: Everything.
+    - PD/PM: Only their assigned projects.
     """
     query = db.query(models.Expense).options(
         joinedload(models.Expense.internal_project),
         joinedload(models.Expense.requester)
-    )
+    ).filter(models.Expense.status != models.ExpenseStatus.DRAFT)
 
-    return query.filter(
-        or_(
-            # My own stuff (Drafts included)
-            models.Expense.requester_id == current_user.id,
-            # Everyone else's stuff (BUT NO DRAFTS)
-            models.Expense.status != models.ExpenseStatus.DRAFT
+    # --- STAKEHOLDER FILTER ---
+    if current_user.role not in [models.UserRole.ADMIN, models.UserRole.RAF]:
+        query = query.join(
+            models.ProjectStakeholder,
+            models.Expense.project_id == models.ProjectStakeholder.project_id
+        ).filter(
+            models.ProjectStakeholder.user_id == current_user.id
         )
-    ).order_by(models.Expense.created_at.desc()).all()
+    # --------------------------
+
+    return query.order_by(models.Expense.created_at.desc()).all()
 
 def search_expenses(
     db: Session, 
@@ -5488,37 +5563,65 @@ def search_expenses(
         joinedload(models.Expense.sbc)
     )
 
-    # --- 1. APPLY SECURITY SCOPE (The logic from your old endpoints) ---
+    # =========================================================
+    # 1. STAKEHOLDER SECURITY FILTER (The New Logic)
+    # =========================================================
+    
+    # "My Requests" is exempt: You always see what you created.
+    if scope != "my":
+        
+        # ADMIN and RAF are Global -> They see everything.
+        # Everyone else (PD, PM, Coordinator) is restricted by Project Assignment.
+        if user.role not in [models.UserRole.ADMIN, models.UserRole.RAF]:
+            
+            # Join Expense -> InternalProject -> ProjectStakeholder
+            query = query.join(
+                models.ProjectStakeholder,
+                models.Expense.project_id == models.ProjectStakeholder.project_id
+            ).filter(
+                models.ProjectStakeholder.user_id == user.id
+            )
+
+            # --- Contextual Role Filtering ---
+            
+            # If looking at "L1 Approval", you MUST be the PD of that project
+            if scope == "l1":
+                query = query.filter(models.ProjectStakeholder.role == models.ProjectRoleType.PD)
+            
+            # Note: L2 and Pay are usually Admin/RAF scopes, so they bypass this block.
+            # For 'all' or 'history', the user sees expenses for ANY project 
+            # where they are a stakeholder (PM, PC, or PD).
+
+    # =========================================================
+    # 2. STATUS SCOPE LOGIC (Existing)
+    # =========================================================
+    
     if scope == "my":
-        # My creations OR where I am beneficiary
         query = query.filter(or_(
             models.Expense.requester_id == user.id,
             models.Expense.beneficiary_user_id == user.id
         ))
     
     elif scope == "l1":
-        # PD View: Submitted items
         query = query.filter(models.Expense.status == models.ExpenseStatus.SUBMITTED)
     
     elif scope == "l2":
-        # Admin View: L1 Approved items
         query = query.filter(models.Expense.status == models.ExpenseStatus.PENDING_L2)
     
     elif scope == "pay":
-        # Payment View: L2 Approved items
         query = query.filter(models.Expense.status == models.ExpenseStatus.APPROVED_L2)
     
     elif scope == "history":
-        # Paid items
         query = query.filter(models.Expense.status.in_([
             models.ExpenseStatus.PAID, models.ExpenseStatus.ACKNOWLEDGED
         ]))
     
     elif scope == "all":
-        # Admin Global View (No drafts)
         query = query.filter(models.Expense.status != models.ExpenseStatus.DRAFT)
 
-    # --- 2. APPLY USER FILTERS ---
+    # =========================================================
+    # 3. USER FILTERS (Existing)
+    # =========================================================
     if filters.get("project_id"):
         query = query.filter(models.Expense.project_id == filters["project_id"])
     
@@ -5533,10 +5636,9 @@ def search_expenses(
         query = query.filter(models.Expense.created_at >= filters["start_date"])
         
     if filters.get("end_date"):
-        # Add 1 day to include the end date fully
         query = query.filter(models.Expense.created_at <= f"{filters['end_date']} 23:59:59")
 
-    # --- 3. PAGINATION ---
+    # --- 4. PAGINATION ---
     total = query.count()
     items = query.order_by(models.Expense.created_at.desc())\
                  .offset((page - 1) * limit)\
@@ -6718,3 +6820,65 @@ def auto_fill_planning_from_history(db: Session, year: int):
 
     db.commit()
     return count_updated
+
+
+# backend/app/crud.py
+
+def run_stakeholder_migration(db: Session):
+    """
+    1. Converts existing project_manager_id to a 'PM' Stakeholder.
+    2. Assigns User ID 28 as 'PD' (Lead) for all projects.
+    """
+    projects = db.query(models.InternalProject).all()
+    count_pm = 0
+    count_pd = 0
+
+    # The designated PD
+    pd_user_id = 3
+    
+    pd_user = db.query(models.User).get(pd_user_id)
+    
+    if not pd_user:
+        print(f"WARNING: User ID {pd_user_id} not found. PD migration skipped.")
+
+    for proj in projects:
+        # --- 1. Migrate Project Manager ---
+        if proj.project_manager_id:
+            # Check if exists
+            exists_pm = db.query(models.ProjectStakeholder).filter_by(
+                project_id=proj.id,
+                user_id=proj.project_manager_id,
+                role=models.ProjectRoleType.PM
+            ).first()
+
+            if not exists_pm:
+                new_pm = models.ProjectStakeholder(
+                    project_id=proj.id,
+                    user_id=proj.project_manager_id,
+                    role=models.ProjectRoleType.PM,
+                    is_lead=True # Old PMs are always the Lead PM
+                )
+                db.add(new_pm)
+                count_pm += 1
+
+        # --- 2. Assign Project Director (User 28) ---
+        if pd_user:
+            # Check if exists
+            exists_pd = db.query(models.ProjectStakeholder).filter_by(
+                project_id=proj.id,
+                user_id=pd_user_id,
+                role=models.ProjectRoleType.PD
+            ).first()
+
+            if not exists_pd:
+                new_pd = models.ProjectStakeholder(
+                    project_id=proj.id,
+                    user_id=pd_user_id,
+                    role=models.ProjectRoleType.PD,
+                    is_lead=True
+                )
+                db.add(new_pd)
+                count_pd += 1
+
+    db.commit()
+    return {"pms_migrated": count_pm, "pds_assigned": count_pd}

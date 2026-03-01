@@ -10,6 +10,14 @@ class UserRole(str, enum.Enum):
     ADMIN = "ADMIN"  # Changez de "Admin" à "ADMIN"
     COORDINATEUR = "coordinateur"
     CEO = "ceo"
+
+class ProjectRoleType(str, enum.Enum):
+    PD = "PD"           # Project Director
+    PM = "PM"           # Project Manager
+    PC = "PC"           # Project Coordinator
+    RQC = "RQC"         # RQC Interface (Quality)
+    SALES = "SALES"     # Sales Manager
+
 class ProjectType(str, enum.Enum):
     FIXED_PRICE = "Fixed Price"
     TIME_MATERIAL = "Time & Material"

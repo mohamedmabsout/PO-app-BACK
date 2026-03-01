@@ -8,7 +8,7 @@ from sqlalchemy.orm import backref # Ensure this is imported
 from .enum import (
     ProjectType, UserRole, SBCStatus, BCStatus, NotificationType, BCType,
     AssignmentStatus, ValidationState, ItemGlobalStatus, SBCType,
-    FundRequestStatus, TransactionType, TransactionStatus, ExpenseStatus, NotificationModule, InvoiceStatus
+    FundRequestStatus, TransactionType, TransactionStatus, ExpenseStatus, NotificationModule, InvoiceStatus,ProjectRoleType
 )
 from .database import Base
  # <--- AJOUTER CET IMPORT
@@ -47,12 +47,43 @@ class User(Base):
         foreign_keys="BonDeCommande.creator_id"
     )
     sbc_id = Column(Integer, ForeignKey("sbcs.id"), nullable=True)
+    # New Relationship: See all projects where this user has a specific role
+    project_assignments = relationship("ProjectStakeholder", back_populates="user", cascade="all, delete-orphan")
     
     
     # Relationship
     sbc = relationship("SBC", back_populates="users",foreign_keys=[sbc_id])
     expenses = relationship("Expense", back_populates="requester", foreign_keys="[Expense.requester_id]")
     notifications = relationship("Notification", back_populates="recipient") 
+class ProjectStakeholder(Base):
+    __tablename__ = "project_stakeholders"
+
+    id = Column(Integer, primary_key=True, index=True)
+    
+    # Links
+    project_id = Column(Integer, ForeignKey("internal_projects.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    
+    # Role Definition
+    role = Column(Enum(ProjectRoleType), nullable=False)
+    
+    # Hierarchy: 
+    # If True, this is the "L1 / First Owner" (e.g., The Main PM).
+    # If False, this is a "Support" member (e.g., A secondary Coordinator).
+    is_lead = Column(Boolean, default=False) 
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # Relationships
+    project = relationship("InternalProject", back_populates="stakeholders")
+    user = relationship("User", back_populates="project_assignments")
+
+    # Constraint: A user cannot have the same role twice on the same project
+    __table_args__ = (
+        sa.UniqueConstraint('project_id', 'user_id', 'role', name='uix_proj_user_role'),
+    )
+
+
 
 class Account(Base):
     __tablename__ = "accounts"
@@ -95,7 +126,8 @@ class InternalProject(Base):
     direct_customer_id = Column(Integer, ForeignKey("customers.id"), nullable=True)
     final_customer_id = Column(Integer, ForeignKey("customers.id"), nullable=True)
     project_manager_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-
+  # New Relationship: Access all team members
+    stakeholders = relationship("ProjectStakeholder", back_populates="project", cascade="all, delete-orphan")
     account = relationship("Account")
     direct_customer = relationship("Customer", foreign_keys=[direct_customer_id])
     final_customer = relationship("Customer", foreign_keys=[final_customer_id])

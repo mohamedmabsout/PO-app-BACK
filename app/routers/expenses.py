@@ -74,14 +74,15 @@ def search_expenses_endpoint(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
-    # Security check for scopes
-    if scope in ["l1", "l2", "pay", "all", "history"]:
-        allowed_roles = ["ADMIN", "PD"]
-        # Allow PMs to see 'history' and 'pay' (if applicable) logic can be adjusted here
-        if scope == "history" or scope == "pay":
-            allowed_roles.append("PM")
-            
-        require_roles(current_user, allowed_roles)
+    # Security: Define who can access which scope
+    if scope == "pay":
+        # Only RAF and ADMIN can see what needs to be paid
+        require_roles(current_user, ["RAF", "ADMIN"])
+    
+    elif scope in ["l1", "l2", "all", "history"]:
+        # RAF should be able to see History and All requests for Audit purposes
+        # PD and ADMIN can also see these
+        require_roles(current_user, ["PD", "ADMIN", "RAF"])
 
     filters = {
         "project_id": project_id,
@@ -108,7 +109,7 @@ def get_all_requests(
     current_user: models.User = Depends(auth.get_current_user),
 ):
     """Global view: Management oversight."""
-    require_roles(current_user, ["ADMIN", "PD"])
+    require_roles(current_user, ["ADMIN", "PD", "RAF"])
     return crud.list_all_requests_global(db, current_user)
 
 
@@ -172,17 +173,48 @@ def export_expenses_to_excel(
 
 @router.get("/pending-l1", response_model=List[schemas.ExpenseResponse])
 def get_pending_l1(db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
-    require_roles(current_user, ["PD", "ADMIN"])
-    return db.query(models.Expense).filter(models.Expense.status == models.ExpenseStatus.SUBMITTED).all()
+    query = db.query(models.Expense).options(
+        joinedload(models.Expense.internal_project),
+        joinedload(models.Expense.requester)
+    ).filter(models.Expense.status == models.ExpenseStatus.SUBMITTED)
+
+    # --- STAKEHOLDER FILTER ---
+    if current_user.role not in [models.UserRole.ADMIN]:
+        query = query.join(
+            models.ProjectStakeholder,
+            models.Expense.project_id == models.ProjectStakeholder.project_id
+        ).filter(
+            models.ProjectStakeholder.user_id == current_user.id
+        )
+    # --------------------------
+
+    return query.order_by(models.Expense.created_at.desc()).all()
+
 
 @router.get("/pending-l2", response_model=List[schemas.ExpenseResponse])
 def get_pending_l2(db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
-    require_roles(current_user, ["ADMIN"])
-    return db.query(models.Expense).filter(models.Expense.status == models.ExpenseStatus.PENDING_L2).all()
+    query = db.query(models.Expense).options(
+            joinedload(models.Expense.internal_project),
+            joinedload(models.Expense.requester)
+        ).filter(models.Expense.status == models.ExpenseStatus.PENDING_L2)
+
+        # --- STAKEHOLDER FILTER ---
+    if current_user.role not in [models.UserRole.ADMIN, models.UserRole.RAF]:
+        query = query.join(
+            models.ProjectStakeholder,
+            models.Expense.project_id == models.ProjectStakeholder.project_id
+        ).filter(
+            models.ProjectStakeholder.user_id == current_user.id
+        )
+    # --------------------------
+
+    return query.order_by(models.Expense.created_at.desc()).all()
+
+
 
 @router.get("/pending-payment", response_model=List[schemas.ExpenseResponse])
 def get_pending_payment(db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
-    require_roles(current_user, ["PD", "ADMIN"])
+    require_roles(current_user, ["RAF", "ADMIN"])
     # "APPROVED_L2" means Admin validated, now waiting for PD to pay
     return db.query(models.Expense).filter(models.Expense.status == models.ExpenseStatus.APPROVED_L2).all()
 @router.get("/paid-history", response_model=List[schemas.ExpenseResponse])
@@ -194,7 +226,7 @@ def get_paid_history(
     Returns expenses that are PAID or ACKNOWLEDGED.
     Used by PDs/Admins to review history and upload missing files.
     """
-    require_roles(current_user, [models.UserRole.PD, models.UserRole.ADMIN])
+    require_roles(current_user, [models.UserRole.RAF, models.UserRole.ADMIN, models.UserRole.PD])
     
     return db.query(models.Expense).filter(
         models.Expense.status.in_([
@@ -208,19 +240,30 @@ def get_expense_summary_counts(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
-    """
-    Returns unread counts for each workflow stage.
-    """
-    counts = {
-        "l1": 0,
-        "l2": 0,
-        "pay": 0
-    }
+    counts = {"l1": 0, "l2": 0, "pay": 0}
     
-    # Logic for PD/Admin
+    # Helper to apply project filter if needed
+    def filter_by_stakeholder(query, role_needed=None):
+        if current_user.role not in [models.UserRole.ADMIN, models.UserRole.RAF]:
+            query = query.join(models.ProjectStakeholder, models.Expense.project_id == models.ProjectStakeholder.project_id)
+            query = query.filter(models.ProjectStakeholder.user_id == current_user.id)
+            if role_needed:
+                query = query.filter(models.ProjectStakeholder.role == role_needed)
+        return query
+
+    # L1: PDs (Filtered by assignment) or Admins
     if current_user.role in [models.UserRole.PD, models.UserRole.ADMIN]:
-        counts["l1"] = db.query(models.Expense).filter(models.Expense.status == models.ExpenseStatus.SUBMITTED).count()
+        q = db.query(models.Expense).filter(models.Expense.status == models.ExpenseStatus.SUBMITTED)
+        # Only count projects where I am the PD
+        q = filter_by_stakeholder(q, models.ProjectRoleType.PD) 
+        counts["l1"] = q.count()
+
+    # L2: Admin Only (Global)
+    if current_user.role == models.UserRole.ADMIN:
         counts["l2"] = db.query(models.Expense).filter(models.Expense.status == models.ExpenseStatus.PENDING_L2).count()
+
+    # Pay: RAF/Admin (Global)
+    if current_user.role in [models.UserRole.RAF, models.UserRole.ADMIN]:
         counts["pay"] = db.query(models.Expense).filter(models.Expense.status == models.ExpenseStatus.APPROVED_L2).count()
         
     return counts
@@ -298,26 +341,53 @@ def get_sbc_financial_status(
             
     return crud.get_sbc_ledger(db, sbc_id)
 
+
 @router.get("/{id}", response_model=schemas.ExpenseResponse)
 def get_expense_details(
     id: int, 
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
-    """Get single expense details."""
-    expense = db.query(models.Expense).get(id)
+    """
+    Get single expense details with strict security checks.
+    """
+    # 1. Fetch Expense with all relationships needed for the UI
+    expense = db.query(models.Expense).options(
+        joinedload(models.Expense.internal_project),
+        joinedload(models.Expense.requester),
+        joinedload(models.Expense.acts), # For Batch details
+        joinedload(models.Expense.l1_approver),
+        joinedload(models.Expense.l2_approver)
+    ).filter(models.Expense.id == id).first()
+
     if not expense:
         raise HTTPException(status_code=404, detail="Expense not found")
     
-    # Security: PM sees own, PD/Admin sees all, SBC sees if beneficiary
-    is_owner = expense.requester_id == current_user.id
-    is_admin_pd = current_user.role in [models.UserRole.ADMIN, models.UserRole.PD]
-    is_beneficiary = expense.beneficiary_user_id == current_user.id
+    # --- SECURITY LOGIC ---
 
-    if not (is_owner or is_admin_pd or is_beneficiary):
-        raise HTTPException(status_code=403, detail="Not authorized to view this expense.")
-        
-    return expense
+    # 1. Global Admin / RAF: Access Everything
+    if current_user.role in [models.UserRole.ADMIN, models.UserRole.RAF]:
+        return expense
+
+    # 2. Personal Access: Creator or Beneficiary (SBC)
+    if expense.requester_id == current_user.id:
+        return expense
+    
+    if expense.beneficiary_user_id == current_user.id:
+        return expense
+
+    # 3. Project Context: Is the user a Stakeholder on THIS project?
+    # This covers PDs, PMs, and Coordinators assigned to this specific project.
+    is_stakeholder = db.query(models.ProjectStakeholder).filter(
+        models.ProjectStakeholder.user_id == current_user.id,
+        models.ProjectStakeholder.project_id == expense.project_id
+    ).first()
+
+    if is_stakeholder:
+        return expense
+
+    # --- ACCESS DENIED ---
+    raise HTTPException(status_code=403, detail="Not authorized to view this expense.")
 
 
 @router.get("/attachment/{filename}")
@@ -485,7 +555,7 @@ def confirm_payment(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
-    require_roles(current_user, [models.UserRole.PD, models.UserRole.ADMIN])
+    require_roles(current_user, [models.UserRole.RAF, models.UserRole.ADMIN])
     
     filename = None
     if file:
