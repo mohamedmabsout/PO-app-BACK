@@ -10,6 +10,7 @@ import pandas as pd
 from sqlalchemy.orm import Session, joinedload
 from typing import List,Optional
 import mimetypes # Ensure this is imported at the top
+import json
 
 from .. import crud, models, schemas, auth
 from ..dependencies import get_current_user, get_db
@@ -44,22 +45,39 @@ def require_roles(user, roles):
 # ==========================
 
 @router.post("/", response_model=schemas.ExpenseResponse)
-def create_expense(
+async def create_expense_endpoint(
     background_tasks: BackgroundTasks,
-    payload: schemas.ExpenseCreate,
+    # Accept the file
+    file: UploadFile = File(None), 
+    # Accept the rest of the data as a JSON string inside a form field
+    payload_str: str = Form(...), 
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
 ):
-    """
-    Create Expense (Draft or Submitted). 
-    Money is moved to 'Reserved' immediately.
-    """
-    # Allowed: PMs, Coordinators, Admins, PDs
-    require_roles(current_user, [models.UserRole.PM, models.UserRole.COORDINATEUR, models.UserRole.ADMIN, models.UserRole.PD])
+    require_roles(current_user,[models.UserRole.PM, models.UserRole.COORDINATEUR, models.UserRole.ADMIN, models.UserRole.PD])
+    
+    # Parse the JSON string back into your Pydantic Schema
     try:
-        return crud.create_expense(db, payload, current_user.id, background_tasks)
+        payload_dict = json.loads(payload_str)
+        payload = schemas.ExpenseCreate(**payload_dict)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid payload format: {str(e)}")
+
+    # Handle File Saving
+    filename = None
+    if file:
+        os.makedirs("uploads/expenses", exist_ok=True)
+        filename = f"EXP_{current_user.id}_{file.filename}"
+        file_path = os.path.join("uploads", "expenses", filename)
+        with open(file_path, "wb") as buffer:
+            buffer.write(await file.read())
+
+    try:
+        # Pass the filename to the CRUD function
+        return crud.create_expense(db, payload, current_user.id, background_tasks, filename)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
 
 @router.get("/search", response_model=schemas.PaginatedResponse)
 def search_expenses_endpoint(
@@ -459,6 +477,8 @@ def submit_expense(
 @router.post("/{id}/approve-l1", response_model=schemas.ExpenseResponse)
 def approve_l1(
     id: int, 
+    payload: schemas.ExpenseApproveAction, # <-- Accept Comment
+
     db: Session = Depends(get_db), 
     current_user: models.User = Depends(auth.get_current_user),
     background_tasks: BackgroundTasks = BackgroundTasks()
@@ -466,7 +486,7 @@ def approve_l1(
     """PD Approval"""
     require_roles(current_user, [models.UserRole.PD, models.UserRole.ADMIN])
     try:
-        return crud.approve_expense_l1(db, id, current_user.id, background_tasks)
+        return crud.approve_expense_l1(db, id, current_user.id, background_tasks, payload.comment)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -475,13 +495,15 @@ def approve_l1(
 def approve_l2(
     background_tasks: BackgroundTasks,
     id: int, 
+    payload: schemas.ExpenseApproveAction, # <-- Accept Comment
+
     db: Session = Depends(get_db), 
     current_user: models.User = Depends(auth.get_current_user),
 ):
     """Admin Approval"""
     require_roles(current_user, [models.UserRole.ADMIN])
     try:
-        return crud.approve_expense_l2(db, id, current_user.id, background_tasks)
+        return crud.approve_expense_l2(db, id, current_user.id, background_tasks,payload.comment)
     except ValueError as e:
         raise HTTPException(400, str(e))
 @router.post("/{id}/reject", response_model=schemas.ExpenseResponse)

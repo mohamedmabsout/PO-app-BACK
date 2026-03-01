@@ -30,6 +30,8 @@ from sqlalchemy import func,or_
 from fastapi import UploadFile, File, Form,HTTPException
 from fastapi.responses import FileResponse
 from .utils.email import send_bc_status_email, send_email_background, LOGOS
+import json
+
 
 logger = logging.getLogger(__name__)
 
@@ -4373,10 +4375,9 @@ def admin_authorize_request(db: Session, req_id: int, admin_id: int, payload: sc
 
 def raf_confirm_reception(db: Session, req_id: int, raf_id: int, item_confirmations: dict, file_name: str):
     req = db.query(models.FundRequest).get(req_id)
-    if not req:
-        raise ValueError("Request not found")
+    if not req: raise ValueError("Request not found")
 
-    total_received_in_this_batch = 0.0
+    total_received_now = 0.0
     now = datetime.now()
 
     for item_id_str, amount_str in item_confirmations.items():
@@ -4384,27 +4385,24 @@ def raf_confirm_reception(db: Session, req_id: int, raf_id: int, item_confirmati
         db_item = db.query(models.FundRequestItem).get(item_id)
         if not db_item: continue
 
-        # This is the amount the RAF just typed in the modal (e.g., 3000)
-        current_batch_val = float(amount_str)
-        if current_batch_val <= 0: continue
+        received_now = float(amount_str)
+        if received_now <= 0: continue
 
-        # 1. Update the Item's lifetime confirmed total
-        db_item.confirmed_amount = (db_item.confirmed_amount or 0.0) + current_batch_val
-        total_received_in_this_batch += current_batch_val
+        # 1. Update Item & Totals
+        db_item.confirmed_amount = (db_item.confirmed_amount or 0.0) + received_now
+        total_received_now += received_now
 
-        # 2. Update the PM Wallet
+        # 2. Update Wallet
         wallet = db.query(models.Caisse).filter(models.Caisse.user_id == db_item.target_pm_id).first()
         if wallet:
-            # --- CRITICAL FIX HERE ---
-            # ONLY add the current batch value to the balance.
-            # DO NOT add db_item.confirmed_amount (which is the lifetime total).
-            wallet.balance = (wallet.balance or 0.0) + current_batch_val
+            # Add to physical balance
+            wallet.balance = (wallet.balance or 0.0) + received_now
             
-            # Decrease 'Pending In' by exactly what was received
-            wallet.reserved_balance = max(0, (wallet.reserved_balance or 0.0) - current_batch_val)
+            # Decrease Pending In (if any exists)
+            wallet.reserved_balance = max(0, (wallet.reserved_balance or 0.0) - received_now)
 
-            # 3. Complete the Transaction for this batch
-            # Look for the oldest PENDING transaction for this PM/Request
+            # 3. TRANSACTION LOGIC
+            # Try to find a PENDING transaction to close
             pending_tx = db.query(models.Transaction).filter(
                 models.Transaction.related_request_id == req.id,
                 models.Transaction.caisse_id == wallet.id,
@@ -4412,20 +4410,40 @@ def raf_confirm_reception(db: Session, req_id: int, raf_id: int, item_confirmati
             ).order_by(models.Transaction.created_at.asc()).first()
             
             if pending_tx:
-                pending_tx.amount = current_batch_val # Sync transaction to reality
+                # Scenario A: Standard confirmation
+                # If we received LESS than the pending tx, we update the amount and close it.
+                # The remaining difference "vanishes" into the variance gap.
+                pending_tx.amount = received_now 
                 pending_tx.status = models.TransactionStatus.COMPLETED
-                pending_tx.created_at = now # Set the actual reception date
+                pending_tx.created_at = now
+                pending_tx.proof_file = file_name
+            else:
+                # Scenario B: "Late Arrival" (No pending TX exists)
+                # The Admin already sent it, but the TX was closed in a previous partial confirmation.
+                # We must create a new COMPLETED transaction to record this new cash entry.
+                new_tx = models.Transaction(
+                    caisse_id=wallet.id,
+                    amount=received_now,
+                    type=models.TransactionType.CREDIT,
+                    status=models.TransactionStatus.COMPLETED, # Directly completed
+                    related_request_id=req.id,
+                    created_by_id=req.admin_approver_id,
+                    description=f"Refill (Late Arrival): {req.request_number}",
+                    created_at=now,
+                    proof_file= file_name
+                )
+                db.add(new_tx)
 
-    # 4. Update Parent Request Totals
-    req.confirmed_reception_amount = (req.confirmed_reception_amount or 0.0) + total_received_in_this_batch
+    # 4. Update Parent Totals
+    req.confirmed_reception_amount = (req.confirmed_reception_amount or 0.0) + total_received_now
     req.reception_attachment = file_name
     req.raf_id = raf_id
     
-    # 5. Correct Status Logic
-    # Calculate goal based on what PD validated (or what PM requested, depending on your policy)
-    total_pd_validated = sum(i.pd_approved_amount for i in req.items)
+    # 5. Status Logic
+    # If the gap is closed, mark as COMPLETED.
+    total_pm_goal = sum(i.requested_amount for i in req.items) # Or PD approved amount
     
-    if req.confirmed_reception_amount >= (total_pd_validated - 0.1):
+    if req.confirmed_reception_amount >= (total_pm_goal - 0.1):
         req.status = models.FundRequestStatus.COMPLETED
         req.completed_at = now
     else:
@@ -4735,6 +4753,7 @@ def get_transactions(
             "description": t.description,
             "amount": t.amount,
             "status": t.status,
+            "proof_file":t.proof_file,
             "user_name": f"{t.caisse.user.first_name} {t.caisse.user.last_name}",
             "created_by_name": "System"
         }
@@ -4806,6 +4825,7 @@ def get_pending_requests(db: Session):
             models.Transaction.related_request_id == r.id,
             models.Transaction.status == models.TransactionStatus.PENDING
         ).count()
+        gap = (r.paid_amount or 0.0) - (r.confirmed_reception_amount or 0.0)
 
         # 2. PD ACTION LOGIC
         # PD needs to act if: 
@@ -4830,8 +4850,8 @@ def get_pending_requests(db: Session):
         # RAF needs to act if:
         # - Admin just sent money (TO_TRANSFER)
         # - OR there are pending transactions in the ledger
-        raf_work_pending = (r.status == models.FundRequestStatus.TO_TRANSFER) or (pending_tx_count > 0)
-
+        # raf_work_pending = (r.status == models.FundRequestStatus.TO_TRANSFER) or (pending_tx_count > 0)
+        raf_work_pending = (pending_tx_count > 0) or (gap > 1.0 and not r.variance_acknowledged)    
         # 5. FILTERING: If nobody has any work to do, skip this request
         if not pd_work_pending and not admin_work_pending and not raf_work_pending:
             continue
@@ -5123,7 +5143,7 @@ def create_expense_type(db: Session, name: str):
     return new_type
 
 
-def create_expense(db: Session, payload: schemas.ExpenseCreate, user_id: int, background_tasks: BackgroundTasks):
+def create_expense(db: Session, payload: schemas.ExpenseCreate, user_id: int, background_tasks: BackgroundTasks, filename: str = None):
     user = db.query(models.User).get(user_id)
     pm_name = f"{user.first_name} {user.last_name}"
     
@@ -5187,6 +5207,7 @@ def create_expense(db: Session, payload: schemas.ExpenseCreate, user_id: int, ba
         requester_id=user_id,
         beneficiary=beneficiary_name,
         beneficiary_user_id=beneficiary_user_id,
+        attachment=filename,
         status=models.ExpenseStatus.DRAFT if payload.is_draft else models.ExpenseStatus.SUBMITTED
     )
     db.add(db_expense)
@@ -5264,7 +5285,7 @@ def create_expense(db: Session, payload: schemas.ExpenseCreate, user_id: int, ba
     db.commit()
     return db_expense
 
-def approve_expense_l1(db: Session, expense_id: int, pd_id: int, background_tasks: BackgroundTasks):
+def approve_expense_l1(db: Session, expense_id: int, pd_id: int, background_tasks: BackgroundTasks, comment: str = None):
     """
     Step 2: PD approves L1.
     Action: Notify Admin (L2).
@@ -5295,7 +5316,9 @@ def approve_expense_l1(db: Session, expense_id: int, pd_id: int, background_task
     expense.status = models.ExpenseStatus.PENDING_L2
     expense.l1_approver_id = pd_id
     expense.l1_at = datetime.now()
-
+    if comment:
+        expense.l1_comment = comment # <--- SAVE COMMENT
+        
     # NOTIFY ADMINS
     admins = db.query(models.User).filter(models.User.role == UserRole.ADMIN).all()
     admin_emails = [u.email for u in admins if u.email]
@@ -5319,7 +5342,7 @@ def approve_expense_l1(db: Session, expense_id: int, pd_id: int, background_task
     db.commit()
     return expense
 
-def approve_expense_l2(db: Session, expense_id: int, admin_id: int, background_tasks: BackgroundTasks):
+def approve_expense_l2(db: Session, expense_id: int, admin_id: int, background_tasks: BackgroundTasks, comment: str = None):
     """
     Step 3: Admin approves L2.
     Action: Notify PD to proceed with physical payment.
@@ -5328,6 +5351,8 @@ def approve_expense_l2(db: Session, expense_id: int, admin_id: int, background_t
     expense.status = models.ExpenseStatus.APPROVED_L2
     expense.l2_approver_id = admin_id
     expense.l2_at = datetime.now()
+    if comment:
+        expense.l2_comment = comment # <--- SAVE COMMENT
 
     # 1. Fetch all RAF users
     rafs = db.query(models.User).filter(models.User.role == models.UserRole.RAF).all()
@@ -5396,7 +5421,7 @@ def confirm_expense_payment(db: Session, expense_id: int, filename: str, pd_id: 
     expense.status = models.ExpenseStatus.PAID
     expense.payment_confirmed_at = datetime.now()
     if filename:
-        expense.attachment = filename
+        expense.signed_doc_url = filename
         expense.is_signed_copy_uploaded = True
     # NOTIFY BENEFICIARY (TO ACKNOWLEDGE)
     if expense.beneficiary_user_id:
@@ -6014,7 +6039,6 @@ def update_expense(db: Session, expense_id: int, payload: schemas.ExpenseCreate,
     return db_expense
 
 def get_grouped_history(db: Session, page: int = 1, limit: int = 10, status_filter: str = "ALL"):
-    # 1. Base Query with full relationship loading
     query = db.query(models.FundRequest).options(
         joinedload(models.FundRequest.items).joinedload(models.FundRequestItem.target_pm)
     )
@@ -6028,55 +6052,59 @@ def get_grouped_history(db: Session, page: int = 1, limit: int = 10, status_filt
         models.FundRequest.created_at.desc()
     ).offset((page - 1) * limit).limit(limit).all()
     
-    data = []
+    data =[]
     for req in requests:
-        # --- THE FIX: Build the ledger from ITEMS, not just Transactions ---
-        tx_list = []
+        
+        # --- 1. THE WATERFALL (Items) ---
+        item_list =[]
         for item in req.items:
-             # 1. Access the caisse directly as an object, not a list
-            # We use a safety check in case the PM doesn't have a wallet yet
-            user_caisse = item.target_pm.caisse if item.target_pm else None
-            caisse_id = user_caisse.id if user_caisse else None
-
-            tx = None
-            if caisse_id:
-                tx = db.query(models.Transaction).filter(
-                    models.Transaction.related_request_id == req.id,
-                    models.Transaction.caisse_id == caisse_id
-                ).first()
-
-            tx_list.append({
+            item_list.append({
                 "id": item.id,
-                "pm_name": f"{item.target_pm.first_name} {item.target_pm.last_name}" if item.target_pm else "Unknown PM",
-                "description": item.admin_note or "Refill Request",
-                "requested_amount": item.requested_amount or 0.0,
+                "pm_name": f"{item.target_pm.first_name} {item.target_pm.last_name}" if item.target_pm else "Unknown",
+                "requested": item.requested_amount or 0.0,
                 "pd_approved": item.pd_approved_amount or 0.0,
-                "admin_approved": item.admin_approved_amount or 0.0,
-                "confirmed_amount": item.confirmed_amount or 0.0,
-
-                "status": tx.status if tx else "PENDING",
-                "confirmed_at": tx.created_at.isoformat() if (tx and tx.status == "COMPLETED") else None
+                "admin_paid": item.admin_approved_amount or 0.0,
+                "confirmed": item.confirmed_amount or 0.0
             })
 
-        calculated_requested_total = sum(item.requested_amount for item in req.items)
+        # --- 2. THE EXECUTION BATCHES & FILES (Transactions) ---
+        txs = db.query(models.Transaction).filter(
+            models.Transaction.related_request_id == req.id
+        ).order_by(models.Transaction.created_at.asc()).all()
         
-        # Use admin_approved_amount as the "Paid" reference 
-        # (what the admin intended to send)
-        paid_total = sum(item.admin_approved_amount or 0.0 for item in req.items)
-        
-        # Use confirmed_amount as the "Physical" reference
-        confirmed_total = sum(item.confirmed_amount or 0.0 for item in req.items)
+        tx_list =[]
+        for tx in txs:
+            user_name = "Unknown"
+            if tx.caisse and tx.caisse.user:
+                user_name = f"{tx.caisse.user.first_name} {tx.caisse.user.last_name}"
+            
+            tx_list.append({
+                "id": tx.id,
+                "pm_name": user_name,
+                "description": tx.description,
+                "amount": tx.amount,
+                "status": tx.status,
+                "confirmed_at": tx.created_at.isoformat() if tx.created_at else None,
+                "proof_file": getattr(tx, 'proof_file', None) # Include the file!
+            })
 
+        # Calculate Parent Totals for the main row
+        total_requested = sum(i["requested"] for i in item_list)
+        actual_paid_total = sum(i["admin_paid"] for i in item_list)
+        actual_confirmed_total = sum(i["confirmed"] for i in item_list)
+   
         data.append({
             "request_id": req.id,
             "request_number": req.request_number,
             "created_at": req.created_at.isoformat() if req.created_at else None,
             "status": req.status,
-            "total_amount": calculated_requested_total, 
-            "paid_amount": req.paid_amount or 0.0,
-            "confirmed_reception_amount": confirmed_total, 
-            "variance_acknowledged": req.variance_acknowledged, 
-            "transactions": tx_list # This now contains approved_amount AND received_amount
+            "total_amount": total_requested, 
+            "paid_amount": actual_paid_total, 
+            "confirmed_reception_amount": actual_confirmed_total, 
+            "variance_acknowledged": req.variance_acknowledged,
+            "variance_note": req.variance_note,
+            "items": item_list,          # For Table 1
+            "transactions": tx_list      # For Table 2
         })
         
     return {
@@ -6085,6 +6113,7 @@ def get_grouped_history(db: Session, page: int = 1, limit: int = 10, status_filt
         "page": page,
         "pages": (total_reqs + limit - 1) // limit
     }
+
     
 def verify_invoice_physical(db: Session, invoice_id: int, raf_id: int):
     """RAF confirms they received the signed paper folder."""

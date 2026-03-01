@@ -650,7 +650,7 @@ class Transaction(Base):
     
     created_at = Column(DateTime, server_default=func.now())
     created_by_id = Column(Integer, ForeignKey("users.id")) # Who performed the action
-    
+    proof_file = Column(String(255), nullable=True)
     # Relationships
     caisse = relationship("Caisse", back_populates="transactions")
     created_by = relationship("User", foreign_keys=[created_by_id])
@@ -700,6 +700,10 @@ class Expense(Base):
     signed_doc_url = Column(String(500), nullable=True) # The physical signed PDF scan
     is_signed_copy_uploaded = Column(Boolean, default=False) # Helper flag for the 24h reminder
     bc_item_id = Column(Integer, ForeignKey("bc_items.id"), nullable=True)
+
+    l1_comment = Column(String(500), nullable=True) # PD's comment
+    l2_comment = Column(String(500), nullable=True) # Admin's comment
+
 
     # Relationships
     acts = relationship(

@@ -823,8 +823,8 @@ async def raf_confirm(
     current_user: models.User = Depends(auth.get_current_user) # Helper for RAF role
 ):
     req = db.query(models.FundRequest).get(req_id)
-    if req.status != models.FundRequestStatus.TO_TRANSFER:
-        raise HTTPException(status_code=400, detail="Request not ready for reception.")
+    # if req.status != models.FundRequestStatus.TO_TRANSFER:
+    #     raise HTTPException(status_code=400, detail="Request not ready for reception.")
 
     # 1. Save File
     file_name = f"RAF_CONFIRM_{req_id}_{file.filename}"
