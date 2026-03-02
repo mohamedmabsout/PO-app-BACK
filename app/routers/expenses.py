@@ -54,7 +54,7 @@ async def create_expense_endpoint(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
 ):
-    require_roles(current_user,[models.UserRole.PM, models.UserRole.COORDINATEUR, models.UserRole.ADMIN, models.UserRole.PD])
+    require_roles(current_user,[models.UserRole.PM, models.UserRole.RAF, models.UserRole.ADMIN, models.UserRole.PD])
     
     # Parse the JSON string back into your Pydantic Schema
     try:
