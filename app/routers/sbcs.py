@@ -336,8 +336,60 @@ def download_sbc_document(filename: str):
         filename=filename
     )
 
-
 @router.get("/{id}/advance-balance")
-def read_sbc_advance_balance(id: int, db: Session = Depends(get_db)):
-    balance = crud.get_sbc_unconsumed_balance(db, id)
+def read_sbc_advance_balance(
+    id: int, 
+    exclude_expense_id: Optional[int] = None, # Added to support Edit Mode
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user) # Added to get PM ID
+):
+    """
+    Returns the unconsumed advance balance for this SBC, 
+    RESTRICTED to the logged-in PM's contributions.
+    """
+    # Pass the sbc_id (id), current PM's ID, and the exclusion ID
+    balance = crud.get_sbc_unconsumed_balance(
+        db, 
+        sbc_id=id, 
+        pm_id=current_user.id, 
+        exclude_expense_id=exclude_expense_id
+    )
+    
     return {"sbc_id": id, "total_unconsumed": balance}
+
+
+@router.get("/{id}/available-advances")
+def get_pm_advances_for_sbc(
+    id: int, 
+    exclude_expense_id: Optional[int] = None,
+    db: Session = Depends(get_db), 
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """
+    Returns a list of individual unconsumed advances given 
+    by the current PM to this SBC.
+    """
+    # Re-using the logic: Join with Expense to check the requester_id
+    query = db.query(models.SBCAdvance).join(
+        models.Expense, models.SBCAdvance.expense_id == models.Expense.id
+    ).filter(
+        models.SBCAdvance.sbc_id == id,
+        models.SBCAdvance.is_consumed == False,
+        models.Expense.requester_id == current_user.id
+    )
+
+    if exclude_expense_id:
+        # If editing, don't count advances already tagged for consumption in this draft
+        # (Though consumption usually happens at PAID, this is a safety for complex workflows)
+        pass 
+
+    advances = query.all()
+    
+    return [
+        {
+            "id": a.id, 
+            "amount": a.remaining_amount, 
+            "date": a.created_at,
+            "ref": f"ADV-{a.id}"
+        } for a in advances
+    ]

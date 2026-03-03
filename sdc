@@ -79,3 +79,20 @@ if not:
     4- set the migration number as the local one 
     5- docker compose exec backend alembic upgrade head
     6- docker compose exec backend alembic revision --autogenerate -m "Add columns"
+
+
+# CATEGORY CLEANUP
+
+docker compose exec backend python3 -c "
+from app.database import SessionLocal; 
+from app import crud, models; 
+db=SessionLocal(); 
+pos = db.query(models.MergedPO).filter(models.MergedPO.category == None).all();
+count = 0;
+for p in pos:
+    p.category = crud.deduce_category(p.item_description);
+    count += 1;
+db.commit();
+print(f'Final Cleanup: Fixed {count} lines.');
+db.close();
+"

@@ -503,11 +503,17 @@ def process_and_merge_pos(db: Session):
             if current_is_tbd:
                 merged_po.internal_project_id = final_internal_project_id
             
-            # NOTE: If it is ALREADY assigned to Project A, we DO NOT overwrite it with TBD.
-            # This preserves manual assignments or historical rule matches.
+            if not merged_po.category or merged_po.category == "TBD":
+             merged_po.category = deduce_category(po.item_description)
+
+
 
         else:
+            
             # INSERT (New PO)
+            # We deduce the category RIGHT HERE at birth
+            deduced_cat = deduce_category(po.item_description)
+            
             # For new POs, we always apply the resolved project (Rule or TBD)
             new_merged_po = models.MergedPO(
                 po_id=po_id,
@@ -524,6 +530,8 @@ def process_and_merge_pos(db: Session):
                 requested_qty=po.requested_qty,
                 line_amount_hw=(po.unit_price or 0) * (po.requested_qty or 0),
                 publish_date=po.publish_date,
+                category=deduced_cat if deduced_cat else "TBD"
+
             )
             db.add(new_merged_po)
 
@@ -933,15 +941,15 @@ import re
 
 def deduce_category(description: str) -> str:
     """
-    Improved category deduction using keyword priority.
+    Guaranteed to return a non-null category string.
+    Priority: Transport -> Survey -> Civil Work -> Material -> Service -> TBD
     """
-    if not description or not isinstance(description, str):
+    if not description or not isinstance(description, str) or not description.strip():
         return "TBD"
 
     desc = description.lower()
 
-    # Define keyword maps in order of PRIORITY
-    # (Specific categories should be checked before general ones like 'Service')
+    # Standardized Keyword Mapping
     mapping = {
         "Transport": [
             "transport", "distance<", "km<", "vehicle", "tractor", "driver", 
@@ -966,19 +974,20 @@ def deduce_category(description: str) -> str:
         ]
     }
 
-    # 1. Direct Keyword Check
+    # 1. Primary Keyword Check
     for category, keywords in mapping.items():
         if any(k in desc for k in keywords):
-            # Special case for Material: if 'install' is also there, it's a Service
+            # Exception: Material + Install = Service
             if category == "Material" and "install" in desc:
                 return "Service"
             return category
 
-    # 2. Equipment keywords that usually imply service
+    # 2. Equipment-only descriptions usually imply Service
     equipment_keywords = ["rru", "bbu", "aau", "bts", "msan", "olt", "wdm", "microwave", "mw "]
     if any(k in desc for k in equipment_keywords):
         return "Service"
 
+    # 3. Final Catch-all
     return "TBD"
 # app/crud.py
 
@@ -6561,18 +6570,24 @@ def create_sbc_advance_record(db: Session, expense: models.Expense):
     db.add(new_adv)
     # Note: No commit here, we commit in the parent function
 
-def get_sbc_unconsumed_balance(db: Session, sbc_id: int, exclude_expense_id: int = None):
-    # 1. Raw total from advances table
-    raw_pool = db.query(func.sum(models.SBCAdvance.remaining_amount)).filter(
+def get_sbc_unconsumed_balance(db: Session, sbc_id: int, pm_id: int, exclude_expense_id: int = None):
+    """
+    Returns only advances given by THIS specific PM that haven't been consumed yet.
+    """
+    # 1. Raw total from advances table, filtered by the PM who created the original expense
+    raw_pool = db.query(func.sum(models.SBCAdvance.remaining_amount)).join(
+        models.Expense, models.SBCAdvance.expense_id == models.Expense.id
+    ).filter(
         models.SBCAdvance.sbc_id == sbc_id,
-        models.SBCAdvance.is_consumed == False
+        models.SBCAdvance.is_consumed == False,
+        models.Expense.requester_id == pm_id # <--- THE CRITICAL LOCK
     ).scalar() or 0.0
 
-    # 2. Subtract other pending deductions
-    # IMPORTANT: We exclude the current expense if we are in EDIT mode
+    # 2. Subtract other pending deductions from this same PM
     pending_deductions = 0.0
     query = db.query(models.Expense).filter(
         models.Expense.sbc_id == sbc_id,
+        models.Expense.requester_id == pm_id, # <--- THE CRITICAL LOCK
         models.Expense.exp_type == "ACCEPTANCE_PP",
         models.Expense.status.in_([
             models.ExpenseStatus.SUBMITTED, 
@@ -6588,7 +6603,11 @@ def get_sbc_unconsumed_balance(db: Session, sbc_id: int, exclude_expense_id: int
     pending_expenses = query.all()
 
     for exp in pending_expenses:
-        gross = sum(a.total_amount_ht for a in exp.acts)
+        # Calculate the deduction logic (Gross - Net)
+        # We need to sum up the ACTs linked to these pending expenses
+        gross = db.query(func.sum(models.ServiceAcceptance.total_amount_ht)).filter(
+            models.ServiceAcceptance.expense_id == exp.id
+        ).scalar() or 0.0
         pending_deductions += (gross - exp.amount)
 
     return max(0, raw_pool - pending_deductions)
