@@ -5202,7 +5202,7 @@ def create_expense(db: Session, payload: schemas.ExpenseCreate, user_id: int, ba
     # 2. SETTLEMENT LOGIC with TOGGLE
     advance_deduction = 0.0
     if payload.exp_type == "ACCEPTANCE_PP" and payload.apply_advance: # <--- Check flag
-        pool_balance = get_sbc_unconsumed_balance(db, sbc_id)
+        pool_balance = get_sbc_unconsumed_balance(db, sbc_id, user_id)
         if pool_balance > 0:
             advance_deduction = min(pool_balance, gross_amount)
             payload.remark = f"{payload.remark} [Applied Advance: -{advance_deduction} MAD]".strip()
