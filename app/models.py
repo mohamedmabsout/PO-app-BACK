@@ -1,5 +1,5 @@
 from datetime import datetime, timezone, date
-from rich.table import Table
+from sqlalchemy import Table # Make sure this is the one being used
 from sqlalchemy import Boolean, Column, Date, Enum, ForeignKey, Integer, String, Float, DateTime, Text
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
