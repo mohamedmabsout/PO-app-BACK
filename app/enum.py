@@ -10,7 +10,33 @@ class UserRole(str, enum.Enum):
     ADMIN = "ADMIN"  # Changez de "Admin" à "ADMIN"
     COORDINATEUR = "coordinateur"
     CEO = "ceo"
+    
+class ProjectActionType(str, enum.Enum):
+    # --- BC TASKS ---
+    BC_CREATE_DRAFT = "BC_CREATE_DRAFT"
+    BC_SUBMIT       = "BC_SUBMIT"
+    BC_APPROVE_L1   = "BC_APPROVE_L1"
+    BC_APPROVE_L2   = "BC_APPROVE_L2"
+    BC_CONFIRM      = "BC_CONFIRM"
+    BC_GENERATE     = "BC_GENERATE"
 
+    # --- ACCEPTANCE ---
+    ACT_APPROVE_RQC = "ACT_APPROVE_RQC"
+    ACT_APPROVE_PM  = "ACT_APPROVE_PM"
+    ACT_APPROVE_PD  = "ACT_APPROVE_PD"
+    ACT_GENERATE    = "ACT_GENERATE"
+
+    # --- FUNDS (CAISSE) ---
+    FUND_CREATE     = "FUND_CREATE"
+    FUND_APPROVE    = "FUND_APPROVE"
+    FUND_CONFIRM    = "FUND_CONFIRM"
+    FUND_UPLOAD_DOC = "FUND_UPLOAD_DOC"
+
+    # --- EXPENSE ---
+    EXP_CREATE_DRAFT    = "EXP_CREATE_DRAFT"
+    EXP_SUBMIT          = "EXP_SUBMIT"
+    EXP_APPROVE_L1      = "EXP_APPROVE_L1"
+    EXP_APPROVE_L2      = "EXP_APPROVE_L2"
 class ProjectRoleType(str, enum.Enum):
     PD = "PD"           # Project Director
     PM = "PM"           # Project Manager

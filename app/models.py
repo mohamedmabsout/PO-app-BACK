@@ -1,4 +1,5 @@
 from datetime import datetime, timezone, date
+from rich.table import Table
 from sqlalchemy import Boolean, Column, Date, Enum, ForeignKey, Integer, String, Float, DateTime, Text
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -8,7 +9,7 @@ from sqlalchemy.orm import backref # Ensure this is imported
 from .enum import (
     ProjectType, UserRole, SBCStatus, BCStatus, NotificationType, BCType,
     AssignmentStatus, ValidationState, ItemGlobalStatus, SBCType,
-    FundRequestStatus, TransactionType, TransactionStatus, ExpenseStatus, NotificationModule, InvoiceStatus,ProjectRoleType
+    FundRequestStatus, TransactionType, TransactionStatus, ExpenseStatus, NotificationModule, InvoiceStatus,ProjectRoleType,ProjectActionType
 )
 from .database import Base
  # <--- AJOUTER CET IMPORT
@@ -81,6 +82,37 @@ class ProjectStakeholder(Base):
     # Constraint: A user cannot have the same role twice on the same project
     __table_args__ = (
         sa.UniqueConstraint('project_id', 'user_id', 'role', name='uix_proj_user_role'),
+    )
+
+# Association table for Support Users (Many-to-Many)
+workflow_support_table = Table(
+    'workflow_support_rel', Base.metadata,
+    Column('workflow_id', Integer, ForeignKey('project_workflows.id')),
+    Column('user_id', Integer, ForeignKey('users.id'))
+)
+
+class ProjectWorkflow(Base):
+    __tablename__ = "project_workflows"
+
+    id = Column(Integer, primary_key=True, index=True)
+    project_id = Column(Integer, ForeignKey("internal_projects.id"), nullable=False)
+    
+    # The specific action (e.g., "EXP_APPROVE_L1")
+    action_type = Column(Enum(ProjectActionType), nullable=False)
+    
+    # The "Only 1" First Owner
+    primary_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    
+    # The "0 or multiple" Support users
+    support_users = relationship("User", secondary=workflow_support_table)
+
+    # Relationships
+    project = relationship("InternalProject", backref="workflow_config")
+    primary_user = relationship("User", foreign_keys=[primary_user_id])
+    
+    # Constraint: One config per action per project
+    __table_args__ = (
+        sa.UniqueConstraint('project_id', 'action_type', name='uix_proj_action'),
     )
 
 

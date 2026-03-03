@@ -1325,7 +1325,16 @@ def get_filtered_merged_pos(
     
     if site_code:
         query = query.filter(models.MergedPO.site_code == site_code)
-    if category:
+    if category == "TBD":
+        # --- THE FIX: Include TBD, NULL, and Empty Strings ---
+        query = query.filter(
+            or_(
+                models.MergedPO.category == "TBD",
+                models.MergedPO.category.is_(None),
+                models.MergedPO.category == ""
+            )
+        )
+    elif category:
         query = query.filter(models.MergedPO.category == category)
     if start_date:
         query = query.filter(sa.func.date(models.MergedPO.publish_date) >= start_date)
