@@ -5160,10 +5160,9 @@ def create_expense_type(db: Session, name: str):
     db.commit()
     return new_type
 
-
 def create_expense(db: Session, payload: schemas.ExpenseCreate, user_id: int, background_tasks: BackgroundTasks, filename: str = None):
     user = db.query(models.User).get(user_id)
-    pm_name = f"{user.first_name} {user.last_name}"
+    pm_full_name = f"{user.first_name} {user.last_name}"
     
     gross_amount = 0.0
     sbc_id = payload.sbc_id
@@ -5174,20 +5173,31 @@ def create_expense(db: Session, payload: schemas.ExpenseCreate, user_id: int, ba
     # --- 1. IDENTIFY SBC & GROSS AMOUNT ---
     if payload.exp_type == "ACCEPTANCE_PP":
         acts = db.query(models.ServiceAcceptance).filter(models.ServiceAcceptance.id.in_(payload.act_ids)).all()
-        if not acts: raise ValueError("No ACTs selected.")
+        if not acts: 
+            raise ValueError("No ACTs selected.")
         
         # Verify all ACTs belong to same SBC
-        sbc_ids = {a.bc.sbc_id for a in acts}
-        if len(sbc_ids) > 1: raise ValueError("Cannot mix subcontractors in one expense.")
+        sbc_ids = {a.bc.sbc_id for a in acts if a.bc}
+        if len(sbc_ids) > 1: 
+            raise ValueError("Security Violation: An expense cannot contain ACTs from multiple different Subcontractors.")
+        
         sbc_id = list(sbc_ids)[0]
         
+        # Check if any ACT is already locked in another non-rejected expense
+        for act in acts:
+            if act.expense_id is not None:
+                existing_exp = db.query(models.Expense).get(act.expense_id)
+                if existing_exp and existing_exp.status != models.ExpenseStatus.REJECTED:
+                    raise ValueError(f"Validation Error: ACT {act.act_number} is already assigned to Expense #{existing_exp.id}.")
+
         gross_amount = sum(a.total_amount_ht for a in acts)
         beneficiary_name = acts[0].bc.sbc.name
         if acts[0].bc.sbc.users:
             beneficiary_user_id = acts[0].bc.sbc.users[0].id
             
     elif payload.exp_type == "AVANCE_SBC":
-        if not sbc_id: raise ValueError("SBC selection is required for an advance.")
+        if not sbc_id: 
+            raise ValueError("SBC selection is required for an advance.")
         gross_amount = payload.amount
         sbc_profile = db.query(models.SBC).get(sbc_id)
         beneficiary_name = f"Advance: {sbc_profile.name}"
@@ -5196,70 +5206,80 @@ def create_expense(db: Session, payload: schemas.ExpenseCreate, user_id: int, ba
     else:
         # Standard Expense
         gross_amount = payload.amount
-        beneficiary_name = beneficiary_name or pm_name
+        if not beneficiary_name or beneficiary_name.strip() == "":
+            beneficiary_name = pm_full_name
         beneficiary_user_id = user_id
 
-    # 2. SETTLEMENT LOGIC with TOGGLE
+    # --- 2. SETTLEMENT LOGIC (PM-ISOLATED) ---
     advance_deduction = 0.0
-    if payload.exp_type == "ACCEPTANCE_PP" and payload.apply_advance: # <--- Check flag
-        pool_balance = get_sbc_unconsumed_balance(db, sbc_id, user_id)
+    if payload.exp_type == "ACCEPTANCE_PP" and payload.apply_advance:
+        # THE FIX: Pass user_id as the pm_id parameter
+        pool_balance = get_sbc_unconsumed_balance(db, sbc_id=sbc_id, pm_id=user_id)
+        
         if pool_balance > 0:
             advance_deduction = min(pool_balance, gross_amount)
-            payload.remark = f"{payload.remark} [Applied Advance: -{advance_deduction} MAD]".strip()
+            payload.remark = f"{payload.remark} [Applied Advance: -{advance_deduction:,.2f} MAD]".strip()
 
     net_amount = gross_amount - advance_deduction
 
-
     # --- 3. FINANCIAL CHECK & RESERVE ---
     caisse = db.query(models.Caisse).filter(models.Caisse.user_id == user_id).first()
-    if not caisse or (caisse.balance or 0) < net_amount:
-        raise ValueError(f"Insufficient balance. Net needed: {net_amount} MAD.")
-    pm_full_name = f"{user.first_name} {user.last_name}"
+    if not caisse:
+        caisse = models.Caisse(user_id=user_id, balance=0.0, reserved_balance=0.0)
+        db.add(caisse)
+        db.flush()
+
+    current_balance = caisse.balance if caisse.balance is not None else 0.0
+    if current_balance < net_amount:
+        raise ValueError(f"Insufficient balance. Your caisse has {current_balance:,.2f}, required: {net_amount:,.2f} MAD.")
+
+    # Create Expense Object
     db_expense = models.Expense(
         project_id=payload.project_id,
         sbc_id=sbc_id,
-        bc_item_id=bc_line_id, # <--- CRITICAL: Save this link
+        bc_item_id=bc_line_id, 
         exp_type=payload.exp_type,
-        amount=net_amount, # <--- PM only pays the NET
+        amount=net_amount, # PM only pays the NET difference
         remark=payload.remark,
         requester_id=user_id,
         beneficiary=beneficiary_name,
         beneficiary_user_id=beneficiary_user_id,
         attachment=filename,
-        status=models.ExpenseStatus.DRAFT if payload.is_draft else models.ExpenseStatus.SUBMITTED
+        status=models.ExpenseStatus.DRAFT if payload.is_draft else models.ExpenseStatus.SUBMITTED,
+        created_at=datetime.now()
     )
     db.add(db_expense)
-    db.flush()
+    db.flush() # Generate Expense ID
 
-    # Move money to reserved
-    caisse.balance -= net_amount
+    # Link ACTs to this Expense
+    if payload.exp_type == "ACCEPTANCE_PP":
+        db.query(models.ServiceAcceptance).filter(
+            models.ServiceAcceptance.id.in_(payload.act_ids)
+        ).update({"expense_id": db_expense.id}, synchronize_session=False)
+
+    # RESERVE MONEY IN CAISSE
+    caisse.balance = current_balance - net_amount
     caisse.reserved_balance = (caisse.reserved_balance or 0.0) + net_amount
 
-    # Link ACTs
-    if payload.exp_type == "ACCEPTANCE_PP":
-        db.query(models.ServiceAcceptance).filter(models.ServiceAcceptance.id.in_(payload.act_ids)).update({"expense_id": db_expense.id}, synchronize_session=False)
+    # --- 4. REGISTER TRANSACTION (PENDING) ---
+    # This records the movement in the PM's ledger immediately
+    new_trx = models.Transaction(
+        caisse_id=caisse.id,
+        type=models.TransactionType.DEBIT,
+        amount=net_amount,
+        description=f"Expense #{db_expense.id}: {payload.exp_type} - {beneficiary_name}",
+        created_by_id=user_id,
+        status=models.TransactionStatus.PENDING, # Money is blocked until PAID
+        created_at=datetime.now()
+    )
+    db.add(new_trx)
 
-    # # REGISTER TRANSACTION (PENDING)
-    # trx = models.Transaction(
-    #     caisse_id=caisse.id,
-    #     type=TransactionType.DEBIT,
-    #     amount=final_amount,
-    #     description=f"Expense #{db_expense.id}: {payload.exp_type} - {beneficiary_name}",
-    #     created_by_id=user_id,
-    #     status=TransactionStatus.PENDING, # Money is blocked but not "gone" yet
-    #     created_at=datetime.now()
-    # )
-    # db.add(trx)
-
-    # NOTIFICATIONS (If Submitted)
+    # --- 5. NOTIFICATIONS ---
     if not payload.is_draft:
-        target_pds = get_project_users_by_role(
-            db, 
-            db_expense.project_id, 
-            models.ProjectRoleType.PD
-        )
+        # Fetch PDs assigned to this project
+        target_pds = get_project_users_by_role(db, db_expense.project_id, models.ProjectRoleType.PD)
 
-        # Fallback: If no PD assigned to this project, notify Global Admins
+        # Fallback to Global Admins if no PD assigned
         if not target_pds:
             target_pds = db.query(models.User).filter(models.User.role == models.UserRole.ADMIN).all()
 
@@ -5267,40 +5287,40 @@ def create_expense(db: Session, payload: schemas.ExpenseCreate, user_id: int, ba
         
         for pd in target_pds:
             create_notification(
-                db, recipient_id=pd.id, type=NotificationType.TODO,
+                db, recipient_id=pd.id, type=models.NotificationType.TODO,
                 module=models.NotificationModule.EXP,
-                title="Expense L1 Approval Required",
-                message=f"PM {db_expense.requester.first_name} submitted an expense of {db_expense.amount} MAD.",
+                title="Expense Approval Required",
+                message=f"PM {user.first_name} submitted an expense for {net_amount:,.2f} MAD.",
                 link="/expenses?tab=l1",
                 created_at=datetime.now()
             )
         
-        details = {
-            "id": db_expense.id,
-            "project": db_expense.internal_project.name,
-            "pm": f"{db_expense.internal_project.project_manager.first_name} {db_expense.internal_project.project_manager.last_name}",
-            "creator": pm_full_name,
-            "date": db_expense.created_at.strftime("%d/%m/%Y"),
-            "beneficiary": db_expense.beneficiary,
-            "category": db_expense.exp_type,
-            "total": f"{db_expense.amount:,.2f} MAD",
-            "remark": db_expense.remark
-        }
-
-        send_notification_email(
-            background_tasks,
-            pd_emails,
-            "Expense Submitted for L1 Approval",
-            "",
-            {
-                "message": "An expense has been submitted and is now pending L1 approval.",
-                "details": details,
-                "link": f"/expenses/details/{db_expense.id}"
+        if pd_emails:
+            details = {
+                "id": f"#{db_expense.id}",
+                "project": db_expense.internal_project.name if db_expense.internal_project else "N/A",
+                "PM": pm_full_name,
+                "date": db_expense.created_at.strftime("%d/%m/%Y"),
+                "beneficiary": db_expense.beneficiary,
+                "type": db_expense.exp_type,
+                "net_amount": f"{net_amount:,.2f} MAD",
+                "remark": db_expense.remark
             }
-        )
 
+            send_notification_email(
+                background_tasks,
+                pd_emails,
+                "Action Required: New Expense Submitted",
+                "",
+                {
+                    "message": "A new expense has been submitted and is awaiting your L1 operational validation.",
+                    "details": details,
+                    "link": f"/expenses/details/{db_expense.id}"
+                }
+            )
 
     db.commit()
+    db.refresh(db_expense)
     return db_expense
 
 def approve_expense_l1(db: Session, expense_id: int, pd_id: int, background_tasks: BackgroundTasks, comment: str = None):
