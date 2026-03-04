@@ -10,33 +10,38 @@ class UserRole(str, enum.Enum):
     ADMIN = "ADMIN"  # Changez de "Admin" à "ADMIN"
     COORDINATEUR = "coordinateur"
     CEO = "ceo"
-    
+
 class ProjectActionType(str, enum.Enum):
-    # --- BC TASKS ---
+    # --- 1. ROLES (THE STAKEHOLDERS) ---
+    ROLE_PD    = "ROLE_PD"    # Project Director
+    ROLE_PM    = "ROLE_PM"    # Project Manager
+    ROLE_PC    = "ROLE_PC"    # Project Coordinator
+    ROLE_RQC   = "ROLE_RQC"   # Quality Interface
+    ROLE_SALES = "ROLE_SALES" # Sales Manager
+
+    # --- 2. BC TASKS ---
     BC_CREATE_DRAFT = "BC_CREATE_DRAFT"
     BC_SUBMIT       = "BC_SUBMIT"
     BC_APPROVE_L1   = "BC_APPROVE_L1"
     BC_APPROVE_L2   = "BC_APPROVE_L2"
-    BC_CONFIRM      = "BC_CONFIRM"
     BC_GENERATE     = "BC_GENERATE"
 
-    # --- ACCEPTANCE ---
-    ACT_APPROVE_RQC = "ACT_APPROVE_RQC"
-    ACT_APPROVE_PM  = "ACT_APPROVE_PM"
-    ACT_APPROVE_PD  = "ACT_APPROVE_PD"
-    ACT_GENERATE    = "ACT_GENERATE"
-
-    # --- FUNDS (CAISSE) ---
+    # --- 3. FUNDS ---
     FUND_CREATE     = "FUND_CREATE"
     FUND_APPROVE    = "FUND_APPROVE"
     FUND_CONFIRM    = "FUND_CONFIRM"
-    FUND_UPLOAD_DOC = "FUND_UPLOAD_DOC"
 
-    # --- EXPENSE ---
-    EXP_CREATE_DRAFT    = "EXP_CREATE_DRAFT"
-    EXP_SUBMIT          = "EXP_SUBMIT"
-    EXP_APPROVE_L1      = "EXP_APPROVE_L1"
-    EXP_APPROVE_L2      = "EXP_APPROVE_L2"
+    # --- 4. EXPENSE ---
+    EXP_CREATE_DRAFT = "EXP_CREATE_DRAFT"
+    EXP_SUBMIT       = "EXP_SUBMIT"
+    EXP_APPROVE_L1   = "EXP_APPROVE_L1"
+    EXP_APPROVE_L2   = "EXP_APPROVE_L2"
+    
+    # --- 5. ACCEPTANCE ---
+    ACT_APPROVE_RQC = "ACT_APPROVE_RQC"
+    ACT_APPROVE_PM  = "ACT_APPROVE_PM"
+    ACT_APPROVE_PD  = "ACT_APPROVE_PD"
+
 class ProjectRoleType(str, enum.Enum):
     PD = "PD"           # Project Director
     PM = "PM"           # Project Manager

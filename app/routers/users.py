@@ -47,7 +47,7 @@ def trigger_stakeholder_migration(
     if current_user.role != models.UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="Not authorized")
     
-    results = crud.run_stakeholder_migration(db)
+    results = crud.migrate_legacy_data_to_unified_workflow(db)
     return {"message": "Migration completed successfully", "results": results}
 
 # --- NOUVEAU : Endpoint pour lire UN SEUL utilisateur par ID ---

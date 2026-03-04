@@ -990,3 +990,19 @@ class AdminItemReview(BaseModel):
 class AdminReviewAction(BaseModel):
     items: List[AdminItemReview]
     comment: Optional[str] = None
+
+class WorkflowConfigBase(BaseModel):
+    action_type: str
+    primary_user_ids: List[int] = [] # Changed from Optional[int] to List[int]
+    support_user_ids: List[int] =[]
+
+class ProjectMatrixUpdate(BaseModel):
+    configs: List[WorkflowConfigBase]
+
+    
+class WorkflowConfigOut(WorkflowConfigBase):
+    id: int
+    primary_user_name: Optional[str] = None
+    
+    class Config:
+        from_attributes = True

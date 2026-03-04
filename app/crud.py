@@ -52,7 +52,119 @@ PAYMENT_TERM_MAP = {
 def format_currency_python(value):
     """Formats a number to '10 000,00 MAD' style in Python"""
     return f"{value:,.2f} MAD".replace(",", " ").replace(".", ",")
+# --- 1. CHECK PERMISSION (The Engine) ---
+def check_workflow_permission(db: Session, project_id: int, action: models.ProjectActionType, user_id: int):
+    """Permissions Checker"""
+    user = db.query(models.User).get(user_id)
+    if user.role == models.UserRole.ADMIN: return True
 
+    config = db.query(models.ProjectWorkflow).filter(
+        models.ProjectWorkflow.project_id == project_id,
+        models.ProjectWorkflow.action_type == action
+    ).first()
+
+    if not config: return False
+
+    # Check if user is in Primary list
+    if any(u.id == user_id for u in config.primary_users): return True
+    # Check if user is in Support list
+    if any(u.id == user_id for u in config.support_users): return True
+
+    return False
+
+
+# --- 2. GET MATRIX ---
+# In backend/app/crud.py
+
+def get_project_workflow_matrix(db: Session, project_id: int):
+    configs = db.query(models.ProjectWorkflow).filter(
+        models.ProjectWorkflow.project_id == project_id
+    ).all()
+    
+    # Return a clean dictionary to avoid Pydantic serialization issues,
+    # now including the mandatory 'id' and 'project_id' fields.
+    return[{
+        "id": c.id,                                   # <--- ADD THIS
+        "project_id": c.project_id,                   # <--- ADD THIS
+        "action_type": c.action_type.value if hasattr(c.action_type, 'value') else c.action_type,
+        "primary_user_ids": [u.id for u in c.primary_users],
+        "support_user_ids": [u.id for u in c.support_users]
+    } for c in configs]
+
+
+def update_project_workflow_matrix(db: Session, project_id: int, updates: List[schemas.WorkflowConfigBase]):
+    for row in updates:
+        config = db.query(models.ProjectWorkflow).filter(
+            models.ProjectWorkflow.project_id == project_id,
+            models.ProjectWorkflow.action_type == row.action_type
+        ).first()
+
+        if not config:
+            config = models.ProjectWorkflow(project_id=project_id, action_type=row.action_type)
+            db.add(config)
+        
+        # Update Primary Users (Many-to-Many)
+        config.primary_users =[]
+        if row.primary_user_ids:
+            config.primary_users = db.query(models.User).filter(models.User.id.in_(row.primary_user_ids)).all()
+        
+        # Update Support Users (Many-to-Many)
+        config.support_users =[]
+        if row.support_user_ids:
+            config.support_users = db.query(models.User).filter(models.User.id.in_(row.support_user_ids)).all()
+            
+    db.commit()
+    return True
+
+# --- 4. AUTO-FILL DEFAULTS (Migration Helper) ---
+def auto_configure_project_defaults(db: Session, project_id: int):
+    """
+    Reads the ProjectStakeholders (PD, PM, etc.) and fills the Workflow Matrix.
+    Used when a Project is created.
+    """
+    # Fetch Stakeholders
+    pd = db.query(models.ProjectStakeholder).filter_by(project_id=project_id, role="PD", is_lead=True).first()
+    pm = db.query(models.ProjectStakeholder).filter_by(project_id=project_id, role="PM", is_lead=True).first()
+    # Assuming Admin ID 1 for L2 defaults if no other logic
+    admin_id = 1 
+
+    pd_id = pd.user_id if pd else None
+    pm_id = pm.user_id if pm else None
+
+    # Map Actions to Default Users
+    defaults = {
+        # BC
+        "BC_CREATE_DRAFT": pm_id,
+        "BC_SUBMIT": pm_id,
+        "BC_APPROVE_L1": pd_id,
+        "BC_APPROVE_L2": admin_id, 
+        
+        # Expense
+        "EXP_CREATE_DRAFT": pm_id,
+        "EXP_SUBMIT": pm_id,
+        "EXP_APPROVE_L1": pd_id,
+        "EXP_APPROVE_L2": admin_id,
+        
+        # Acceptance
+        "ACC_CREATE_DRAFT": pm_id,
+        "ACC_SUBMIT": pm_id,
+        "ACC_APPROVE_L1": pd_id,
+        "ACC_APPROVE_L2": admin_id,
+
+        # Funds
+        "FUND_CREATE": pm_id,
+        "FUND_APPROVE": pd_id,
+        "FUND_CONFIRM": admin_id,
+        "FUND_UPLOAD": pm_id,
+
+    }
+
+    updates = []
+    for action, uid in defaults.items():
+        if uid:
+            updates.append(schemas.WorkflowConfigBase(action_type=action, primary_user_id=uid, support_user_ids=[]))
+            
+    update_project_workflow_matrix(db, project_id, updates)
 def get_project_users_by_role(db: Session, project_id: int, role: str):
     """
     Fetches users assigned to a specific project with a specific role.
@@ -6899,63 +7011,72 @@ def auto_fill_planning_from_history(db: Session, year: int):
     return count_updated
 
 
-# backend/app/crud.py
-
-def run_stakeholder_migration(db: Session):
+def migrate_legacy_data_to_unified_workflow(db: Session):
     """
-    1. Converts existing project_manager_id to a 'PM' Stakeholder.
-    2. Assigns User ID 28 as 'PD' (Lead) for all projects.
+    Migrates old 'project_manager_id' data into the new unified Matrix format.
+    Sets default roles for PMs, PDs, and Admins.
     """
     projects = db.query(models.InternalProject).all()
-    count_pm = 0
-    count_pd = 0
+    pd_user_id = 28 # Your specific PD ID
+    admin_id = 1    # Your specific Admin ID
 
-    # The designated PD
-    pd_user_id = 28
-    
-    pd_user = db.query(models.User).get(pd_user_id)
-    
-    if not pd_user:
-        print(f"WARNING: User ID {pd_user_id} not found. PD migration skipped.")
-
+    count = 0
     for proj in projects:
-        # --- 1. Migrate Project Manager ---
+        # 1. Assign PM Actions
         if proj.project_manager_id:
-            # Check if exists
-            exists_pm = db.query(models.ProjectStakeholder).filter_by(
-                project_id=proj.id,
-                user_id=proj.project_manager_id,
-                role=models.ProjectRoleType.PM
-            ).first()
+            pm_id = proj.project_manager_id
+            
+            # Define what a PM does by default
+            pm_actions =[
+                "ROLE_PM", "EXP_CREATE_DRAFT", "EXP_SUBMIT",
+                "BC_CREATE_DRAFT", "BC_SUBMIT", "ACT_APPROVE_PM"
+            ]
+            
+            for action in pm_actions:
+                upsert_workflow(db, proj.id, action, pm_id)
 
-            if not exists_pm:
-                new_pm = models.ProjectStakeholder(
-                    project_id=proj.id,
-                    user_id=proj.project_manager_id,
-                    role=models.ProjectRoleType.PM,
-                    is_lead=True # Old PMs are always the Lead PM
-                )
-                db.add(new_pm)
-                count_pm += 1
+        # 2. Assign PD Actions
+        pd_actions =[
+            "ROLE_PD", "EXP_APPROVE_L1", "BC_APPROVE_L1", "ACT_APPROVE_PD"
+        ]
+        for action in pd_actions:
+            upsert_workflow(db, proj.id, action, pd_user_id)
 
-        # --- 2. Assign Project Director (User 28) ---
-        if pd_user:
-            # Check if exists
-            exists_pd = db.query(models.ProjectStakeholder).filter_by(
-                project_id=proj.id,
-                user_id=pd_user_id,
-                role=models.ProjectRoleType.PD
-            ).first()
-
-            if not exists_pd:
-                new_pd = models.ProjectStakeholder(
-                    project_id=proj.id,
-                    user_id=pd_user_id,
-                    role=models.ProjectRoleType.PD,
-                    is_lead=True
-                )
-                db.add(new_pd)
-                count_pd += 1
+        # 3. Assign Admin (L2 & Caisse) Actions
+        l2_actions =[
+            "EXP_APPROVE_L2", "BC_APPROVE_L2", "FUND_APPROVE", "FUND_CONFIRM"
+        ]
+        for action in l2_actions:
+            upsert_workflow(db, proj.id, action, admin_id)
+            
+        count += 1
 
     db.commit()
-    return {"pms_migrated": count_pm, "pds_assigned": count_pd}
+    return {"message": f"Successfully migrated workflows for {count} projects."}
+
+
+# --- THE HELPER FIX ---
+def upsert_workflow(db: Session, proj_id: int, action: str, user_id: int):
+    """
+    Helper to safely insert a user into the primary_users Many-to-Many list.
+    """
+    # 1. Fetch the user object (Required for Many-to-Many append)
+    user = db.query(models.User).get(user_id)
+    if not user:
+        return # Skip if user doesn't exist
+
+    # 2. Check if the configuration row exists
+    config = db.query(models.ProjectWorkflow).filter_by(
+        project_id=proj_id, 
+        action_type=action
+    ).first()
+    
+    if not config:
+        # Create new config row and append user
+        config = models.ProjectWorkflow(project_id=proj_id, action_type=action)
+        config.primary_users.append(user)
+        db.add(config)
+    else:
+        # Row exists. Check if user is already in the list. If not, add them.
+        if user not in config.primary_users:
+            config.primary_users.append(user)
