@@ -944,15 +944,15 @@ def get_eligible_pos_for_bc(
     
     # --- FIX STARTS HERE ---
     
-    # Subquery: Sum of quantities used in VALID (non-rejected) BCs per PO
+    # Subquery: Sum of quantities used in VALID (non-rejected, non-draft) BCs per PO
     used_subquery = db.query(
         models.BCItem.merged_po_id,
         func.sum(models.BCItem.quantity_sbc).label("used_qty")
     ).join(
         models.BonDeCommande, models.BCItem.bc_id == models.BonDeCommande.id
     ).filter(
-        # Only count items if the BC is NOT rejected
-        models.BonDeCommande.status != models.BCStatus.REJECTED 
+        # Only count items if the BC is NOT rejected and NOT a draft
+        models.BonDeCommande.status.notin_([models.BCStatus.REJECTED, models.BCStatus.DRAFT])
     ).group_by(models.BCItem.merged_po_id).subquery()
 
     # --- FIX ENDS HERE ---
@@ -2699,9 +2699,12 @@ def create_bon_de_commande(db: Session, bc_data: schemas.BCCreate, creator_id: i
         if not po:        
             raise ValueError(f"PO Line ID {item_data.merged_po_id} not found.")
         
-        # 1. Calculate how much has ALREADY been assigned to other BCs
-        consumed_qty = db.query(func.sum(models.BCItem.quantity_sbc)).filter(
-            models.BCItem.merged_po_id == po.id
+        # 1. Calculate how much has ALREADY been assigned to other BCs (excluding REJECTED and DRAFT)
+        consumed_qty = db.query(func.sum(models.BCItem.quantity_sbc)).join(
+            models.BonDeCommande, models.BCItem.bc_id == models.BonDeCommande.id
+        ).filter(
+            models.BCItem.merged_po_id == po.id,
+            models.BonDeCommande.status.notin_([models.BCStatus.REJECTED, models.BCStatus.DRAFT])
         ).scalar() or 0.0
         
         # 2. Calculate what is actually available
@@ -6049,9 +6052,12 @@ def update_bon_de_commande(db: Session, bc_id: int, bc_data: schemas.BCCreate, u
         po = db.query(models.MergedPO).get(item_data.merged_po_id)
         if not po: raise ValueError(f"PO {item_data.merged_po_id} not found")
         
-        # Recalculate availability (excluding THIS BC since we just deleted its items)
-        consumed_qty = db.query(func.sum(models.BCItem.quantity_sbc)).filter(
-            models.BCItem.merged_po_id == po.id
+        # Recalculate availability (excluding REJECTED, DRAFT, and THIS BC since we just deleted its items)
+        consumed_qty = db.query(func.sum(models.BCItem.quantity_sbc)).join(
+            models.BonDeCommande, models.BCItem.bc_id == models.BonDeCommande.id
+        ).filter(
+            models.BCItem.merged_po_id == po.id,
+            models.BonDeCommande.status.notin_([models.BCStatus.REJECTED, models.BCStatus.DRAFT])
         ).scalar() or 0.0
         
         available_qty = po.requested_qty - consumed_qty
