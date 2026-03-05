@@ -6298,25 +6298,27 @@ def create_invoice_bundle(db: Session, sbc_id: int, act_ids: List[int], inv_numb
     # 3. Category Logic (The "Transport" vs "Service" rule)
     unique_categories = set()
     for a in acts:
-        if a.items:
+        if a.items and a.items[0].merged_po:
             unique_categories.add(a.items[0].merged_po.category)
     
-    if "Transport" in unique_categories:
-        if len(unique_categories) > 1:
-            raise ValueError("Transport acceptances must be invoiced separately and cannot be mixed with other categories.")
-        final_category = "Transport"
+    # NEW RULE: If there is more than 1 category, label it "Service". 
+    # Otherwise, use the single category name found.
+    if len(unique_categories) > 1:
+        final_category = "Service"
+    elif len(unique_categories) == 1:
+        final_category = list(unique_categories)[0]
     else:
-        # If mixed (e.g. Service + Civil Work), name it "Service"
-        final_category = "Service" if len(unique_categories) > 1 else list(unique_categories)[0]
+        final_category = "Service" # Fallback
 
     # 4. Usage Check (Is ACT already invoiced?)
     for a in acts:
         if a.invoice_id:
             existing_parent = db.query(models.Invoice).get(a.invoice_id)
-            # Allow reuse only if the current invoice is Rejected or Submitted (and we are replacing it)
             if existing_parent and existing_parent.status not in [models.InvoiceStatus.REJECTED, models.InvoiceStatus.SUBMITTED]:
                 if existing_parent.invoice_number != inv_number:
                     raise ValueError(f"ACT {a.act_number} is already locked in Invoice {existing_parent.invoice_number}")
+
+
 
     # 5. Financial Summing (Fixes the 0% VAT bug)
     total_ht = sum(a.total_amount_ht for a in acts)
