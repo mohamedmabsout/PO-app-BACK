@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session, joinedload
 from typing import List,Optional
 import mimetypes # Ensure this is imported at the top
 import json
+from sqlalchemy import func,or_
 
 from .. import crud, models, schemas, auth
 from ..dependencies import get_current_user, get_db
@@ -44,26 +45,48 @@ def require_roles(user, roles):
 # 1. CREATE & LIST
 # ==========================
 
+
 @router.post("/", response_model=schemas.ExpenseResponse)
 async def create_expense_endpoint(
     background_tasks: BackgroundTasks,
-    # Accept the file
     file: UploadFile = File(None), 
-    # Accept the rest of the data as a JSON string inside a form field
     payload_str: str = Form(...), 
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
 ):
-    require_roles(current_user,[models.UserRole.PM, models.UserRole.RAF, models.UserRole.ADMIN, models.UserRole.PD])
+    # 1. Global Role Check (Initial Filter)
+    require_roles(current_user, [models.UserRole.PM, models.UserRole.RAF, models.UserRole.ADMIN, models.UserRole.PD])
     
-    # Parse the JSON string back into your Pydantic Schema
+    # 2. Parse Payload
     try:
         payload_dict = json.loads(payload_str)
         payload = schemas.ExpenseCreate(**payload_dict)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid payload format: {str(e)}")
 
-    # Handle File Saving
+    # 3. PROJECT WORKFLOW PERMISSION CHECK (Low Level)
+    # Determine the required action based on whether the user is saving a draft or submitting
+    action_required = (
+        models.ProjectActionType.EXP_CREATE_DRAFT 
+        if payload.is_draft 
+        else models.ProjectActionType.EXP_SUBMIT
+    )
+
+    # Use the gatekeeper logic to check the project matrix
+    is_authorized = crud.check_workflow_permission(
+        db, 
+        project_id=payload.project_id, 
+        action=action_required, 
+        user_id=current_user.id
+    )
+
+    if not is_authorized:
+        raise HTTPException(
+            status_code=403, 
+            detail=f"You are not assigned to perform '{action_required}' for this specific project."
+        )
+
+    # 4. Handle File Saving
     filename = None
     if file:
         os.makedirs("uploads/expenses", exist_ok=True)
@@ -72,13 +95,11 @@ async def create_expense_endpoint(
         with open(file_path, "wb") as buffer:
             buffer.write(await file.read())
 
+    # 5. Call CRUD
     try:
-        # Pass the filename to the CRUD function
         return crud.create_expense(db, payload, current_user.id, background_tasks, filename)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-
-
 @router.get("/search", response_model=schemas.PaginatedResponse)
 def search_expenses_endpoint(
     scope: str = "my",
@@ -92,15 +113,15 @@ def search_expenses_endpoint(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
-    # Security: Define who can access which scope
-    if scope == "pay":
-        # Only RAF and ADMIN can see what needs to be paid
-        require_roles(current_user, ["RAF", "ADMIN"])
+    # # Security: Define who can access which scope
+    # if scope == "pay":
+    #     # Only RAF and ADMIN can see what needs to be paid
+    #     require_roles(current_user, ["RAF", "ADMIN"])
     
-    elif scope in ["l1", "l2", "all", "history"]:
-        # RAF should be able to see History and All requests for Audit purposes
-        # PD and ADMIN can also see these
-        require_roles(current_user, ["PD", "ADMIN", "RAF"])
+    # elif scope in ["l1", "l2", "all", "history"]:
+    #     # RAF should be able to see History and All requests for Audit purposes
+    #     # PD and ADMIN can also see these
+    #     require_roles(current_user, ["PD", "ADMIN", "RAF"])
 
     filters = {
         "project_id": project_id,
@@ -252,40 +273,49 @@ def get_paid_history(
             models.ExpenseStatus.ACKNOWLEDGED
         ])
     ).order_by(models.Expense.updated_at.desc()).all()
-
 @router.get("/summary-counts")
 def get_expense_summary_counts(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
-    counts = {"l1": 0, "l2": 0, "pay": 0}
-    
-    # Helper to apply project filter if needed
-    def filter_by_stakeholder(query, role_needed=None):
-        if current_user.role not in [models.UserRole.ADMIN, models.UserRole.RAF]:
-            query = query.join(models.ProjectStakeholder, models.Expense.project_id == models.ProjectStakeholder.project_id)
-            query = query.filter(models.ProjectStakeholder.user_id == current_user.id)
-            if role_needed:
-                query = query.filter(models.ProjectStakeholder.role == role_needed)
-        return query
+    res = {
+        "l1": {"count": 0, "visible": False},
+        "l2": {"count": 0, "visible": False},
+        "pay": {"count": 0, "visible": False}
+    }
 
-    # L1: PDs (Filtered by assignment) or Admins
-    if current_user.role in [models.UserRole.PD, models.UserRole.ADMIN]:
-        q = db.query(models.Expense).filter(models.Expense.status == models.ExpenseStatus.SUBMITTED)
-        # Only count projects where I am the PD
-        q = filter_by_stakeholder(q, models.ProjectRoleType.PD) 
-        counts["l1"] = q.count()
+    # Helper: Matrix check
+    def has_any_assignment(action):
+        return db.query(models.ProjectWorkflow).filter(
+            models.ProjectWorkflow.action_type == action,
+            or_(
+                models.ProjectWorkflow.primary_users.any(id=current_user.id),
+                models.ProjectWorkflow.support_users.any(id=current_user.id)
+            )
+        ).first() is not None
 
-    # L2: Admin Only (Global)
-    if current_user.role == models.UserRole.ADMIN:
-        counts["l2"] = db.query(models.Expense).filter(models.Expense.status == models.ExpenseStatus.PENDING_L2).count()
+    MANAGEMENT_ROLES = [models.UserRole.ADMIN, models.UserRole.RAF, models.UserRole.CEO]
+    is_admin_or_ceo = current_user.role in [models.UserRole.ADMIN, models.UserRole.CEO]
 
-    # Pay: RAF/Admin (Global)
-    if current_user.role in [models.UserRole.RAF, models.UserRole.ADMIN]:
-        counts["pay"] = db.query(models.Expense).filter(models.Expense.status == models.ExpenseStatus.APPROVED_L2).count()
-        
-    return counts
+    # --- L1 Logic ---
+    # Visible if Admin/CEO OR if I am assigned to L1 in at least one project
+    res["l1"]["visible"] = is_admin_or_ceo or has_any_assignment(models.ProjectActionType.EXP_APPROVE_L1)
+    if res["l1"]["visible"]:
+        # Reuse search_expenses to get the exact assignment-filtered count
+        res["l1"]["count"] = crud.search_expenses(db, current_user, "l1")["total"]
 
+    # --- L2 Logic ---
+    res["l2"]["visible"] = is_admin_or_ceo or has_any_assignment(models.ProjectActionType.EXP_APPROVE_L2)
+    if res["l2"]["visible"]:
+        res["l2"]["count"] = crud.search_expenses(db, current_user, "l2")["total"]
+
+    # --- Pay Logic ---
+    # Payments remain global for RAF/Admin/CEO
+    res["pay"]["visible"] = current_user.role in MANAGEMENT_ROLES
+    if res["pay"]["visible"]:
+        res["pay"]["count"] = crud.search_expenses(db, current_user, "pay")["total"]
+
+    return res
 # @router.get("/caisse/reserved-breakdown")
 # def get_reserved_breakdown(db: Session = Depends(get_db), current_user = Depends(get_current_user)):
     
@@ -394,18 +424,21 @@ def get_expense_details(
     if expense.beneficiary_user_id == current_user.id:
         return expense
 
-    # 3. Project Context: Is the user a Stakeholder on THIS project?
-    # This covers PDs, PMs, and Coordinators assigned to this specific project.
-    is_stakeholder = db.query(models.ProjectStakeholder).filter(
-        models.ProjectStakeholder.user_id == current_user.id,
-        models.ProjectStakeholder.project_id == expense.project_id
+    # C. Project Matrix Check (Replacement for ProjectStakeholder)
+    # Does this user appear in ANY row of this project's workflow matrix?
+    is_assigned_to_project = db.query(models.ProjectWorkflow).filter(
+        models.ProjectWorkflow.project_id == expense.project_id,
+        or_(
+            models.ProjectWorkflow.primary_users.any(id=current_user.id),
+            models.ProjectWorkflow.support_users.any(id=current_user.id)
+        )
     ).first()
 
-    if is_stakeholder:
+    if is_assigned_to_project:
         return expense
 
     # --- ACCESS DENIED ---
-    raise HTTPException(status_code=403, detail="Not authorized to view this expense.")
+    raise HTTPException(status_code=403, detail="You are not part of this project team.")
 
 
 @router.get("/attachment/{filename}")
@@ -484,7 +517,7 @@ def approve_l1(
     background_tasks: BackgroundTasks = BackgroundTasks()
 ):
     """PD Approval"""
-    require_roles(current_user, [models.UserRole.PD, models.UserRole.ADMIN])
+    # require_roles(current_user, [models.UserRole.PD, models.UserRole.ADMIN])
     try:
         return crud.approve_expense_l1(db, id, current_user.id, background_tasks, payload.comment)
     except ValueError as e:
@@ -501,7 +534,7 @@ def approve_l2(
     current_user: models.User = Depends(auth.get_current_user),
 ):
     """Admin Approval"""
-    require_roles(current_user, [models.UserRole.ADMIN])
+    # require_roles(current_user, [models.UserRole.ADMIN])
     try:
         return crud.approve_expense_l2(db, id, current_user.id, background_tasks,payload.comment)
     except ValueError as e:
@@ -614,42 +647,59 @@ def acknowledge_receipt(
         raise HTTPException(403, str(e))
 
 @router.put("/{id}", response_model=schemas.ExpenseResponse)
-def update_expense(
+async def update_expense_endpoint(
     id: int,
-    payload: schemas.ExpenseCreate,
+    background_tasks: BackgroundTasks,
+    payload_str: str = Form(...), # Accept data as form field string
+    file: UploadFile = File(None), # Allow updating the receipt file
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
-    background_tasks: BackgroundTasks = BackgroundTasks()
 ):
-    """
-    Edit a DRAFT expense.
-    Handles financial adjustments (refunds/deductions) automatically.
-    """
-    require_roles(current_user, [models.UserRole.PM, models.UserRole.ADMIN])
-    
+    # 1. Parse Payload
     try:
-        # Calls the updated CRUD function
-        updated_exp = crud.update_expense(db, id, payload, current_user.id)
-        
-        # If the user decided to Submit immediately during the edit
-        if not payload.is_draft:
-            # We can trigger the notification manually here or rely on crud
-            # Let's send the PD notification
-            pd_emails = crud.get_emails_by_role(db, models.UserRole.PD)
-            crud.send_notification_email(
-                background_tasks,
-                pd_emails,
-                "Expense Submitted (Edited)",
-                "",
-                {
-                    "message": f"PM {current_user.first_name} has edited and submitted an expense.",
-                    "details": {"Amount": f"{updated_exp.amount} MAD"},
-                    "link": "/expenses?tab=l1"
-                }
-            )
-            
+        payload_dict = json.loads(payload_str)
+        payload = schemas.ExpenseCreate(**payload_dict)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid payload format: {str(e)}")
+
+    # 2. Global Role Check
+    require_roles(current_user, [models.UserRole.PM, models.UserRole.ADMIN])
+
+    # 3. PROJECT WORKFLOW PERMISSION CHECK
+    # If is_draft is False, it means they are CLICKING SUBMIT now.
+    action_required = (
+        models.ProjectActionType.EXP_CREATE_DRAFT 
+        if payload.is_draft 
+        else models.ProjectActionType.EXP_SUBMIT
+    )
+
+    is_authorized = crud.check_workflow_permission(
+        db, 
+        project_id=payload.project_id, 
+        action=action_required, 
+        user_id=current_user.id
+    )
+
+    if not is_authorized:
+        raise HTTPException(
+            status_code=403, 
+            detail=f"You are not assigned to perform '{action_required}' for this project."
+        )
+
+    # 4. Handle File Update
+    filename = None
+    if file:
+        os.makedirs("uploads/expenses", exist_ok=True)
+        filename = f"EXP_{current_user.id}_{file.filename}"
+        file_path = os.path.join("uploads", "expenses", filename)
+        with open(file_path, "wb") as buffer:
+            buffer.write(await file.read())
+
+    # 5. Call CRUD
+    try:
+        updated_exp = crud.update_expense(db, id, payload, current_user.id, background_tasks, filename)
+        if not updated_exp:
+            raise HTTPException(status_code=404, detail="Expense not found")
         return updated_exp
-        
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
- 

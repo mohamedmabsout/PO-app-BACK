@@ -29,7 +29,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import func,or_
 from fastapi import UploadFile, File, Form,HTTPException
 from fastapi.responses import FileResponse
-from .utils.email import send_bc_status_email, send_email_background, LOGOS
+from .utils.email import send_bc_status_email, send_email_background, LOGOS,send_notification_email_detailled
 import json
 
 
@@ -53,25 +53,35 @@ def format_currency_python(value):
     """Formats a number to '10 000,00 MAD' style in Python"""
     return f"{value:,.2f} MAD".replace(",", " ").replace(".", ",")
 # --- 1. CHECK PERMISSION (The Engine) ---
-def check_workflow_permission(db: Session, project_id: int, action: models.ProjectActionType, user_id: int):
-    """Permissions Checker"""
-    user = db.query(models.User).get(user_id)
-    if user.role == models.UserRole.ADMIN: return True
+# backend/app/crud.py
 
+def check_workflow_permission(db: Session, project_id: int, action: models.ProjectActionType, user_id: int):
+    """
+    Checks if a user is authorized for a specific action on a project.
+    - Admins: Always True.
+    - Primary/Support: True if user exists in the project matrix for this action.
+    """
+    user = db.query(models.User).get(user_id)
+    if not user: return False
+    
+    # 1. Global Admin Bypass
+    if user.role == models.UserRole.ADMIN:
+        return True
+
+    # 2. Check the Matrix for this Project + Action
     config = db.query(models.ProjectWorkflow).filter(
         models.ProjectWorkflow.project_id == project_id,
         models.ProjectWorkflow.action_type == action
     ).first()
 
-    if not config: return False
+    if not config:
+        return False
 
-    # Check if user is in Primary list
-    if any(u.id == user_id for u in config.primary_users): return True
-    # Check if user is in Support list
-    if any(u.id == user_id for u in config.support_users): return True
+    # 3. Check if user is in Primary or Support lists (Many-to-Many)
+    is_primary = any(u.id == user_id for u in config.primary_users)
+    is_support = any(u.id == user_id for u in config.support_users)
 
-    return False
-
+    return is_primary or is_support
 
 # --- 2. GET MATRIX ---
 # In backend/app/crud.py
@@ -165,15 +175,28 @@ def auto_configure_project_defaults(db: Session, project_id: int):
             updates.append(schemas.WorkflowConfigBase(action_type=action, primary_user_id=uid, support_user_ids=[]))
             
     update_project_workflow_matrix(db, project_id, updates)
+def get_project_users_by_action(db: Session, project_id: int, action: models.ProjectActionType):
+    """
+    Returns all users (Primary + Support) assigned to a specific action for a project.
+    """
+    config = db.query(models.ProjectWorkflow).filter(
+        models.ProjectWorkflow.project_id == project_id,
+        models.ProjectWorkflow.action_type == action
+    ).first()
+
+    if not config:
+        return []
+
+    # Combine both Many-to-Many lists
+    return list(config.primary_users) + list(config.support_users)
+
 def get_project_users_by_role(db: Session, project_id: int, role: str):
     """
-    Fetches users assigned to a specific project with a specific role.
-    Example: Who is the PD for Project #12?
+    Helper to find people holding a specific title (e.g., ROLE_PD).
+    'role' can be 'PD' or 'ROLE_PD'
     """
-    return db.query(models.User).join(models.ProjectStakeholder).filter(
-        models.ProjectStakeholder.project_id == project_id,
-        models.ProjectStakeholder.role == role
-    ).all()
+    action_key = f"ROLE_{role}" if not role.startswith("ROLE_") else role
+    return get_project_users_by_action(db, project_id, action_key)
 
 def is_user_project_lead(db: Session, user_id: int, project_id: int, role: str):
     """
@@ -2456,43 +2479,52 @@ def get_planning_matrix(db: Session, year: int, user: Optional[models.User] = No
 
 def get_internal_projects_for_user(db: Session, user: models.User):
     """
-    Returns projects based on role:
-    - Admin: All projects
-    - PM/PD: Only projects where they are the manager
-    - Others: Empty list (or all, depending on your needs)
+    Returns projects available to a user based on the unified Workflow Matrix.
+    - Admin, RAF, and CEO: See all projects in the company.
+    - PM, PD, PC, RQC: See only projects where they appear in the Matrix (Primary or Support).
     """
-    query = db.query(models.InternalProject)
+    # 1. Management Roles: Global Visibility
+    MANAGEMENT_ROLES = [models.UserRole.ADMIN, models.UserRole.RAF, models.UserRole.CEO]
     
-    if user.role in [models.UserRole.ADMIN, models.UserRole.RAF]:
+    if user.role in MANAGEMENT_ROLES:
         return db.query(models.InternalProject).order_by(models.InternalProject.name).all()
-    return db.query(models.InternalProject).join(
-        models.ProjectStakeholder
-    ).filter(
-        models.ProjectStakeholder.user_id == user.id
-    ).order_by(models.InternalProject.name).distinct().all() # Or raise error
 
-# Update the selector too
+    # 2. Others: Join with the Unified Workflow table
+    # We look for ANY entry in the matrix for this user on a specific project.
+    # This includes both 'ROLE_' entries (Stakeholders) and 'EXP_/BC_' entries (Actions).
+    return db.query(models.InternalProject).join(
+        models.ProjectWorkflow
+    ).filter(
+        or_(
+            # Is user a Primary Owner for any task in this project?
+            models.ProjectWorkflow.primary_users.any(id=user.id),
+            # Is user a Support Member for any task in this project?
+            models.ProjectWorkflow.support_users.any(id=user.id)
+        )
+    ).distinct().order_by(models.InternalProject.name).all()
 def get_internal_project_selector_for_user(db: Session, user: models.User, search: str = None):
     """
-    Returns projects for dropdowns.
-    - ADMIN/RAF: See ALL projects.
-    - Others (PM/PD): See only assigned projects.
+    Returns projects where the user has ANY assigned role or action.
+    - Admin/RAF/CEO: See all projects.
+    - PD/PM/Coordinators: See projects where they appear in the Matrix.
     """
-    query = db.query(models.InternalProject)
-    
-    # 1. Security Filter
-    # If NOT Admin/RAF, restrict to assigned projects
-    if user.role not in [models.UserRole.ADMIN, models.UserRole.RAF]:
-        query = query.join(models.ProjectStakeholder).filter(
-            models.ProjectStakeholder.user_id == user.id
-        )
+    # 1. Management Roles: Global Visibility
+    if user.role in [models.UserRole.ADMIN, models.UserRole.RAF, models.UserRole.CEO]:
+        query = db.query(models.InternalProject)
+    else:
+        # 2. Project Team: Filter by assignment in ProjectWorkflow
+        # We look for ANY record in the matrix for this user on a project
+        query = db.query(models.InternalProject).join(models.ProjectWorkflow).filter(
+            or_(
+                models.ProjectWorkflow.primary_users.any(id=user.id),
+                models.ProjectWorkflow.support_users.any(id=user.id)
+            )
+        ).distinct()
 
-    # 2. Apply Search Filter (Applied to everyone)
     if search:
         query = query.filter(models.InternalProject.name.ilike(f"%{search}%"))
         
-    return query.order_by(models.InternalProject.name).limit(20).all()
-
+    return query.order_by(models.InternalProject.name).limit(100).all()
     
 def get_remaining_to_accept_dataframe(
     db: Session,
@@ -3148,8 +3180,10 @@ def get_all_bcs(db: Session, current_user: models.User, search: Optional[str] = 
                 models.BonDeCommande.bc_number.ilike(search_term),
                 models.SBC.short_name.ilike(search_term),
                 models.SBC.name.ilike(search_term),
-                models.InternalProject.name.ilike(search_term)
-            )
+                models.InternalProject.name.ilike(search_term),
+                models.BonDeCommande.creator.has(func.concat(models.User.first_name, " ", models.User.last_name).ilike(search_term)),
+                models.BonDeCommande.internal_project.project_manager.has(func.concat(models.User.first_name, " ", models.User.last_name).ilike(search_term)
+            ))
         )
 
     # 5. Status Filter
@@ -5391,16 +5425,19 @@ def create_expense(db: Session, payload: schemas.ExpenseCreate, user_id: int, ba
 
     # --- 5. NOTIFICATIONS ---
     if not payload.is_draft:
-        # Fetch PDs assigned to this project
-        target_pds = get_project_users_by_role(db, db_expense.project_id, models.ProjectRoleType.PD)
-
+        # Fetch users assigned specifically to APPROVE L1 for this project
+        target_approvers = get_project_users_by_action(
+            db, 
+            db_expense.project_id, 
+            models.ProjectActionType.EXP_APPROVE_L1
+        )
         # Fallback to Global Admins if no PD assigned
-        if not target_pds:
-            target_pds = db.query(models.User).filter(models.User.role == models.UserRole.ADMIN).all()
+        if not target_approvers:
+            target_approvers = db.query(models.User).filter(models.User.role == models.UserRole.ADMIN).all()
 
-        pd_emails = [u.email for u in target_pds if u.email]
+        pd_emails = [u.email for u in target_approvers if u.email]
         
-        for pd in target_pds:
+        for pd in target_approvers:
             create_notification(
                 db, recipient_id=pd.id, type=models.NotificationType.TODO,
                 module=models.NotificationModule.EXP,
@@ -5411,27 +5448,30 @@ def create_expense(db: Session, payload: schemas.ExpenseCreate, user_id: int, ba
             )
         
         if pd_emails:
+            # Prepare details for the new detailed email format
+            pm_obj = db_expense.internal_project.project_manager if db_expense.internal_project else None
+            pm_name = f"{pm_obj.first_name} {pm_obj.last_name}" if pm_obj else "N/A"
+            
             details = {
                 "id": f"#{db_expense.id}",
                 "project": db_expense.internal_project.name if db_expense.internal_project else "N/A",
-                "PM": pm_full_name,
+                "pm": pm_name,
+                "creator": pm_full_name,
                 "date": db_expense.created_at.strftime("%d/%m/%Y"),
                 "beneficiary": db_expense.beneficiary,
-                "type": db_expense.exp_type,
-                "net_amount": f"{net_amount:,.2f} MAD",
+                "category": db_expense.exp_type,
+                "total": f"{net_amount:,.2f} MAD",
                 "remark": db_expense.remark
             }
 
-            send_notification_email(
-                background_tasks,
-                pd_emails,
-                "Action Required: New Expense Submitted",
-                "",
-                {
-                    "message": "A new expense has been submitted and is awaiting your L1 operational validation.",
-                    "details": details,
-                    "link": f"/expenses/details/{db_expense.id}"
-                }
+            send_notification_email_detailled(
+                background_tasks=background_tasks,
+                recipients=pd_emails,
+                subject="Action Required: New Expense Submitted",
+                module="EXP",
+                status_text="SUBMITTED",
+                details=details,
+                link=f"/expenses/details/{db_expense.id}"
             )
 
     db.commit()
@@ -5452,17 +5492,13 @@ def approve_expense_l1(db: Session, expense_id: int, pd_id: int, background_task
 
     # --- NEW SECURITY CHECK ---
     # Check if the approver is the PD (Lead) for THIS specific project
-    is_allowed = is_user_project_lead(
-        db, 
-        pd_id, 
-        expense.project_id, 
-        models.ProjectRoleType.PD
+    is_authorized = check_workflow_permission(
+        db, expense.project_id, models.ProjectActionType.EXP_APPROVE_L1, pd_id
     )
 
-    if not is_allowed:
-        # Optional: Allow if user has Global PD Role? 
-        # Ideally no, we want strict project assignment.
-        raise ValueError("Permission Denied: You are not the assigned Project Director for this project.")
+    if not is_authorized:
+        raise ValueError("Permission Denied: You are not assigned to L1 Approval for this project.")
+    
     # --------------------------
    
    
@@ -5486,11 +5522,31 @@ def approve_expense_l1(db: Session, expense_id: int, pd_id: int, background_task
             created_at=datetime.now()
         )
     
-    send_notification_email(background_tasks, admin_emails, "Expense Pending L2 Approval", "", {
-        "message": "An expense has been approved by PD and is ready for Finance validation.",
-        "details": {"ID": expense.id, "Amount": expense.amount},
-        "link": f"/expenses/details/{expense.id}"
-    })
+    if admin_emails:
+        pm_obj = expense.internal_project.project_manager if expense.internal_project else None
+        pm_name = f"{pm_obj.first_name} {pm_obj.last_name}" if pm_obj else "N/A"
+        
+        details = {
+            "id": f"#{expense.id}",
+            "project": expense.internal_project.name if expense.internal_project else "N/A",
+            "pm": pm_name,
+            "creator": f"{expense.requester.first_name} {expense.requester.last_name}" if expense.requester else "N/A",
+            "date": expense.created_at.strftime("%d/%m/%Y"),
+            "beneficiary": expense.beneficiary,
+            "category": expense.exp_type,
+            "total": f"{expense.amount:,.2f} MAD",
+            "remark": expense.remark
+        }
+
+        send_notification_email_detailled(
+            background_tasks=background_tasks,
+            recipients=admin_emails,
+            subject="Action Required: Expense Pending L2 Approval",
+            module="EXP",
+            status_text="L1 APPROVED",
+            details=details,
+            link=f"/expenses/details/{expense.id}"
+        )
 
     db.commit()
     return expense
@@ -5501,6 +5557,16 @@ def approve_expense_l2(db: Session, expense_id: int, admin_id: int, background_t
     Action: Notify PD to proceed with physical payment.
     """
     expense = db.query(models.Expense).get(expense_id)
+    if not expense: raise ValueError("Expense not found")
+
+    # --- THE NEW STRICT CHECK ---
+    # Check if this specific user is assigned to L2 Approval for THIS project
+    is_authorized = check_workflow_permission(
+        db, expense.project_id, models.ProjectActionType.EXP_APPROVE_L2, admin_id
+    )
+
+    if not is_authorized:
+        raise ValueError("Permission Denied: You are not assigned to L2 Approval for this project.")
     expense.status = models.ExpenseStatus.APPROVED_L2
     expense.l2_approver_id = admin_id
     expense.l2_at = datetime.now()
@@ -5523,17 +5589,29 @@ def approve_expense_l2(db: Session, expense_id: int, admin_id: int, background_t
 
     # 3. Send Email
     if raf_emails:
-        send_notification_email(
-            background_tasks, 
-            raf_emails, 
-            "Expense Approved (L2) - Ready for Payment", 
-            "EXP", 
-            {
-                "id": expense.id,
-                "project": expense.internal_project.name,
-                "beneficiary": expense.beneficiary,
-                "amount": f"{expense.amount} MAD",
-            }
+        pm_obj = expense.internal_project.project_manager if expense.internal_project else None
+        pm_name = f"{pm_obj.first_name} {pm_obj.last_name}" if pm_obj else "N/A"
+        
+        details = {
+            "id": f"#{expense.id}",
+            "project": expense.internal_project.name if expense.internal_project else "N/A",
+            "pm": pm_name,
+            "creator": f"{expense.requester.first_name} {expense.requester.last_name}" if expense.requester else "N/A",
+            "date": expense.created_at.strftime("%d/%m/%Y"),
+            "beneficiary": expense.beneficiary,
+            "category": expense.exp_type,
+            "total": f"{expense.amount:,.2f} MAD",
+            "remark": expense.remark
+        }
+
+        send_notification_email_detailled(
+            background_tasks=background_tasks,
+            recipients=raf_emails,
+            subject="Action Required: Expense Ready for Payment",
+            module="EXP",
+            status_text="L2 APPROVED",
+            details=details,
+            link=f"/expenses/details/{expense.id}"
         )
 
     db.commit()
@@ -5588,11 +5666,30 @@ def confirm_expense_payment(db: Session, expense_id: int, filename: str, pd_id: 
         )
         beneficiary = db.query(models.User).get(expense.beneficiary_user_id)
         if beneficiary and beneficiary.email:
-            send_notification_email(background_tasks, [beneficiary.email], "Payment Received - Action Required", "", {
-                "message": "Funds have been handed over. Please log in and acknowledge receipt in the portal.",
-                "details": {"Amount": expense.amount},
-                "link": f"/expenses/details/{expense.id}"
-            })
+            pm_obj = expense.internal_project.project_manager if expense.internal_project else None
+            pm_name = f"{pm_obj.first_name} {pm_obj.last_name}" if pm_obj else "N/A"
+            
+            details = {
+                "id": f"#{expense.id}",
+                "project": expense.internal_project.name if expense.internal_project else "N/A",
+                "pm": pm_name,
+                "creator": f"{expense.requester.first_name} {expense.requester.last_name}" if expense.requester else "N/A",
+                "date": expense.created_at.strftime("%d/%m/%Y"),
+                "beneficiary": expense.beneficiary,
+                "category": expense.exp_type,
+                "total": f"{expense.amount:,.2f} MAD",
+                "remark": expense.remark
+            }
+
+            send_notification_email_detailled(
+                background_tasks=background_tasks,
+                recipients=[beneficiary.email],
+                subject="Payment Handed Over - Action Required",
+                module="CAISSE",
+                status_text="PAID",
+                details=details,
+                link=f"/expenses/details/{expense.id}"
+            )
 
     db.commit()
     db.refresh(expense)
@@ -5671,15 +5768,31 @@ def reject_expense(db: Session, expense_id: int, reason: str, rejector_id: int, 
     # 6. NOTIFY PM (Email)
     pm = db.query(models.User).get(expense.requester_id)
     if pm and pm.email and background_tasks:
-        send_notification_email(background_tasks, [pm.email], "Expense Request Rejected", "", {
-            "message": f"Your expense request has been rejected and funds ({expense.amount} MAD) have been returned to your available balance.",
-            "details": {
-                "Expense ID": f"#{expense.id}",
-                "Reason": reason,
-                "Project": expense.internal_project.name if expense.internal_project else "N/A"
-            },
-            "link": "/expenses"
-        })
+        pm_obj = expense.internal_project.project_manager if expense.internal_project else None
+        pm_name = f"{pm_obj.first_name} {pm_obj.last_name}" if pm_obj else "N/A"
+        requester_name = f"{pm.first_name} {pm.last_name}"
+        
+        details = {
+            "id": f"#{expense.id}",
+            "project": expense.internal_project.name if expense.internal_project else "N/A",
+            "pm": pm_name,
+            "creator": requester_name,
+            "date": expense.created_at.strftime("%d/%m/%Y"),
+            "beneficiary": expense.beneficiary,
+            "category": expense.exp_type,
+            "total": f"{expense.amount:,.2f} MAD",
+            "remark": f"REJECTED: {reason}"
+        }
+
+        send_notification_email_detailled(
+            background_tasks=background_tasks,
+            recipients=[pm.email],
+            subject="Expense Request Rejected",
+            module="EXP",
+            status_text="REJECTED",
+            details=details,
+            link="/expenses"
+        )
 
     db.commit()
     db.refresh(expense)
@@ -5730,7 +5843,7 @@ def list_all_requests_global(db: Session, current_user: models.User):
 def search_expenses(
     db: Session, 
     user: models.User, 
-    scope: str,  # 'my', 'l1', 'l2', 'pay', 'history', 'all'
+    scope: str, 
     page: int = 1, 
     limit: int = 20,
     filters: dict = {}
@@ -5741,88 +5854,79 @@ def search_expenses(
         joinedload(models.Expense.sbc)
     )
 
-    # =========================================================
-    # 1. STAKEHOLDER SECURITY FILTER (The New Logic)
-    # =========================================================
+    MANAGEMENT_ROLES = [models.UserRole.ADMIN, models.UserRole.RAF, models.UserRole.CEO]
     
-    # "My Requests" is exempt: You always see what you created.
-    if scope != "my":
+    # 1. Assignment-Based Filtering
+    if scope != "my" and user.role not in MANAGEMENT_ROLES:
+        # Join to Matrix with explicit ON clause to resolve ambiguity
+        query = query.join(
+            models.ProjectWorkflow,
+            models.Expense.project_id == models.ProjectWorkflow.project_id
+        )
         
-        # ADMIN and RAF are Global -> They see everything.
-        # Everyone else (PD, PM, Coordinator) is restricted by Project Assignment.
-        if user.role not in [models.UserRole.ADMIN, models.UserRole.RAF]:
-            
-            # Join Expense -> InternalProject -> ProjectStakeholder
-            query = query.join(
-                models.ProjectStakeholder,
-                models.Expense.project_id == models.ProjectStakeholder.project_id
-            ).filter(
-                models.ProjectStakeholder.user_id == user.id
+        # User is either Primary OR Support
+        user_in_workflow = or_(
+            models.ProjectWorkflow.primary_users.any(id=user.id),
+            models.ProjectWorkflow.support_users.any(id=user.id)
+        )
+
+        if scope == "l1":
+            query = query.filter(
+                models.ProjectWorkflow.action_type == models.ProjectActionType.EXP_APPROVE_L1,
+                user_in_workflow
             )
+        elif scope == "l2":
+             query = query.filter(
+                models.ProjectWorkflow.action_type == models.ProjectActionType.EXP_APPROVE_L2,
+                user_in_workflow
+            )
+        else:
+            # history, all: See projects where I am part of the team in any role
+            query = query.filter(user_in_workflow)
 
-            # --- Contextual Role Filtering ---
-            
-            # If looking at "L1 Approval", you MUST be the PD of that project
-            if scope == "l1":
-                query = query.filter(models.ProjectStakeholder.role == models.ProjectRoleType.PD)
-            
-            # Note: L2 and Pay are usually Admin/RAF scopes, so they bypass this block.
-            # For 'all' or 'history', the user sees expenses for ANY project 
-            # where they are a stakeholder (PM, PC, or PD).
+        # Apply distinct immediately after assignment join to handle M2M duplicates
+        query = query.distinct()
 
-    # =========================================================
-    # 2. STATUS SCOPE LOGIC (Existing)
-    # =========================================================
-    
+    # 2. Status Logic
     if scope == "my":
         query = query.filter(or_(
             models.Expense.requester_id == user.id,
             models.Expense.beneficiary_user_id == user.id
         ))
-    
     elif scope == "l1":
         query = query.filter(models.Expense.status == models.ExpenseStatus.SUBMITTED)
-    
     elif scope == "l2":
         query = query.filter(models.Expense.status == models.ExpenseStatus.PENDING_L2)
-    
     elif scope == "pay":
         query = query.filter(models.Expense.status == models.ExpenseStatus.APPROVED_L2)
-    
     elif scope == "history":
         query = query.filter(models.Expense.status.in_([
             models.ExpenseStatus.PAID, models.ExpenseStatus.ACKNOWLEDGED
         ]))
-    
     elif scope == "all":
         query = query.filter(models.Expense.status != models.ExpenseStatus.DRAFT)
 
-    # =========================================================
-    # 3. USER FILTERS (Existing)
-    # =========================================================
+    # 3. Filters
     if filters.get("project_id"):
         query = query.filter(models.Expense.project_id == filters["project_id"])
-    
     if filters.get("exp_type") and filters["exp_type"] != "ALL":
         query = query.filter(models.Expense.exp_type == filters["exp_type"])
-        
     if filters.get("beneficiary"):
-        term = f"%{filters['beneficiary']}%"
-        query = query.filter(models.Expense.beneficiary.ilike(term))
-        
+        query = query.filter(models.Expense.beneficiary.ilike(f"%{filters['beneficiary']}%"))
     if filters.get("start_date"):
         query = query.filter(models.Expense.created_at >= filters["start_date"])
-        
     if filters.get("end_date"):
-        query = query.filter(models.Expense.created_at <= f"{filters['end_date']} 23:59:59")
+        # Explicitly ensure we include the end date by targeting 1 sec before midnight
+        end_val = filters["end_date"]
+        query = query.filter(models.Expense.created_at <= f"{end_val} 23:59:59")
 
-    # --- 4. PAGINATION ---
+    # 4. Final Result
     total = query.count()
     items = query.order_by(models.Expense.created_at.desc())\
                  .offset((page - 1) * limit)\
                  .limit(limit)\
                  .all()
-                 
+
     return {
         "items": items,
         "total": total,
@@ -5830,7 +5934,6 @@ def search_expenses(
         "size": limit,
         "pages": (total + limit - 1) // limit if limit > 0 else 1
     }
-
 
 def list_pending_l1(db: Session):
     """Liste toutes les dépenses en attente de validation L1 (PD)"""
@@ -5881,12 +5984,32 @@ def submit_expense(db: Session, expense_id: int, background_tasks: BackgroundTas
     
     print(f"✅ Dépense soumise - ID: {expense_id}, Nouveau status: {expense.status}")
     pd_emails = get_emails_by_role(db, UserRole.PD)
-    send_notification_email(
-        background_tasks,
-        pd_emails,
-        "Expense Approval Required (L1)",
-        "",
-    )
+    if pd_emails:
+        pm_obj = expense.internal_project.project_manager if expense.internal_project else None
+        pm_name = f"{pm_obj.first_name} {pm_obj.last_name}" if pm_obj else "N/A"
+        requester_name = f"{expense.requester.first_name} {expense.requester.last_name}" if expense.requester else "N/A"
+        
+        details = {
+            "id": f"#{expense.id}",
+            "project": expense.internal_project.name if expense.internal_project else "N/A",
+            "pm": pm_name,
+            "creator": requester_name,
+            "date": expense.created_at.strftime("%d/%m/%Y"),
+            "beneficiary": expense.beneficiary,
+            "category": expense.exp_type,
+            "total": f"{expense.amount:,.2f} MAD",
+            "remark": expense.remark
+        }
+
+        send_notification_email_detailled(
+            background_tasks=background_tasks,
+            recipients=pd_emails,
+            subject="Action Required: Expense Approval Needed",
+            module="EXP",
+            status_text="SUBMITTED",
+            details=details,
+            link=f"/expenses/details/{expense.id}"
+        )
     return expense
 
 
@@ -6094,101 +6217,159 @@ def update_bon_de_commande(db: Session, bc_id: int, bc_data: schemas.BCCreate, u
     return bc
 # app/crud.py
 
-def update_expense(db: Session, expense_id: int, payload: schemas.ExpenseCreate, user_id: int):
+def update_expense(db: Session, expense_id: int, payload: schemas.ExpenseCreate, user_id: int, background_tasks: BackgroundTasks, filename: str = None):
+    user = db.query(models.User).get(user_id)
+    pm_full_name = f"{user.first_name} {user.last_name}" if user else "Unknown User"
+
     # 1. Fetch Expense
     db_expense = db.query(models.Expense).get(expense_id)
     if not db_expense:
         return None
 
     # 2. Security Check
-    user = db.query(models.User).get(user_id)
-    if db_expense.requester_id != user_id and user.role != models.UserRole.ADMIN:
+    if db_expense.requester_id != user_id and db.query(models.User).get(user_id).role != models.UserRole.ADMIN:
         raise ValueError("Not authorized to edit this expense")
 
     if db_expense.status != models.ExpenseStatus.DRAFT:
         raise ValueError("Only Draft expenses can be edited.")
 
-    # --- 3. BATCH & CONSISTENCY LOGIC ---
-    new_final_amount = payload.amount
-    new_beneficiary = payload.beneficiary
-    new_beneficiary_id = user_id
+    # --- 3. IDENTIFY SBC & GROSS AMOUNT (Logic matching create) ---
+    gross_amount = 0
+    sbc_id = payload.sbc_id
+    beneficiary_name = payload.beneficiary
+    beneficiary_user_id = None
     
     if payload.exp_type == "ACCEPTANCE_PP":
-        if not payload.act_ids:
-            raise ValueError("For Acceptance PP, you must select at least one ACT.")
+        new_acts = db.query(models.ServiceAcceptance).filter(models.ServiceAcceptance.id.in_(payload.act_ids)).all()
+        if not new_acts: raise ValueError("No ACTs selected.")
         
-        # Fetch the new batch of ACTs
-        new_acts = db.query(models.ServiceAcceptance).filter(
-            models.ServiceAcceptance.id.in_(payload.act_ids)
-        ).all()
+        gross_amount = sum(a.total_amount_ht for a in new_acts)
+        sbc_id = new_acts[0].bc.sbc_id
+    else:
+        # For standard expenses, the payload.amount IS the gross
+        gross_amount = payload.amount
+        if not new_acts: raise ValueError("No ACTs selected.")
+        
+        # Verify ACT availability
         for a in new_acts:
-            # If the ACT has an expense_id and it ISN'T THIS expense, check if it's taken
-            if a.expense_id is not None and a.expense_id != db_expense.id:
+            if a.expense_id and a.expense_id != db_expense.id:
                 existing_exp = db.query(models.Expense).get(a.expense_id)
                 if existing_exp and existing_exp.status != models.ExpenseStatus.REJECTED:
-                    raise ValueError(f"ACT {a.act_number} was just taken by Expense #{existing_exp.id}.")
+                    raise ValueError(f"ACT {a.act_number} is locked in Expense #{existing_exp.id}.")
 
-        # Check project and SBC consistency for the new batch
         sbc_ids = {a.bc.sbc_id for a in new_acts}
-        if len(sbc_ids) > 1:
-            raise ValueError("All selected Acceptances must belong to the same Subcontractor.")
-        
-        for a in new_acts:
-            if a.bc.project_id != payload.project_id:
-                raise ValueError(f"ACT {a.act_number} does not belong to the selected Project.")
-
-        # Recalculate amount and beneficiary based on the new batch
-        new_final_amount = sum(a.total_amount_ht for a in new_acts)
-        new_beneficiary = new_acts[0].bc.sbc.name
+        sbc_id = list(sbc_ids)[0]
+        gross_amount = sum(a.total_amount_ht for a in new_acts)
+        beneficiary_name = new_acts[0].bc.sbc.name
         if new_acts[0].bc.sbc.users:
-            new_beneficiary_id = new_acts[0].bc.sbc.users[0].id
+            beneficiary_user_id = new_acts[0].bc.sbc.users[0].id
+        else:
+            beneficiary_user_id = user_id if payload.exp_type != "AVANCE_SBC" else payload.beneficiary_user_id
 
-    # --- 4. FINANCIAL ADJUSTMENT ---
+    # --- 4. SETTLEMENT MATH (Handle Pool) ---
+    advance_deduction = 0.0
+    if payload.exp_type == "ACCEPTANCE_PP" and payload.apply_advance:
+        # Check the pool. 
+        # Note: Since the advance is not marked 'Consumed' yet, it's still 1000 MAD.
+        pool_balance = get_sbc_unconsumed_balance(db, sbc_id=sbc_id, pm_id=user_id)
+        if pool_balance > 0:
+            advance_deduction = min(pool_balance, gross_amount)
+    
+    # Net amount is ALWAYS (Freshly Calculated Gross) - (Full Pool Deduction)
+    # 3000 - 1000 will always stay 2000, no matter how many times you update.
+    net_amount = gross_amount - advance_deduction
+
+    # --- 3. FINANCIAL ADJUSTMENT (Caisse) ---
     caisse = db.query(models.Caisse).filter(models.Caisse.user_id == db_expense.requester_id).first()
-    if not caisse:
-        raise ValueError("Wallet not found.")
-
-    # A. Refund the old amount completely (Undo old reservation)
-    caisse.reserved_balance = (caisse.reserved_balance or 0.0) - db_expense.amount
-    caisse.balance = (caisse.balance or 0.0) + db_expense.amount
-
-    # B. Check if we have enough for the NEW amount
-    if caisse.balance < new_final_amount:
-        # Revert the refund before crashing
-        caisse.balance -= db_expense.amount
-        caisse.reserved_balance += db_expense.amount
-        raise ValueError(f"Insufficient balance. New total is {new_final_amount} MAD.")
-
-    # C. Apply new reservation
-    caisse.balance -= new_final_amount
-    caisse.reserved_balance += new_final_amount
-
-    # --- 5. DATA SYNC (The Batch Part) ---
     
-    # A. Unlink current ACTs (set their expense_id back to NULL)
-    db.query(models.ServiceAcceptance).filter(
-        models.ServiceAcceptance.expense_id == db_expense.id
-    ).update({"expense_id": None})
+    # Logic: "Give back what I currently have reserved, then take what I need now"
+    # This prevents money leaks during edits.
+    current_balance = (caisse.balance or 0.0) + db_expense.amount
+    current_reserved = (caisse.reserved_balance or 0.0) - db_expense.amount
 
-    # B. Apply new field values to Expense
+    if current_balance < net_amount:
+        raise ValueError(f"Insufficient balance. Available: {current_balance:,.2f}, Required Net: {net_amount:,.2f}")
+
+    caisse.balance = current_balance - net_amount
+    caisse.reserved_balance = current_reserved + net_amount
+    # --- 6. DATA SYNC ---
+    # Unlink old ACTs
+    db.query(models.ServiceAcceptance).filter(models.ServiceAcceptance.expense_id == db_expense.id).update({"expense_id": None})
+
+    # Update Expense record
     db_expense.project_id = payload.project_id
+    db_expense.sbc_id = sbc_id
+    db_expense.bc_item_id = payload.bc_id
     db_expense.exp_type = payload.exp_type
-    db_expense.amount = new_final_amount
-    db_expense.beneficiary = new_beneficiary
-    db_expense.beneficiary_user_id = new_beneficiary_id
+    db_expense.amount = net_amount
+    db_expense.beneficiary = beneficiary_name
+    db_expense.beneficiary_user_id = beneficiary_user_id
     db_expense.remark = payload.remark
-    db_expense.attachment = payload.attachment
+    if filename: db_expense.attachment = filename
     
-    # C. Link new batch of ACTs
-    if payload.exp_type == "ACCEPTANCE_PP":
-        for a in new_acts:
-            a.expense_id = db_expense.id
-
-    # --- 6. FINALIZATION ---
     if not payload.is_draft:
         db_expense.status = models.ExpenseStatus.SUBMITTED
-    
-    db_expense.updated_at = datetime.now()
+
+    # Relink new batch of ACTs
+    if payload.exp_type == "ACCEPTANCE_PP":
+        db.query(models.ServiceAcceptance).filter(models.ServiceAcceptance.id.in_(payload.act_ids)).update({"expense_id": db_expense.id}, synchronize_session=False)
+
+    # Update Ledger Transaction
+    trx = db.query(models.Transaction).filter(models.Transaction.description.like(f"Expense #{db_expense.id}:%")).first()
+    if trx:
+        trx.amount = net_amount
+        trx.description = f"Expense #{db_expense.id}: {payload.exp_type} - {beneficiary_name}"
+
+    # --- 7. NOTIFICATIONS (If Submitting) ---
+    if not payload.is_draft:
+        # Fetch PDs/Approvers from Matrix (reuse the logic from create_expense)
+        target_approvers = get_project_users_by_action(
+            db, 
+            db_expense.project_id, 
+            models.ProjectActionType.EXP_APPROVE_L1
+        )
+        # Fallback to Global Admins if no PD assigned
+        if not target_approvers:
+            target_approvers = db.query(models.User).filter(models.User.role == models.UserRole.ADMIN).all()
+
+        pd_emails = [u.email for u in target_approvers if u.email]
+        
+        for pd in target_approvers:
+            create_notification(
+                db, recipient_id=pd.id, type=models.NotificationType.TODO,
+                module=models.NotificationModule.EXP,
+                title="Expense Approval Required",
+                message=f"PM {user.first_name} submitted an expense for {net_amount:,.2f} MAD.",
+                link="/expenses?tab=l1",
+                created_at=datetime.now()
+            )
+        
+        if pd_emails:
+            # Prepare details for the new detailed email format
+            pm_obj = db_expense.internal_project.project_manager if db_expense.internal_project else None
+            pm_name = f"{pm_obj.first_name} {pm_obj.last_name}" if pm_obj else "N/A"
+            
+            details = {
+                "id": f"#{db_expense.id}",
+                "project": db_expense.internal_project.name if db_expense.internal_project else "N/A",
+                "pm": pm_name,
+                "creator": pm_full_name,
+                "date": db_expense.created_at.strftime("%d/%m/%Y"),
+                "beneficiary": db_expense.beneficiary,
+                "category": db_expense.exp_type,
+                "total": f"{net_amount:,.2f} MAD",
+                "remark": db_expense.remark
+            }
+
+            send_notification_email_detailled(
+                background_tasks=background_tasks,
+                recipients=pd_emails,
+                subject="Action Required: New Expense Submitted (Updated)",
+                module="EXP",
+                status_text="SUBMITTED (UPDATED)",
+                details=details,
+                link=f"/expenses/details/{db_expense.id}"
+            )       
 
     db.commit()
     db.refresh(db_expense)

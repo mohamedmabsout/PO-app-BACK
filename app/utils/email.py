@@ -66,7 +66,7 @@ LOGOS = {
 
 IMAGE_DIR = os.path.abspath("uploads/emails") 
 
-def send_notification_email(
+def send_notification_email_detailled(
     background_tasks: BackgroundTasks,
     recipients: List[str],
     subject: str,
@@ -149,7 +149,7 @@ def send_notification_email(
                 </div>
 
                 <div style="text-align: center; margin-top: 20px;">
-                    <a href="{os.getenv('FRONTEND_URL', 'http://localhost:3000')}{link}" 
+                    <a href="{os.getenv('FRONTEND_URL', 'https://po.sib.co.ma')}{link}" 
                        style="background-color: #2e75b6; color: white; padding: 10px 25px; text-decoration: none; font-weight: bold; border-radius: 4px; display: inline-block;">
                        ACCESS THE PORTAL
                     </a>
