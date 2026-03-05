@@ -6607,24 +6607,31 @@ def create_sbc_advance_record(db: Session, expense: models.Expense):
     db.add(new_adv)
     # Note: No commit here, we commit in the parent function
 
-def get_sbc_unconsumed_balance(db: Session, sbc_id: int, pm_id: int, exclude_expense_id: int = None):
-    """
-    Returns only advances given by THIS specific PM that haven't been consumed yet.
-    """
-    # 1. Raw total from advances table, filtered by the PM who created the original expense
-    raw_pool = db.query(func.sum(models.SBCAdvance.remaining_amount)).join(
-        models.Expense, models.SBCAdvance.expense_id == models.Expense.id
-    ).filter(
-        models.SBCAdvance.sbc_id == sbc_id,
-        models.SBCAdvance.is_consumed == False,
-        models.Expense.requester_id == pm_id # <--- THE CRITICAL LOCK
-    ).scalar() or 0.0
+# backend/app/crud.py
 
-    # 2. Subtract other pending deductions from this same PM
-    pending_deductions = 0.0
-    query = db.query(models.Expense).filter(
+def get_sbc_unconsumed_balance(db: Session, sbc_id: int, pm_id: int = None, exclude_expense_id: int = None):
+    """
+    Returns advances for an SBC.
+    - If pm_id is provided: Returns only advances given by THAT PM.
+    - If pm_id is None: Returns Global advances (Total debt to SIB).
+    """
+    # 1. Base query for raw pool
+    query_raw = db.query(func.sum(models.SBCAdvance.remaining_amount)).filter(
+        models.SBCAdvance.sbc_id == sbc_id,
+        models.SBCAdvance.is_consumed == False
+    )
+
+    # If pm_id is provided, lock the pool to that PM's original expenses
+    if pm_id:
+        query_raw = query_raw.join(
+            models.Expense, models.SBCAdvance.expense_id == models.Expense.id
+        ).filter(models.Expense.requester_id == pm_id)
+
+    raw_pool = query_raw.scalar() or 0.0
+
+    # 2. Base query for pending deductions
+    query_pending = db.query(models.Expense).filter(
         models.Expense.sbc_id == sbc_id,
-        models.Expense.requester_id == pm_id, # <--- THE CRITICAL LOCK
         models.Expense.exp_type == "ACCEPTANCE_PP",
         models.Expense.status.in_([
             models.ExpenseStatus.SUBMITTED, 
@@ -6634,21 +6641,25 @@ def get_sbc_unconsumed_balance(db: Session, sbc_id: int, pm_id: int, exclude_exp
         ])
     )
     
+    # Lock deductions to PM if provided
+    if pm_id:
+        query_pending = query_pending.filter(models.Expense.requester_id == pm_id)
+
     if exclude_expense_id:
-        query = query.filter(models.Expense.id != exclude_expense_id)
+        query_pending = query_pending.filter(models.Expense.id != exclude_expense_id)
 
-    pending_expenses = query.all()
+    pending_expenses = query_pending.all()
 
+    pending_deductions = 0.0
     for exp in pending_expenses:
-        # Calculate the deduction logic (Gross - Net)
-        # We need to sum up the ACTs linked to these pending expenses
+        # Sum up the Gross value of ACTs in this pending payment
         gross = db.query(func.sum(models.ServiceAcceptance.total_amount_ht)).filter(
             models.ServiceAcceptance.expense_id == exp.id
         ).scalar() or 0.0
+        # The deduction is what we "took" from the advance pool in that draft
         pending_deductions += (gross - exp.amount)
 
     return max(0, raw_pool - pending_deductions)
-
 
 
 def consume_sbc_advances(db: Session, sbc_id: int, amount_to_settle: float):
