@@ -31,6 +31,7 @@ from fastapi import UploadFile, File, Form,HTTPException
 from fastapi.responses import FileResponse
 from .utils.email import send_bc_status_email, send_email_background, LOGOS,send_notification_email_detailled
 import json
+from collections import defaultdict
 
 
 logger = logging.getLogger(__name__)
@@ -2675,11 +2676,20 @@ def get_tax_rate(db: Session, category: str, year: int):
 
 # --- MAIN ACTION: Create BC ---
 def create_bon_de_commande(db: Session, bc_data: schemas.BCCreate, creator_id: int):
-    
+
+    # 1. Workflow Permission Check
+    is_authorized = check_workflow_permission(
+        db, 
+        project_id=bc_data.internal_project_id, 
+        action=models.ProjectActionType.BC_CREATE_DRAFT, 
+        user_id=creator_id
+    )
+    if not is_authorized:
+        raise ValueError("Permission Denied: You are not assigned to create BC drafts for this project.")
+
     sbc = db.query(models.SBC).get(bc_data.sbc_id)
     if not sbc:
         raise ValueError("SBC not found")
-        
     # ---------------------------------------------------------
     # NEW: CATEGORY MIXING VALIDATION
     # ---------------------------------------------------------
@@ -3040,88 +3050,101 @@ def cancel_bc(db: Session, bc_id: int, user_id: int):
     db.delete(bc)
     db.commit()
 
-def submit_bc(db: Session, bc_id: int):
+def submit_bc(db: Session, bc_id: int, user_id: int):
     """Moves BC from DRAFT to SUBMITTED (Ready for L1)"""
     bc = db.query(models.BonDeCommande).get(bc_id)
     if not bc or bc.status != models.BCStatus.DRAFT:
         raise ValueError("BC not found or not in Draft status.")
+
+    # 1. Workflow Permission Check
+    is_authorized = check_workflow_permission(
+        db, 
+        project_id=bc.project_id, 
+        action=models.ProjectActionType.BC_SUBMIT, 
+        user_id=user_id
+    )
+    if not is_authorized:
+        raise ValueError("Permission Denied: You are not assigned to submit BCs for this project.")
+
     bc.status = models.BCStatus.SUBMITTED
     bc.submitted_at = datetime.now()
     db.commit()
-    # pd_emails = get_emails_by_role(db, UserRole.PD)
-    # send_notification_email(
-    #     background_tasks,
-    #     pd_emails,
-    #     "BC Submitted - L1 Approval Required",
-    #     "",
-    #     {
-    #         "message": "A new Purchase Order (BC) has been submitted and requires Project Director validation.",
-    #         "details": {
-    #             "BC Number": bc.bc_number,
-    #             "Project": bc.internal_project.name,
-    #             "Amount": f"{bc.total_amount_ttc:,.2f} MAD",
-    #             "Subcontractor": bc.sbc.short_name
-    #         },
-    #         "link": f"/bcs/{bc.id}"
-    #     }
-    # )
-
+    
     return bc
 
 
 def approve_bc_l1(db: Session, bc_id: int, approver_id: int, background_tasks: BackgroundTasks):
-    # 1. Fetch the Approver User to check permissions
-    approver = db.query(models.User).get(approver_id)
-    if not approver:
-        raise ValueError("Approver user not found.")
-        
-    # --- SECURITY CHECK: Must be PD or Admin ---
-    # (Admins usually have super-powers, so including them is safe, but strict PD is fine too)
-    if approver.role not in [models.UserRole.PD, models.UserRole.ADMIN]:
-        raise ValueError("Permission Denied: Only a Project Director (PD) can perform L1 validation.")
-    # -------------------------------------------
-
     bc = db.query(models.BonDeCommande).get(bc_id)
+    if not bc:
+        raise ValueError("BC not found.")
+
+    # 1. Workflow Permission Check
+    is_authorized = check_workflow_permission(
+        db, 
+        project_id=bc.project_id, 
+        action=models.ProjectActionType.BC_APPROVE_L1, 
+        user_id=approver_id
+    )
+    if not is_authorized:
+        raise ValueError("Permission Denied: You are not assigned to L1 Approval for this project.")
+
     # Check if it is SUBMITTED
-    if not bc or bc.status != models.BCStatus.SUBMITTED:
+    if bc.status != models.BCStatus.SUBMITTED:
         raise ValueError("BC must be in SUBMITTED status for L1 Validation.")
     
     bc.status = models.BCStatus.PENDING_L2
     bc.approver_l1_id = approver_id
     bc.approved_l1_at = datetime.now()
     db.commit()
+    
     pd_user = db.query(models.User).get(approver_id)
     pd_name = f"{pd_user.first_name} {pd_user.last_name}" if pd_user else "N/A"
 
-    admin_emails = get_emails_by_role(db, UserRole.ADMIN)
-    send_notification_email(
-        background_tasks,
-        admin_emails,
-        "BC Validated L1 - Final Approval (L2) Required",
-        "",
-        {
-            "message": "A BC has passed L1 validation and is now pending final Admin approval.",
-            "details": {"BC Number": bc.bc_number, "L1 Approver": f"{pd_name}"},
-            "link": f"/bcs/{bc.id}"
-        }
+    # --- UPDATED NOTIFICATIONS: Fetch L2 Approvers for this specific project ---
+    target_l2_approvers = get_project_users_by_action(
+        db, 
+        bc.project_id, 
+        models.ProjectActionType.BC_APPROVE_L2
     )
+    
+    # Fallback to Global Admins if no one assigned in Matrix
+    if not target_l2_approvers:
+        target_l2_approvers = db.query(models.User).filter(models.User.role == models.UserRole.ADMIN).all()
+
+    admin_emails = [u.email for u in target_l2_approvers if u.email]
+
+    if admin_emails:
+        send_notification_email(
+            background_tasks,
+            admin_emails,
+            "BC Validated L1 - Final Approval (L2) Required",
+            "",
+            {
+                "message": "A BC has passed L1 validation and is now pending final Admin approval.",
+                "details": {"BC Number": bc.bc_number, "L1 Approver": f"{pd_name}"},
+                "link": f"/configuration/bc/detail/{bc.id}"
+            }
+        )
 
     return bc
 
 
 def approve_bc_l2(db: Session, bc_id: int, approver_id: int):
-    # 1. Fetch the Approver User
-    approver = db.query(models.User).get(approver_id)
-    if not approver:
-        raise ValueError("Approver user not found.")
-
-    # --- SECURITY CHECK: Must be Admin ---
-    if approver.role != models.UserRole.ADMIN:
-        raise ValueError("Permission Denied: Only an Administrator can perform Final Approval (L2).")
-    # -------------------------------------
-
     bc = db.query(models.BonDeCommande).get(bc_id)
-    if not bc or bc.status != models.BCStatus.PENDING_L2:
+    if not bc:
+        raise ValueError("BC not found.")
+
+    # 1. Workflow Permission Check
+    is_authorized = check_workflow_permission(
+        db, 
+        project_id=bc.project_id, 
+        action=models.ProjectActionType.BC_APPROVE_L2, 
+        user_id=approver_id
+    )
+    if not is_authorized:
+        raise ValueError("Permission Denied: You are not assigned to L2 Approval for this project.")
+
+    if bc.status != models.BCStatus.PENDING_L2:
         raise ValueError("BC must be in PENDING_L2 status for Final Approval.")
     
     bc.status = models.BCStatus.APPROVED # Final
@@ -3149,30 +3172,68 @@ def get_all_bcs(db: Session, current_user: models.User, search: Optional[str] = 
     query = db.query(models.BonDeCommande)
 
     # 2. MANDATORY: Explicit Joins
-    # We join these tables so SQL can actually see the "name" and "short_name" columns
     query = query.join(models.InternalProject, models.BonDeCommande.project_id == models.InternalProject.id)
     query = query.join(models.SBC, models.BonDeCommande.sbc_id == models.SBC.id)
 
-    # 3. Role-based filtering
+    # =========================================================
+    # 3. ROLE-BASED FILTERING (The Fix)
+    # =========================================================
     role_str = str(current_user.role).upper()
+    
     if "ADMIN" in role_str or "RAF" in role_str:
-        pass # Admin sees everything
-    elif "PM" in role_str:
-        query = query.filter(
+        pass # Admin/RAF sees everything
+
+    elif "PM" in role_str or "PD" in role_str or "STAFF" in role_str:
+        # Define the exact actions/roles that grant visibility to a project's BCs
+        allowed_bc_actions =[
+            # Roles (Stakeholders)
+            models.ProjectActionType.ROLE_PD,
+            models.ProjectActionType.ROLE_PM,
+            models.ProjectActionType.ROLE_PC,
+            models.ProjectActionType.ROLE_RQC,
+            models.ProjectActionType.ROLE_SALES,
+            # BC Tasks
+            models.ProjectActionType.BC_CREATE_DRAFT,
+            models.ProjectActionType.BC_SUBMIT,
+            models.ProjectActionType.BC_APPROVE_L1,
+            models.ProjectActionType.BC_APPROVE_L2,
+            models.ProjectActionType.BC_GENERATE
+        ]
+        
+        # Ask the Matrix: Which projects is this user assigned to for the above actions?
+        allowed_projects_query = db.query(models.ProjectWorkflow.project_id).filter(
+            models.ProjectWorkflow.action_type.in_(allowed_bc_actions),
             or_(
-                models.BonDeCommande.creator_id == current_user.id,
-                models.InternalProject.project_manager_id == current_user.id
+                models.ProjectWorkflow.primary_users.any(id=current_user.id),
+                models.ProjectWorkflow.support_users.any(id=current_user.id)
             )
         )
+        # Extract to a simple list: [1, 5, 12]
+        allowed_project_ids = [row[0] for row in allowed_projects_query.all()]
+
+        # Apply the filter: You must either be authorized via the Matrix OR be the creator
+        if allowed_project_ids:
+            query = query.filter(
+                or_(
+                    models.BonDeCommande.project_id.in_(allowed_project_ids),
+                    models.BonDeCommande.creator_id == current_user.id
+                )
+            )
+        else:
+            # If not assigned to any project, they ONLY see BCs they explicitly created
+            query = query.filter(models.BonDeCommande.creator_id == current_user.id)
+
     elif "SBC" in role_str:
         if not current_user.sbc_id:
-            return []
+            return[]
         query = query.filter(
             models.BonDeCommande.sbc_id == current_user.sbc_id,
             models.BonDeCommande.status != models.BCStatus.DRAFT
         )
 
-    # 4. SEARCH LOGIC (Now correctly linked to joined tables)
+    # =========================================================
+    # 4. SEARCH LOGIC
+    # =========================================================
     if search:
         search_term = f"%{search}%"
         query = query.filter(
@@ -3182,26 +3243,59 @@ def get_all_bcs(db: Session, current_user: models.User, search: Optional[str] = 
                 models.SBC.name.ilike(search_term),
                 models.InternalProject.name.ilike(search_term),
                 models.BonDeCommande.creator.has(func.concat(models.User.first_name, " ", models.User.last_name).ilike(search_term)),
-                models.BonDeCommande.internal_project.project_manager.has(func.concat(models.User.first_name, " ", models.User.last_name).ilike(search_term)
-            ))
+                models.BonDeCommande.internal_project.has(
+                    models.InternalProject.project_manager.has(func.concat(models.User.first_name, " ", models.User.last_name).ilike(search_term))
+                )
+            )
         )
 
     # 5. Status Filter
     if status_filter and status_filter != "ALL":
         query = query.filter(models.BonDeCommande.status == status_filter)
 
-    # 6. EAGER LOADING & EXECUTION
-    # We use contains_eager because we already did .join() above. 
-    # This prevents the Cartesian Product warning.
-    return (
-        query.options(
-            contains_eager(models.BonDeCommande.internal_project),
-            contains_eager(models.BonDeCommande.sbc),
-            joinedload(models.BonDeCommande.creator) # creator wasn't joined manually, so joinedload is fine
-        )
-        .order_by(models.BonDeCommande.created_at.desc())
-        .all()
-    )
+    # 6. Fetch the BCs
+    bcs = query.order_by(models.BonDeCommande.created_at.desc()).all()
+
+    # =========================================================
+    # 7. INJECT PERMISSIONS (For dynamic Frontend Buttons)
+    # =========================================================
+    is_admin = current_user.role == models.UserRole.ADMIN
+    is_sbc = current_user.role == models.UserRole.SBC
+    
+    from collections import defaultdict
+    user_permissions_by_project = defaultdict(list)
+    
+    if not is_admin and not is_sbc:
+        project_ids = list(set(bc.project_id for bc in bcs))
+        
+        if project_ids:
+            workflows = db.query(models.ProjectWorkflow).filter(
+                models.ProjectWorkflow.project_id.in_(project_ids),
+                or_(
+                    models.ProjectWorkflow.primary_users.any(id=current_user.id),
+                    models.ProjectWorkflow.support_users.any(id=current_user.id)
+                )
+            ).all()
+            
+            for w in workflows:
+                action_val = w.action_type.value if hasattr(w.action_type, 'value') else w.action_type
+                user_permissions_by_project[w.project_id].append(action_val)
+
+    for bc in bcs:
+        if is_admin:
+            bc.user_permissions = [e.value for e in models.ProjectActionType]
+        elif is_sbc:
+            if bc.sbc_id == current_user.sbc_id:
+                bc.user_permissions = ["BC_CONFIRM"]
+            else:
+                bc.user_permissions =[]
+        else:
+            perms = user_permissions_by_project.get(bc.project_id,[])
+            if bc.creator_id == current_user.id and "BC_CREATE_DRAFT" not in perms:
+                perms.append("BC_CREATE_DRAFT")
+            bc.user_permissions = perms
+
+    return bcs
     
 def reject_bc(db: Session, bc_id: int, reason: str, rejector_id: int):
     bc = db.query(models.BonDeCommande).get(bc_id)
@@ -4050,22 +4144,22 @@ def import_planning_targets(db: Session, df: pd.DataFrame):
 
 def validate_bc_item(db: Session, item_id: int, user: models.User, action: str, comment: str = None):
     """
-    Handles QC or PM approval/rejection.
+    Handles QC or PM approval/rejection with Matrix Security.
     action: "APPROVE" or "REJECT"
     """
-    item = db.query(models.BCItem).get(item_id)
+    item = db.query(models.BCItem).options(joinedload(models.BCItem.bc)).get(item_id)
     if not item: raise ValueError("Item not found")
 
-    # 1. Determine Role
-    is_qc = user.role == UserRole.QUALITY # Adjust to your Enum
-    is_pm = user.role in [UserRole.PM, UserRole.ADMIN] # PMs and Admins can approve as PM
-    is_pd = user.role in [UserRole.PD, UserRole.ADMIN]
-    print(f"DEBUG: User Role: {user.role}, is_qc: {is_qc}, is_pm: {is_pm}, is_pd: {is_pd}")
-        
+    project_id = item.bc.project_id if item.bc else None
+    if not project_id: raise ValueError("Item not linked to a valid project.")
+
+    # 1. Determine Role via Matrix (Strict)
+    is_qc = check_workflow_permission(db, project_id, models.ProjectActionType.ACT_APPROVE_RQC, user.id)
+    is_pm = check_workflow_permission(db, project_id, models.ProjectActionType.ACT_APPROVE_PM, user.id)
+    is_pd = check_workflow_permission(db, project_id, models.ProjectActionType.ACT_APPROVE_PD, user.id)
 
     if not (is_qc or is_pm or is_pd):
-        print(f"user.role:{user.role}")
-        raise ValueError("Unauthorized role.")
+        raise ValueError("Permission Denied: You are not assigned to any validation role for this project.")
 
 
 
@@ -4160,7 +4254,17 @@ def generate_act_record(db: Session, bc_id: int, creator_id: int, item_ids: List
     if not bc:
         raise ValueError("BC not found.")
 
-    # 2. Fetch the Items requested for Acceptance
+    # 2. Workflow Permission Check
+    is_authorized = check_workflow_permission(
+        db, 
+        project_id=bc.project_id, 
+        action=models.ProjectActionType.ACT_GENERATE, 
+        user_id=creator_id
+    )
+    if not is_authorized:
+        raise ValueError("Permission Denied: You are not assigned to Generate ACTs for this project.")
+
+    # 3. Fetch the Items requested for Acceptance
     items = db.query(models.BCItem).options(
         joinedload(models.BCItem.merged_po) # Ensure we have the category
     ).filter(
@@ -4365,19 +4469,120 @@ def get_sbc_kpis(db: Session, user: models.User):
     }
 # backend/app/crud.py
 
-def get_sbc_acceptances(db: Session, user: models.User):
+def get_all_acts(db: Session, current_user: models.User, search: Optional[str] = None):
     """
-    Fetches the specific BC Items assigned to this SBC that are approved for payment.
+    Returns a list of all Acceptance Certificates (ACTs) with project-specific workflow filtering.
+    Injects 'user_permissions' for each row based on the Project Matrix.
     """
-    if user.role != "SBC" or not user.sbc_id:
-        return []
+    # 1. Start query from ServiceAcceptance
+    query = db.query(models.ServiceAcceptance).options(
+        joinedload(models.ServiceAcceptance.bc),
+        joinedload(models.ServiceAcceptance.creator),
+        joinedload(models.ServiceAcceptance.items)
+    )
 
-    acts = db.query(models.ServiceAcceptance).join(models.BonDeCommande).filter(
-        models.BonDeCommande.sbc_id == user.sbc_id
-    ).order_by(models.ServiceAcceptance.created_at.desc()).all()
-    
+    # 2. ROLE-BASED FILTERING
+    role_str = str(current_user.role).upper()
+
+    if "ADMIN" in role_str or "RAF" in role_str:
+        pass # Admin/RAF sees everything
+
+    elif "PM" in role_str or "PD" in role_str or "STAFF" in role_str:
+        # Define allowed actions for visibility
+        allowed_act_actions = [
+            models.ProjectActionType.ROLE_PD,
+            models.ProjectActionType.ROLE_PM,
+            models.ProjectActionType.ROLE_PC,
+            models.ProjectActionType.ROLE_RQC,
+            models.ProjectActionType.ACT_APPROVE_RQC,
+            models.ProjectActionType.ACT_APPROVE_PM,
+            models.ProjectActionType.ACT_APPROVE_PD,
+            models.ProjectActionType.ACT_GENERATE
+        ]
+
+        allowed_projects_query = db.query(models.ProjectWorkflow.project_id).filter(
+            models.ProjectWorkflow.action_type.in_(allowed_act_actions),
+            or_(
+                models.ProjectWorkflow.primary_users.any(id=current_user.id),
+                models.ProjectWorkflow.support_users.any(id=current_user.id)
+            )
+        )
+        allowed_project_ids = [row[0] for row in allowed_projects_query.all()]
+
+        # Filter by project OR creator
+        # ACT has bc_id, so we need to join BC to get project_id
+        query = query.join(models.BonDeCommande, models.ServiceAcceptance.bc_id == models.BonDeCommande.id)
+
+        if allowed_project_ids:
+            query = query.filter(
+                or_(
+                    models.BonDeCommande.project_id.in_(allowed_project_ids),
+                    models.ServiceAcceptance.creator_id == current_user.id
+                )
+            )
+        else:
+            query = query.filter(models.ServiceAcceptance.creator_id == current_user.id)
+
+    elif "SBC" in role_str:
+        if not current_user.sbc_id:
+            return []
+        query = query.join(models.BonDeCommande, models.ServiceAcceptance.bc_id == models.BonDeCommande.id)
+        query = query.filter(models.BonDeCommande.sbc_id == current_user.sbc_id)
+
+    # 3. SEARCH LOGIC
+    if search:
+        search_term = f"%{search}%"
+        # Since we might have already joined BC for PM/PD filtering, we handle it safely
+        if not any(j.mapper.class_ == models.BonDeCommande for j in query.get_label_info() if hasattr(j, 'mapper')):
+             # This is a bit complex in SQLAlchemy, simpler to check if search requires it
+             pass # In this specific implementation, search always joins if needed
+
+        # Add a join for search if not already there (safe to add if unique)
+        # Note: If PM filter already joined BC, this won't double join if handled correctly
+        query = query.filter(
+            or_(
+                models.ServiceAcceptance.act_number.ilike(search_term),
+                models.BonDeCommande.bc_number.ilike(search_term)
+            )
+        )
+
+    # 4. Fetch the ACTs
+    acts = query.order_by(models.ServiceAcceptance.created_at.desc()).all()
+
+    # 5. INJECT PERMISSIONS
+    is_admin = current_user.role == models.UserRole.ADMIN
+    is_sbc = current_user.role == models.UserRole.SBC
+
+    user_permissions_by_project = defaultdict(list)
+
+    if not is_admin and not is_sbc:
+        project_ids = list(set(act.bc.project_id for act in acts if act.bc))
+
+        if project_ids:
+            workflows = db.query(models.ProjectWorkflow).filter(
+                models.ProjectWorkflow.project_id.in_(project_ids),
+                or_(
+                    models.ProjectWorkflow.primary_users.any(id=current_user.id),
+                    models.ProjectWorkflow.support_users.any(id=current_user.id)
+                )
+            ).all()
+
+            for w in workflows:
+                action_val = w.action_type.value if hasattr(w.action_type, 'value') else w.action_type
+                user_permissions_by_project[w.project_id].append(action_val)
+
+    for act in acts:
+        if is_admin:
+            act.user_permissions = [e.value for e in models.ProjectActionType]
+        elif is_sbc:
+            act.user_permissions = [] # SBCs don't have special ACT actions in matrix yet
+        else:
+            # act.bc is loaded via joinedload
+            project_id = act.bc.project_id if act.bc else None
+            perms = user_permissions_by_project.get(project_id, [])
+            act.user_permissions = perms
+
     return acts
-
 
 
 def create_pm_fund_request(db: Session, pm_id: int, payload: schemas.FundRequestCreate):
@@ -5840,6 +6045,28 @@ def list_all_requests_global(db: Session, current_user: models.User):
 
     return query.order_by(models.Expense.created_at.desc()).all()
 
+def get_user_allowed_project_ids(db: Session, user_id: int, action_type: str = None):
+    """
+    Returns a list of project IDs where the user is either Primary or Support.
+    If action_type is provided, it strictly checks that action.
+    """
+    query = db.query(models.ProjectWorkflow.project_id)
+    
+    if action_type:
+        query = query.filter(models.ProjectWorkflow.action_type == action_type)
+        
+    query = query.filter(
+        or_(
+            models.ProjectWorkflow.primary_users.any(id=user_id),
+            models.ProjectWorkflow.support_users.any(id=user_id)
+        )
+    )
+    
+    # Returns[4, 7, 12...]
+    return [row[0] for row in query.all()]
+
+
+
 def search_expenses(
     db: Session, 
     user: models.User, 
@@ -5856,38 +6083,33 @@ def search_expenses(
 
     MANAGEMENT_ROLES = [models.UserRole.ADMIN, models.UserRole.RAF, models.UserRole.CEO]
     
-    # 1. Assignment-Based Filtering
+    # =========================================================
+    # 1. SECURITY FILTER (Decoupled Logic - FIX)
+    # =========================================================
+    
     if scope != "my" and user.role not in MANAGEMENT_ROLES:
-        # Join to Matrix with explicit ON clause to resolve ambiguity
-        query = query.join(
-            models.ProjectWorkflow,
-            models.Expense.project_id == models.ProjectWorkflow.project_id
-        )
+        target_action = None
         
-        # User is either Primary OR Support
-        user_in_workflow = or_(
-            models.ProjectWorkflow.primary_users.any(id=user.id),
-            models.ProjectWorkflow.support_users.any(id=user.id)
-        )
-
+        # Determine which action we are verifying
         if scope == "l1":
-            query = query.filter(
-                models.ProjectWorkflow.action_type == models.ProjectActionType.EXP_APPROVE_L1,
-                user_in_workflow
-            )
+            target_action = models.ProjectActionType.EXP_APPROVE_L1
         elif scope == "l2":
-             query = query.filter(
-                models.ProjectWorkflow.action_type == models.ProjectActionType.EXP_APPROVE_L2,
-                user_in_workflow
-            )
+            target_action = models.ProjectActionType.EXP_APPROVE_L2
+            
+        # Fetch exact project IDs this user is allowed to see for this action
+        allowed_pids = get_user_allowed_project_ids(db, user.id, target_action)
+        
+        if not allowed_pids:
+            # If the user has no allowed projects, force the query to return 0 results safely
+            query = query.filter(sa.sql.false())
         else:
-            # history, all: See projects where I am part of the team in any role
-            query = query.filter(user_in_workflow)
+            # Filter the expenses to ONLY include these allowed projects
+            query = query.filter(models.Expense.project_id.in_(allowed_pids))
 
-        # Apply distinct immediately after assignment join to handle M2M duplicates
-        query = query.distinct()
 
-    # 2. Status Logic
+    # =========================================================
+    # 2. STATUS SCOPE LOGIC
+    # =========================================================
     if scope == "my":
         query = query.filter(or_(
             models.Expense.requester_id == user.id,
@@ -5906,7 +6128,9 @@ def search_expenses(
     elif scope == "all":
         query = query.filter(models.Expense.status != models.ExpenseStatus.DRAFT)
 
-    # 3. Filters
+    # =========================================================
+    # 3. USER FILTERS
+    # =========================================================
     if filters.get("project_id"):
         query = query.filter(models.Expense.project_id == filters["project_id"])
     if filters.get("exp_type") and filters["exp_type"] != "ALL":
@@ -5916,13 +6140,12 @@ def search_expenses(
     if filters.get("start_date"):
         query = query.filter(models.Expense.created_at >= filters["start_date"])
     if filters.get("end_date"):
-        # Explicitly ensure we include the end date by targeting 1 sec before midnight
         end_val = filters["end_date"]
         query = query.filter(models.Expense.created_at <= f"{end_val} 23:59:59")
 
-    # 4. Final Result
+    # --- 4. PAGINATION ---
     total = query.count()
-    items = query.order_by(models.Expense.created_at.desc())\
+    items = query.order_by(sa.desc(models.Expense.created_at))\
                  .offset((page - 1) * limit)\
                  .limit(limit)\
                  .all()
@@ -5934,7 +6157,6 @@ def search_expenses(
         "size": limit,
         "pages": (total + limit - 1) // limit if limit > 0 else 1
     }
-
 def list_pending_l1(db: Session):
     """Liste toutes les dépenses en attente de validation L1 (PD)"""
     return db.query(models.Expense).filter(

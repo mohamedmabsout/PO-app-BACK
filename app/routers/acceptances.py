@@ -1,377 +1,158 @@
-# backend/app/routers/acceptances.py
-
-from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, status
-from fastapi.responses import StreamingResponse,FileResponse
+# in app/routers/acceptances.py
+from typing import List, Optional
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Query
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import or_
-import pandas as pd
-import io
-import os
-import shutil
-from typing import List, Optional
+from .. import crud, models, schemas, auth
 from ..dependencies import get_db
-from ..schemas import BulkValidationPayload,GenerateACTPayload,ServiceAcceptance,PayableActResponse
-from .. import crud
-from ..auth import get_current_user  # Import your authentication dependency
-from .. import models  # To specify the user model type
-from fastapi import BackgroundTasks # Import this
-from ..utils.pdf_generator import generate_act_pdf
+from fastapi.responses import StreamingResponse
+import io
+import pandas as pd
 from datetime import datetime
-router = APIRouter(
-    prefix="/api/acceptances",
-    tags=["Acceptances"],
-    # This ensures all routes in this file require an authenticated user
-    dependencies=[Depends(get_current_user)],
-)
 
-@router.get("/acts/all", response_model=List[ServiceAcceptance]) 
+router = APIRouter(prefix="/api/acceptances", tags=["Acceptance Management"])
+
+@router.get("/all", response_model=List[schemas.ServiceAcceptance])
 def list_all_acceptances(
-    search: Optional[str] = None,
+    search: Optional[str] = Query(None),
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user)
+    current_user: models.User = Depends(auth.get_current_user)
 ):
     """
-    Returns a list of all generated Acceptance Certificates (ACTs),
-    ordered by newest first. Supports search.
+    Returns a list of all Service Acceptances filtered by user role and project assignments.
+    Injects user_permissions for frontend action control.
     """
-    query = db.query(models.ServiceAcceptance).options(
-        joinedload(models.ServiceAcceptance.bc),
-        joinedload(models.ServiceAcceptance.creator),
-        joinedload(models.ServiceAcceptance.items) # To count items
-    )
+    return crud.get_all_acts(db, current_user, search=search)
 
-    if search:
-        search_term = f"%{search}%"
-        # Search by ACT Number OR BC Number
-        query = query.join(models.BonDeCommande).filter(
-            or_(
-                models.ServiceAcceptance.act_number.ilike(search_term),
-                models.BonDeCommande.bc_number.ilike(search_term)
-            )
-        )
-
-    return query.order_by(models.ServiceAcceptance.created_at.desc()).all()
-
-@router.post("/upload", status_code=status.HTTP_200_OK)
-def upload_and_process_acceptances(
-    background_tasks: BackgroundTasks,  # <-- Add this parameter
-    file: UploadFile = File(..., description="The Acceptance Excel file"),
+@router.post("/generate", response_model=schemas.ServiceAcceptance)
+def generate_act(
+    payload: schemas.ACTGenerationRequest, 
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
+    current_user: models.User = Depends(auth.get_current_user)
 ):
-    if not file.filename.endswith((".xlsx", ".xls")):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid file type. Please upload an Excel file.",
-        )
-
-    # 1. Create History Record (PROCESSING)
-    history_record = crud.create_upload_history_record(
-        db=db,
-        filename=file.filename,
-        status="PROCESSING",
-        user_id=current_user.id,
-    )
-
+    """
+    Creates a Service Acceptance (ACT) record for selected BC items.
+    Checks for ACT_GENERATE permission via Project Matrix.
+    """
     try:
-        # 2. Save file to disk
-        temp_dir = "temp_uploads"
-        os.makedirs(temp_dir, exist_ok=True)
-        temp_file_path = f"{temp_dir}/{history_record.id}_{file.filename}"
-
-        with open(temp_file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-
-        # 3. Dispatch Background Task
-        # Pass the file path, history ID, and user ID to the worker
-        background_tasks.add_task(
-            crud.process_acceptance_file_background,
-            temp_file_path,
-            history_record.id,
-            current_user.id,
-        )
-
-        # 4. Return Immediate Success
-        return {
-            "message": "Acceptance file uploaded. Processing started in background.",
-            "filename": file.filename,
-            "history_id": history_record.id,
-        }
-
-    except Exception as e:
-        # If saving to disk fails before dispatching, update history to failed immediately
-        history_record.status = "FAILED"
-        history_record.error_message = f"Upload failed: {str(e)}"
-        db.commit()
-        raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
-
-
-
-@router.get("/payable-acts", response_model=List[PayableActResponse])
-def get_acts_for_expense(
-    project_id: int,
-    current_expense_id: Optional[int] = None, # <--- ADD THIS
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user)
-):
-    """
-    Returns Approved 'Personne Physique' ACTs for a specific project
-    that are NOT currently linked to an active expense.
-    """
-    # Allowed: PMs (to create requests), PDs/Admins (for visibility)
-    # We don't strictly enforce require_roles here as it's a read-only helper, 
-    # but generally only internal staff should access it.
-    if current_user.role == models.UserRole.SBC:
-         raise HTTPException(status_code=403, detail="Not authorized")
-
-    acts = crud.get_payable_acts(db, project_id,current_expense_id)
-    
-    if not acts:
-        return []
-        
-    return acts
-
-
-@router.get("/bc/{id}/acts", status_code=status.HTTP_200_OK)
-def get_acts_for_bc(
-    id: int,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
-):
-    return db.query(models.ServiceAcceptance).filter(models.ServiceAcceptance.bc_id == id).all()
-
-# routers/acceptance.py
-
-@router.get("/bc/{bc_id}/status-report")
-def download_bc_acceptance_status(
-    bc_id: int,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user)
-):
-    """
-    Generates an Excel report showing the QC/PM validation status for all items in a BC.
-    """
-    # Fetch BC with items
-    bc = crud.get_bc_by_id(db, bc_id)
-    if not bc:
-        raise HTTPException(status_code=404, detail="BC not found")
-        
-    # Generate DataFrame
-    data = []
-    for item in bc.items:
-        row = {
-            "PO Ref": item.merged_po.po_no,
-            "Item Description": item.merged_po.item_description,
-            "Qty": item.quantity_sbc,
-            "QC Status": item.qc_validation_status,
-            "PM Status": item.pm_validation_status,
-            "Global Status": item.global_status,
-            "Rejections": item.rejection_count,
-            "Postponed Until": item.postponed_until.strftime('%Y-%m-%d') if item.postponed_until else ""
-        }
-        data.append(row)
-        
-    df = pd.DataFrame(data)
-    
-    # Export to Excel
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df.to_excel(writer, index=False, sheet_name='Acceptance Status')
-    
-    output.seek(0)
-    filename = f"Acceptance_Status_{bc.bc_number}.xlsx"
-    headers = {'Content-Disposition': f'attachment; filename="{filename}"'}
-    
-    return StreamingResponse(output, headers=headers)
-
-@router.post("/validate-items")
-def validate_items_bulk(
-    payload: BulkValidationPayload,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user)
-):
-    """
-    Validates multiple items at once using the existing logic.
-    """
-    success_count = 0
-    errors = []
-
-    for item_id in payload.item_ids:
-        try:
-            # Reuse your existing, correct logic
-            crud.validate_bc_item(db, item_id, current_user, payload.action, payload.comment)
-            success_count += 1
-        except ValueError as e:
-            errors.append(f"Item {item_id}: {str(e)}")
-        except Exception as e:
-            errors.append(f"Item {item_id}: Unexpected error")
-
-    if not success_count and errors:
-         # If everything failed, return error
-         raise HTTPException(status_code=400, detail=errors[0])
-    
-    return {
-        "message": f"Successfully processed {success_count} items.",
-        "errors": errors
-    }
-@router.post("/bc/{bc_id}/generate-act")
-def generate_act_endpoint(
-    bc_id: int,
-    payload: GenerateACTPayload, # { item_ids: [1, 2, 3] }
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user)
-):
-    """
-    Generates an Acceptance Certificate (ACT) PDF for the specified BC and items.
-    Returns the PDF as a streaming response.
-    """
-    bc = db.query(models.BonDeCommande).get(bc_id)
-    if not bc: raise HTTPException(404, "BC Not Found")
-
-    if current_user.role == "SBC":
-        if bc.sbc_id != current_user.sbc_id:
-             raise HTTPException(403, "Access Denied: Not your BC")
-    elif current_user.role not in ["ADMIN", "PD", "PM"]:
-         raise HTTPException(403, "Access Denied")
-    # Check if user is PD
-    try:
-        act = crud.generate_act_record(db, bc_id, current_user.id, payload.item_ids)
+        # Pass creator_id for permission check
+        return crud.generate_act_record(db, payload.bc_id, current_user.id, payload.item_ids)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail="Internal Server Error")
 
-    # 2. Generate the PDF (We need to build this utility)
-    # We pass the full ACT object (which has relationships to items, BC, etc.)
-    pdf_buffer = generate_act_pdf(act) 
-
-    # 3. Return the file
-    filename = f"{act.act_number}.pdf"
-    headers = {
-        'Content-Disposition': f'attachment; filename="{filename}"'
-    }
-    
-    return StreamingResponse(pdf_buffer, media_type='application/pdf', headers=headers)
-@router.get("/bc/{bc_id}/acts", response_model=List[ServiceAcceptance])
-def list_acts(bc_id: int, db: Session = Depends(get_db)):
-    return db.query(models.ServiceAcceptance).filter(models.ServiceAcceptance.bc_id == bc_id).all()
-
-# 2. Download Endpoint
-@router.get("/act/{act_id}/download")
-def download_act_pdf(
-    act_id: int, 
-    db: Session = Depends(get_db)
+@router.get("/sbc", response_model=List[schemas.ServiceAcceptance])
+def get_my_acceptances(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
 ):
-    # 1. Fetch the Data
-    act = db.query(models.ServiceAcceptance).options(
-        joinedload(models.ServiceAcceptance.items).joinedload(models.BCItem.merged_po),
-        joinedload(models.ServiceAcceptance.bc),
-        joinedload(models.ServiceAcceptance.creator)
-    ).filter(models.ServiceAcceptance.id == act_id).first()
+    """
+    SBC View: Returns all ACTs belonging to the logged-in SBC user.
+    """
+    if current_user.role != "SBC" or not current_user.sbc_id:
+        raise HTTPException(status_code=403, detail="Only SBC users can access this endpoint.")
     
-    if not act:
-        raise HTTPException(status_code=404, detail="ACT record not found")
+    # Reuses the secure get_all_acts logic which handles SBC filtering
+    return crud.get_all_acts(db, current_user)
 
-    # 2. Generate PDF in Memory (Stateless)
+@router.post("/item/{item_id}/validate")
+def validate_item(
+    item_id: int, 
+    payload: schemas.ValidationPayload, 
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """
+    Validates a BC item (QC, PM, or PD approval).
+    Checks for ACT_APPROVE_RQC, ACT_APPROVE_PM, or ACT_APPROVE_PD via Project Matrix.
+    """
     try:
-        pdf_buffer = generate_act_pdf(act)
-    except Exception as e:
-        print(f"PDF Gen Error: {e}")
-        raise HTTPException(status_code=500, detail="Failed to generate PDF")
+        return crud.validate_bc_item(db, item_id, current_user, payload.action, payload.comment)
+    except ValueError as e:
+        # Important: detailed error for frontend toast
+        raise HTTPException(status_code=403, detail=str(e))
 
-    # 3. Stream Response
-    filename = f"{act.act_number}.pdf"
-    headers = {
-        'Content-Disposition': f'attachment; filename="{filename}"'
-    }
-    
-    return StreamingResponse(
-        pdf_buffer, 
-        media_type='application/pdf', 
-        headers=headers
-    )
 @router.get("/export/excel")
-def export_acceptances_to_excel(
+def export_acts_to_excel(
     format: str = "details", 
     search: Optional[str] = None,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user)
+    current_user: models.User = Depends(auth.get_current_user)
 ):
+    """
+    Exports Acceptance Certificates to Excel with security filtering.
+    """
     df = crud.get_acceptance_export_dataframe(db, current_user, format, search)
     
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         df.to_excel(writer, index=False, sheet_name='Acceptance Export')
         
-        # Professional Excel Formatting
         worksheet = writer.sheets['Acceptance Export']
-        workbook = writer.book
-        # Auto-fit columns
         for i, col in enumerate(df.columns):
             column_len = max(df[col].astype(str).str.len().max(), len(col)) + 2
-            worksheet.set_column(i, i, min(column_len, 50)) # Cap width at 50
+            worksheet.set_column(i, i, min(column_len, 50))
 
     output.seek(0)
-    filename = f"Acceptances_{format}_{datetime.now().strftime('%Y%m%d')}.xlsx"
+    
+    filename = f"ACT_Export_{format}_{datetime.now().strftime('%Y%m%d')}.xlsx"
+    headers = {'Content-Disposition': f'attachment; filename="{filename}"'}
     return StreamingResponse(
         output, 
         media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        headers={'Content-Disposition': f'attachment; filename="{filename}"'}
+        headers=headers
     )
 
-# --- 2. EXPORT SINGLE ACT DETAILS (2 Sheets) ---
-@router.get("/act/{act_id}/export-details", status_code=status.HTTP_200_OK)
-def export_act_details(
-    act_id: int,
-    db: Session = Depends(get_db)
+@router.get("/{act_id}", response_model=schemas.ServiceAcceptance)
+def get_act_details(
+    act_id: int, 
+    db: Session = Depends(get_db), 
+    current_user: models.User = Depends(auth.get_current_user)
 ):
+    """
+    Fetches details for a single ACT with visibility security.
+    """
+    # Reuse the list logic with an ID filter for consistent security injection
+    # Or implement a dedicated crud.get_act_by_id that injects perms
     act = db.query(models.ServiceAcceptance).options(
-        joinedload(models.ServiceAcceptance.items).joinedload(models.BCItem.merged_po),
-        joinedload(models.ServiceAcceptance.items).joinedload(models.BCItem.rejection_history).joinedload(models.ItemRejectionHistory.rejected_by)
+        joinedload(models.ServiceAcceptance.bc),
+        joinedload(models.ServiceAcceptance.creator),
+        joinedload(models.ServiceAcceptance.items)
     ).filter(models.ServiceAcceptance.id == act_id).first()
 
     if not act:
-        raise HTTPException(status_code=404, detail="ACT not found")
+        raise HTTPException(status_code=404, detail="Acceptance not found")
 
-    # --- Sheet 1: Acceptance Details ---
-    accepted_data = []
-    for item in act.items:
-        accepted_data.append({
-            "PO Ref": item.merged_po.po_no,
-            "Site Code": item.merged_po.site_code,
-            "Description": item.merged_po.item_description,
-            "Quantity": item.quantity_sbc,
-            "Unit Price": item.unit_price_sbc,
-            "Total Amount": item.line_amount_sbc,
-            "Tax Rate": item.applied_tax_rate
-        })
-    df_accepted = pd.DataFrame(accepted_data)
-
-    # --- Sheet 2: Rejection History ---
-    rejection_data = []
-    for item in act.items:
-        for history in item.rejection_history:
-            rejection_data.append({
-                "PO Ref": item.merged_po.po_no,
-                "Item Description": item.merged_po.item_description,
-                "Rejected By": f"{history.rejected_by.first_name} {history.rejected_by.last_name}" if history.rejected_by else "Unknown",
-                "Rejection Date": history.rejected_at.strftime('%d/%m/%Y %H:%M'),
-                "Reason / Comment": history.comment
-            })
-    df_rejected = pd.DataFrame(rejection_data)
-
-    # Generate Excel
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df_accepted.to_excel(writer, sheet_name='Accepted Items', index=False)
+    # Security check: reuse the same logic as list_all_acceptances but for one record
+    # Simplified check for detail view
+    is_admin = current_user.role == models.UserRole.ADMIN
+    if not is_admin:
+        # Check if user is linked to the project in any capacity
+        is_assigned = db.query(models.ProjectWorkflow).filter(
+            models.ProjectWorkflow.project_id == act.bc.project_id,
+            or_(
+                models.ProjectWorkflow.primary_users.any(id=current_user.id),
+                models.ProjectWorkflow.support_users.any(id=current_user.id)
+            )
+        ).first()
         
-        if not df_rejected.empty:
-            df_rejected.to_excel(writer, sheet_name='Rejection History', index=False)
-        else:
-            # Create an empty sheet with a note if no rejections
-            pd.DataFrame({'Note': ['No rejections for these items']}).to_excel(writer, sheet_name='Rejection History', index=False)
+        if not is_assigned and act.creator_id != current_user.id:
+            # Check SBC ownership
+            if current_user.role == "SBC" and act.bc.sbc_id == current_user.sbc_id:
+                pass
+            else:
+                raise HTTPException(status_code=403, detail="Access Denied: You are not assigned to this project.")
 
-    output.seek(0)
-    filename = f"ACT_Details_{act.act_number}.xlsx"
-    headers = {'Content-Disposition': f'attachment; filename="{filename}"'}
-    return StreamingResponse(output, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', headers=headers)
+    # Inject permissions manually for single record
+    if is_admin:
+        act.user_permissions = [e.value for e in models.ProjectActionType]
+    else:
+        workflows = db.query(models.ProjectWorkflow).filter(
+            models.ProjectWorkflow.project_id == act.bc.project_id,
+            or_(
+                models.ProjectWorkflow.primary_users.any(id=current_user.id),
+                models.ProjectWorkflow.support_users.any(id=current_user.id)
+            )
+        ).all()
+        act.user_permissions = [w.action_type.value if hasattr(w.action_type, 'value') else w.action_type for w in workflows]
+
+    return act

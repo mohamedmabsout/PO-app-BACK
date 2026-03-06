@@ -41,6 +41,7 @@ class ProjectActionType(str, enum.Enum):
     ACT_APPROVE_RQC = "ACT_APPROVE_RQC"
     ACT_APPROVE_PM  = "ACT_APPROVE_PM"
     ACT_APPROVE_PD  = "ACT_APPROVE_PD"
+    ACT_GENERATE    = "ACT_GENERATE"
 
 class ProjectRoleType(str, enum.Enum):
     PD = "PD"           # Project Director

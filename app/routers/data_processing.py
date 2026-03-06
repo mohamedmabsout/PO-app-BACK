@@ -478,9 +478,6 @@ def generate_bc(
         print(e)
         raise HTTPException(status_code=500, detail="Failed to generate BC")
 
-
-# data_router.py
-
 @router.get("/bc/list/{status}", response_model=List[schemas.BCResponse])
 def list_bcs(
     status: str, 
@@ -516,7 +513,7 @@ def list_bcs_ready_for_act(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
-    # 1. Start the query and join InternalProject so we can check the project manager
+    # 1. Start the query and join InternalProject
     query = db.query(models.BonDeCommande).join(
         models.InternalProject, models.BonDeCommande.project_id == models.InternalProject.id
     ).options(
@@ -527,24 +524,124 @@ def list_bcs_ready_for_act(
         models.BonDeCommande.status == models.BCStatus.APPROVED
     )
 
-    # 2. Apply Visibility Security
-    if current_user.role == models.UserRole.PM:
-        # THE FIX: PM sees BC if they created it OR if they are the PM of the project
-        query = query.filter(
-            or_(
-                models.BonDeCommande.creator_id == current_user.id,
-                models.InternalProject.project_manager_id == current_user.id
-            )
-        )
-    elif current_user.role == models.UserRole.SBC:
-        # SBC only sees their own assigned BCs
-        if not current_user.sbc_id:
-            return []
-        query = query.filter(models.BonDeCommande.sbc_id == current_user.sbc_id)
+    # 2. Apply Visibility Security (Matrix Check)
+    role_str = str(current_user.role).upper()
+    if role_str not in ["ADMIN", "RAF", "CEO"]:
+        if role_str == "SBC":
+            if not current_user.sbc_id:
+                return []
+            query = query.filter(models.BonDeCommande.sbc_id == current_user.sbc_id)
+        else:
+            # PM / PD / Staff: Only see projects they are assigned to via ProjectWorkflow
+            # Define relevant roles for ACT generation visibility
+            relevant_actions = [
+                models.ProjectActionType.ROLE_PD,
+                models.ProjectActionType.ROLE_PM,
+                models.ProjectActionType.ROLE_PC,
+                models.ProjectActionType.ROLE_RQC,
+                models.ProjectActionType.ACT_GENERATE
+            ]
 
-    # Note: ADMIN and PD roles will see all approved BCs as no specific filter is applied to them
+            query = query.join(
+                models.ProjectWorkflow, 
+                models.BonDeCommande.project_id == models.ProjectWorkflow.project_id
+            ).filter(
+                models.ProjectWorkflow.action_type.in_(relevant_actions),
+                or_(
+                    models.ProjectWorkflow.primary_users.any(id=current_user.id),
+                    models.ProjectWorkflow.support_users.any(id=current_user.id),
+                    models.BonDeCommande.creator_id == current_user.id
+                )
+            ).distinct()
 
     return query.order_by(models.BonDeCommande.approved_l2_at.desc()).all()
+
+@router.get("/bc/{bc_id}", response_model=schemas.BCResponse)
+def get_bc_details(bc_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
+    bc = crud.get_bc_by_id(db, bc_id)
+    if not bc:
+        raise HTTPException(status_code=404, detail="BC not found")
+
+    # --- SECURITY CHECK: Global Admin / RAF / Finance can see everything ---
+    if current_user.role in [models.UserRole.ADMIN, models.UserRole.RAF, models.UserRole.CEO]:
+        return bc
+
+    # --- SECURITY CHECK: SBC can see their own BCs ---
+    if current_user.role == "SBC":
+        if bc.sbc_id != current_user.sbc_id:
+             raise HTTPException(403, "Access Denied: This BC does not belong to you.")
+        return bc
+
+    # --- SECURITY CHECK: Project Team Members ---
+    is_assigned_to_project = db.query(models.ProjectWorkflow).filter(
+        models.ProjectWorkflow.project_id == bc.project_id,
+        or_(
+            models.ProjectWorkflow.primary_users.any(id=current_user.id),
+            models.ProjectWorkflow.support_users.any(id=current_user.id)
+        )
+    ).first()
+
+    if not is_assigned_to_project and bc.creator_id != current_user.id:
+         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access Denied: You are not assigned to this project team.")
+
+    return bc
+
+@router.post("/bc/{bc_id}/submit")
+def submit_bon_de_commande(
+    bc_id: int, 
+    background_tasks: BackgroundTasks, 
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user),
+):
+    try:
+        # Move from DRAFT to SUBMITTED
+        bc = crud.submit_bc(db, bc_id, current_user.id)
+        
+        # --- NEW: Notifications based on Matrix ---
+        target_approvers = crud.get_project_users_by_action(
+            db, 
+            bc.project_id, 
+            models.ProjectActionType.BC_APPROVE_L1
+        )
+        
+        # Fallback to PDs if no one assigned
+        if not target_approvers:
+            target_approvers = db.query(models.User).filter(models.User.role == models.UserRole.PD).all()
+
+        pd_emails = [u.email for u in target_approvers if u.email]
+        if pd_emails:
+            for u in target_approvers:
+                crud.create_notification(
+                    db,
+                    recipient_id=u.id,
+                    type=models.NotificationType.TODO,
+                    module=models.NotificationModule.BC,
+                    title="Approval Required",
+                    message=f"BC {bc.bc_number} submitted by {current_user.first_name} requires L1 validation.",
+                    link=f"/configuration/bc/detail/{bc.id}",
+                    created_at=datetime.now(),
+                )
+            crud.send_notification_email(
+                background_tasks,
+                pd_emails,
+                "BC Submitted - L1 Approval Required",
+                "",
+                {
+                    "message": "A new Purchase Order (BC) has been submitted and requires Project Director validation.",
+                    "details": {
+                        "BC Number": bc.bc_number,
+                        "Project": bc.internal_project.name,
+                        "Amount": f"{bc.total_amount_ttc:,.2f} MAD",
+                        "Subcontractor": bc.sbc.short_name
+                    },
+                    "link": f"/configuration/bc/detail/{bc.id}"
+                }
+            )
+
+        db.commit()
+        return bc
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @router.post("/bc/{bc_id}/approve-l1")
 def approve_l1(
@@ -553,28 +650,36 @@ def approve_l1(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
 ):
-    # Check if PD
-    bc = crud.approve_bc_l1(db, bc_id, current_user.id,background_tasks)
+    try:
+        bc = crud.approve_bc_l1(db, bc_id, current_user.id, background_tasks)
 
-    # FIND ADMINS
-    admins = db.query(models.User).filter(models.User.role == "Admin").all()
-
-    for admin in admins:
-        crud.create_notification(
-            db,
-            recipient_id=admin.id,
-            type=models.NotificationType.TODO,
-            module=models.NotificationModule.BC,
-            title="Final Approval Required",
-            message=f"BC {bc.bc_number} validated L1. Pending final approval.",
-            link=f"/configuration/bc/detail/{bc.id}",
-            created_at=datetime.now(),
+        # FIND L2 APPROVERS
+        target_l2_approvers = crud.get_project_users_by_action(
+            db, 
+            bc.project_id, 
+            models.ProjectActionType.BC_APPROVE_L2
         )
-        send_bc_status_email(bc, admin.email, "VALIDATED L1 (Waiting L2)", background_tasks)
+        
+        if not target_l2_approvers:
+            target_l2_approvers = db.query(models.User).filter(models.User.role == "Admin").all()
 
-    db.commit()
-    return bc
+        for admin in target_l2_approvers:
+            crud.create_notification(
+                db,
+                recipient_id=admin.id,
+                type=models.NotificationType.TODO,
+                module=models.NotificationModule.BC,
+                title="Final Approval Required",
+                message=f"BC {bc.bc_number} validated L1. Pending final approval.",
+                link=f"/configuration/bc/detail/{bc.id}",
+                created_at=datetime.now(),
+            )
+            send_bc_status_email(bc, admin.email, "VALIDATED L1 (Waiting L2)", background_tasks)
 
+        db.commit()
+        return bc
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @router.post("/bc/{bc_id}/approve-l2")
 def approve_l2(
@@ -583,122 +688,27 @@ def approve_l2(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
-    # Check if Admin
-    bc = crud.approve_bc_l2(db, bc_id, current_user.id)
-
-    # NOTIFY CREATOR
-    crud.create_notification(
-        db,
-        recipient_id=bc.creator_id,
-        type=models.NotificationType.APP,
-        module=models.NotificationModule.BC,
-        title="BC Approved",
-        message=f"Your BC {bc.bc_number} has been fully approved.",
-        link=f"/configuration/bc/detail/{bc.id}",
-        created_at=datetime.now(),
-    )
-    if bc.sbc and bc.sbc.email:
-        send_bc_status_email(bc, bc.sbc.email, "APPROVED", background_tasks)
-
-    db.commit()
-    return bc
-
-
-@router.get("/bc/{bc_id}/pdf")
-def get_bc_pdf(
-    bc_id: int,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user),
-):
-    bc = crud.get_bc_by_id(db, bc_id)
-    if not bc:
-        raise HTTPException(status_code=404, detail="Bon de Commande not found")
-
-    # 1. Generate PDF into memory buffer
-    pdf_buffer = pdf_generator.generate_bc_pdf(bc)
-
-    # 2. Return as a stream
-    filename = f"BC_{bc.bc_number}.pdf"
-
-    return StreamingResponse(
-        pdf_buffer,
-        media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
-
-
-@router.post("/import/assign-projects-only")
-async def assign_projects_only(
-    file: UploadFile = File(...),
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user),
-):
-    # if current_user.role != auth.UserRole.ADMIN:
-    #     raise HTTPException(status_code=403, detail="Admin only")
-
     try:
-        contents = await file.read()
-        stats = crud.bulk_assign_projects_only(db, contents)
-        return {"message": "Project assignment complete", "stats": stats}
-    except Exception as e:
-        print(f"Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        bc = crud.approve_bc_l2(db, bc_id, current_user.id)
 
-
-@router.post("/bc/{bc_id}/reject")
-def reject_bon_de_commande(
-    bc_id: int,
-    rejection_data: schemas.BCRejectionRequest,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user),
-):
-    return crud.reject_bc(
-        db, bc_id=bc_id, reason=rejection_data.reason, rejector_id=current_user.id
-    )
-
-
-@router.post("/bc/{bc_id}/submit")
-def submit_bon_de_commande(
-    bc_id: int,
-    background_tasks: BackgroundTasks, 
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
-):
-    bc = crud.submit_bc(db, bc_id)
-
-    # FIND PROJECT DIRECTORS
-    pds = (
-        db.query(models.User).filter(models.User.role == "PD").all()
-    )  # Or "Project Director"
-
-    for pd in pds:
+        # NOTIFY CREATOR
         crud.create_notification(
             db,
-            recipient_id=pd.id,
-            type=models.NotificationType.TODO,
+            recipient_id=bc.creator_id,
+            type=models.NotificationType.APP,
             module=models.NotificationModule.BC,
-            title="Approval Required",
-            message=f"BC {bc.bc_number} submitted by {current_user.first_name} requires L1 validation.",
+            title="BC Approved",
+            message=f"Your BC {bc.bc_number} has been fully approved.",
             link=f"/configuration/bc/detail/{bc.id}",
             created_at=datetime.now(),
         )
-        send_bc_status_email(bc, pd.email, "SUBMITTED (Waiting L1)", background_tasks)
+        if bc.sbc and bc.sbc.email:
+            send_bc_status_email(bc, bc.sbc.email, "APPROVED", background_tasks)
 
-    db.commit()
-    return bc
-
-
-@router.get("/bc/{bc_id}", response_model=schemas.BCResponse)
-def get_bc_details(bc_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
-    bc = crud.get_bc_by_id(db, bc_id)
-    if not bc:
-        raise HTTPException(status_code=404, detail="BC not found")
-
-    if current_user.role == "SBC":
-        if bc.sbc_id != current_user.sbc_id:
-             raise HTTPException(403, "Access Denied: This BC does not belong to you.")
-
-    return bc
+        db.commit()
+        return bc
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @router.put("/bc/{bc_id}", response_model=schemas.BCResponse)
 def update_bc(
@@ -720,11 +730,58 @@ def cancel_bc_endpoint(
 ):
     """Cancels a Bon de Commande if it's in DRAFT status."""
     try:
-        # Pass the current user to the CRUD function for ownership check
         crud.cancel_bc(db, bc_id, current_user.id)
         return {"message": "BC cancelled successfully."}
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+
+@router.post("/bc/{bc_id}/reject")
+def reject_bon_de_commande(
+    bc_id: int,
+    rejection_data: schemas.BCRejectionRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user),
+):
+    try:
+        return crud.reject_bc(
+            db, bc_id=bc_id, reason=rejection_data.reason, rejector_id=current_user.id
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@router.get("/bc/{bc_id}/pdf")
+def get_bc_pdf(
+    bc_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user),
+):
+    bc = crud.get_bc_by_id(db, bc_id)
+    if not bc:
+        raise HTTPException(status_code=404, detail="Bon de Commande not found")
+
+    pdf_buffer = pdf_generator.generate_bc_pdf(bc)
+    filename = f"BC_{bc.bc_number}.pdf"
+
+    return StreamingResponse(
+        pdf_buffer,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+@router.post("/import/assign-projects-only")
+async def assign_projects_only(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user),
+):
+    try:
+        contents = await file.read()
+        stats = crud.bulk_assign_projects_only(db, contents)
+        return {"message": "Project assignment complete", "stats": stats}
+    except Exception as e:
+        print(f"Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.post("/bc/item/{item_id}/validate")
 def validate_item(
     item_id: int, 
@@ -733,8 +790,6 @@ def validate_item(
     current_user: models.User = Depends(auth.get_current_user)
 ):
     return crud.validate_bc_item(db, item_id, current_user, payload.action, payload.comment)
-
-
 
 @router.get("/stats")
 def get_stats(
@@ -760,36 +815,28 @@ def list_transactions(
         db, current_user, page, limit, type, status, start_date, end_date, search
     )
 
-
 @router.get("/requests/pending")
 def read_pending_requests(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
-    # Determine if we filter by user (PD) or show all (Admin)
-    user_id_to_filter = current_user.id if current_user.role == models.UserRole.PD else None
-    
-    # CRITICAL: If you don't return the result of crud.get_pending_requests, it returns null
     data = crud.get_pending_requests(db)
     return data
 
-# --- STEP 1: PM SUBMITS ---
 @router.post("/request")
 def pm_submit_request(
     payload: schemas.FundRequestCreate, 
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user) # Helper for PM role
+    current_user: models.User = Depends(auth.get_current_user) 
 ):
     return crud.create_pm_fund_request(db, current_user.id, payload)
 
-
-# --- STEP 2: PD VALIDATES ---
 @router.post("/request/{req_id}/pd-validate")
 def pd_validate(
     req_id: int,
     payload: schemas.PDReviewAction,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user) # Helper for PD role
+    current_user: models.User = Depends(auth.get_current_user)
 ):
     req = db.query(models.FundRequest).get(req_id)
     if req.status not in [models.FundRequestStatus.SUBMITTED, models.FundRequestStatus.PARTIALLY_PAID]:
@@ -797,8 +844,6 @@ def pd_validate(
     
     return crud.pd_validate_request(db, req_id, current_user.id, payload)
 
-
-# --- STEP 3: ADMIN AUTHORIZES ---
 @router.post("/request/{req_id}/admin-authorize")
 def admin_authorize(
     req_id: int,
@@ -812,116 +857,29 @@ def admin_authorize(
     
     return crud.admin_authorize_request(db, req_id, current_user.id, payload)
 
-
-# --- STEP 4: RAF CONFIRMS ---
 @router.post("/request/{req_id}/raf-confirm")
 async def raf_confirm(
     req_id: int,
     item_confirmations: str = Form(...), # JSON string
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user) # Helper for RAF role
+    current_user: models.User = Depends(auth.get_current_user) 
 ):
-    req = db.query(models.FundRequest).get(req_id)
-    # if req.status != models.FundRequestStatus.TO_TRANSFER:
-    #     raise HTTPException(status_code=400, detail="Request not ready for reception.")
-
-    # 1. Save File
     file_name = f"RAF_CONFIRM_{req_id}_{file.filename}"
     save_path = f"uploads/caisse_reception/{file_name}"
     with open(save_path, "wb") as buffer:
         buffer.write(await file.read())
 
-    # 2. Parse confirmations
     confirm_dict = json.loads(item_confirmations)
-
     return crud.raf_confirm_reception(db, req_id, current_user.id, confirm_dict, file_name)
 
-# @router.post("/request")
-# def create_fund_request(    background_tasks: BackgroundTasks, 
-
-#     payload: schemas.FundRequestCreate,
-#     db: Session = Depends(get_db),
-#     current_user: models.User = Depends(auth.get_current_user)
-# ):
-#     if current_user.role not in [models.UserRole.PD, models.UserRole.ADMIN]:
-#         raise HTTPException(
-#             status_code=status.HTTP_403_FORBIDDEN,
-#             detail="Only Project Directors or Admins can create fund requests."
-#         )
-
-#     req = crud.create_fund_request(db, current_user.id, payload.items) 
-#     admins = db.query(models.User).filter(models.User.role == "ADMIN").all()
-#     admin_emails = [u.email for u in admins if u.email]
-    
-#     if admin_emails:
-#         send_email_background(
-#             background_tasks=background_tasks,
-#             subject="New Fund Request",
-#             email_to=admin_emails,
-#             body=f"PD {current_user.last_name} requested funds. Ref: {req.request_number}"
-#         )
-
-#     return req
-
-
-# @router.post("/request/{req_id}/review")
-# def review_fund_request(
-#     req_id: int, 
-#     payload: schemas.FundRequestReview,
-#     db: Session = Depends(get_db),
-#     current_user: models.User = Depends(auth.get_current_user)
-# ):
-#     if current_user.role not in [models.UserRole.ADMIN]:
-#         raise HTTPException(403, "Only Admins can review requests")
-
-#     if payload.action == "REJECT":
-#         # Handle rejection (simple status update)
-#         req = db.query(models.FundRequest).get(req_id)
-#         req.status = models.FundRequestStatus.REJECTED
-#         db.commit()
-#         return {"message": "Request Rejected"}
-    
-#     # Handle Approval
-#     # Convert list to dict for easier lookup {item_id: amount}
-#     approved_map = {str(i.item_id): i.approved_amount for i in payload.items}
-    
-#     crud.approve_fund_request(db, req_id, current_user.id, approved_map)
-#     return {"message": "Request Approved"}
-
-@router.get("/request/{req_id}", response_model=schemas.FundRequestDetail) # <--- USE THE NEW SCHEMA
+@router.get("/request/{req_id}", response_model=schemas.FundRequestDetail)
 def get_fund_request_details(
     req_id: int,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
     return crud.get_request_by_id(db, req_id)
-
-# # In backend/app/routers/data.py
-# import json
-# import logging
-
-# logger = logging.getLogger(__name__)
-# @router.post("/request/{req_id}/confirm")
-# async def confirm_reception(
-#     req_id: int, 
-#     file: UploadFile = File(...), 
-#     item_confirmations: str = Form(...), # JSON string from frontend
-#     db: Session = Depends(get_db)
-# ):
-#     # 1. Save file to disk
-#     filename = f"CONFIRM_REQ_{req_id}_{file.filename}"
-#     file_path = os.path.join("uploads/caisse_reception", filename)
-#     with open(file_path, "wb") as buffer:
-#         buffer.write(await file.read())
-
-#     # 2. Parse the JSON confirmations
-#     import json
-#     confirm_dict = json.loads(item_confirmations)
-
-#     # 3. Call the CRUD (Passing 'filename' as the 'file_path' argument)
-#     return crud.confirm_fund_reception(db, req_id, confirm_dict, filename)
-
 
 @router.get("/wallets-summary")
 def get_wallets_summary(
@@ -931,48 +889,10 @@ def get_wallets_summary(
     if current_user.role not in [models.UserRole.ADMIN, models.UserRole.PD, models.UserRole.RAF]:
         raise HTTPException(403, "Access denied")
     return crud.get_all_wallets_summary(db)
+
 @router.post("/request/{req_id}/acknowledge-variance")
 def ack_variance(req_id: int, payload: dict = Body(...), db: Session = Depends(get_db)):
     return crud.acknowledge_variance(db, req_id, payload.get("note"))
-
-# @router.post("/request/{req_id}/process")
-# def process_request_endpoint(
-#     req_id: int, 
-#     payload: schemas.FundRequestReviewAction,
-#         background_tasks: BackgroundTasks, # <--- Add this
-
-#     db: Session = Depends(get_db),
-#     current_user: models.User = Depends(auth.get_current_user)
-# ):
-#     if current_user.role != models.UserRole.ADMIN:
-#         raise HTTPException(403, "Admins only")
-        
-#     try:
-#         req = crud.process_fund_request(db, req_id, payload, current_user.id)
-        
-#         # 2. Send Notifications (If Approved)
-#         if payload.action == "APPROVE":
-#             # Find unique PMs involved in this request to notify them
-#             # We can get them from the items
-#             pm_ids = set(i.target_pm_id for i in req.items)
-#             pms = db.query(models.User).filter(models.User.id.in_(pm_ids)).all()
-            
-#             emails = [pm.email for pm in pms if pm.email]
-            
-#             if emails:
-#                 subject = f"Funds Approved: Request #{req.request_number}"
-#                 body = f"""
-#                 <h3>Funds Approved</h3>
-#                 <p>The Admin has approved a payment for request <strong>{req.request_number}</strong>.</p>
-#                 <p>Please log in to your Caisse Dashboard to confirm receipt.</p>
-#                 """
-#                 send_email_background(background_tasks, subject, emails, body)
-
-#         return {"message": "Request processed and notifications sent."}
-        
-#     except ValueError as e:
-#         raise HTTPException(400, str(e))
-
 
 @router.get("/history/grouped")
 def get_history_grouped(
@@ -983,54 +903,33 @@ def get_history_grouped(
 ):
     return crud.get_grouped_history(db, page, limit, status)
 
-
 @router.get("/by-sbc/{sbc_id}")
 def get_bc_items_for_sbc_selection(
     sbc_id: int, 
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
-    """
-    Returns items from approved BCs to allow PMs to link advances.
-    """
     items = crud.get_bc_items_by_sbc(db, sbc_id)
-    
-    # We transform the data here so the frontend React-Select can use it directly
     output = []
     for item in items:
-        # Create a descriptive label: [BC Number] - [Site Code] - [Description snippet]
         site = item.merged_po.site_code if item.merged_po else "No Site"
         desc = item.merged_po.item_description[:40] if item.merged_po else "No Description"
         
         output.append({
-            "value": item.id, # The BCItem ID
+            "value": item.id,
             "label": f"{item.bc.bc_number} | {site} ({desc}...)",
             "bc_number": item.bc.bc_number
         })
-        
     return output
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 @router.get("/reception-file/{filename}")
 def get_reception_file(filename: str):
-    # Get the root of your project (where the 'backend' folder usually is)
-    # Since you run 'uvicorn app.main:app' from the 'backend' folder:
     cwd = os.getcwd() 
-    
-    # Construct path: backend/uploads/caisse_reception/filename
     file_path = os.path.join(cwd, "uploads", "caisse_reception", filename)
-    
-    # DEBUG: Check your terminal/console after clicking 'View File'
-    # It will show exactly where the code is looking
-    print(f"--- FILE DEBUG ---")
-    print(f"CWD: {cwd}")
-    print(f"Searching for: {file_path}")
-    print(f"Exists: {os.path.exists(file_path)}")
-    
     if not os.path.exists(file_path):
-        # We return the path in the error so you can see it in the browser
         raise HTTPException(status_code=404, detail=f"File not found at: {file_path}")
-        
     return FileResponse(file_path)
+
 @router.put("/bulk-update-category")
 def bulk_update_category(
     payload: schemas.BulkCategoryUpdate,
