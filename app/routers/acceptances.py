@@ -24,8 +24,31 @@ def list_all_acceptances(
     """
     return crud.get_all_acts(db, current_user, search=search)
 
-@router.post("/generate", response_model=schemas.ServiceAcceptance)
-def generate_act(
+@router.post("/validate-items")
+def validate_items(
+    payload: schemas.BulkValidationPayload, 
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """
+    Bulk Validates BC items (QC, PM, or PD approval/rejection).
+    Checks for permissions via Project Matrix once per BC.
+    """
+    try:
+        return crud.validate_bc_items(
+            db, 
+            payload.bc_id, 
+            payload.item_ids, 
+            current_user, 
+            payload.action, 
+            payload.comment
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+
+@router.post("/bc/{bc_id}/generate-act")
+def generate_act_endpoint(
+    bc_id: int,
     payload: schemas.ACTGenerationRequest, 
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
@@ -36,9 +59,53 @@ def generate_act(
     """
     try:
         # Pass creator_id for permission check
-        return crud.generate_act_record(db, payload.bc_id, current_user.id, payload.item_ids)
+        act = crud.generate_act_record(db, bc_id, current_user.id, payload.item_ids)
+        # Note: Frontend might expect a file blob if it calls directly, 
+        # but the snippet shows it handling blobs if it gets one.
+        # If the frontend expects the PDF immediately:
+        from ..utils import pdf_generator
+        pdf_buffer = pdf_generator.generate_act_pdf(act)
+        filename = f"ACT_{act.act_number}.pdf"
+        return StreamingResponse(
+            pdf_buffer,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+@router.get("/bc/{bc_id}/acts", response_model=List[schemas.ServiceAcceptance])
+def get_acts_for_bc(
+    bc_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """
+    Returns all ACTs generated for a specific BC.
+    """
+    return db.query(models.ServiceAcceptance).filter(models.ServiceAcceptance.bc_id == bc_id).all()
+
+@router.get("/act/{act_id}/download")
+def download_act_pdf(
+    act_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """
+    Generates and returns the PDF for a specific ACT.
+    """
+    act = db.query(models.ServiceAcceptance).get(act_id)
+    if not act:
+        raise HTTPException(status_code=404, detail="ACT not found")
+    
+    from ..utils import pdf_generator
+    pdf_buffer = pdf_generator.generate_act_pdf(act)
+    filename = f"ACT_{act.act_number}.pdf"
+    return StreamingResponse(
+        pdf_buffer,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
 
 @router.get("/sbc", response_model=List[schemas.ServiceAcceptance])
 def get_my_acceptances(
@@ -62,13 +129,11 @@ def validate_item(
     current_user: models.User = Depends(auth.get_current_user)
 ):
     """
-    Validates a BC item (QC, PM, or PD approval).
-    Checks for ACT_APPROVE_RQC, ACT_APPROVE_PM, or ACT_APPROVE_PD via Project Matrix.
+    Validates a single BC item (Legacy/Individual check).
     """
     try:
         return crud.validate_bc_item(db, item_id, current_user, payload.action, payload.comment)
     except ValueError as e:
-        # Important: detailed error for frontend toast
         raise HTTPException(status_code=403, detail=str(e))
 
 @router.get("/export/excel")
@@ -111,8 +176,6 @@ def get_act_details(
     """
     Fetches details for a single ACT with visibility security.
     """
-    # Reuse the list logic with an ID filter for consistent security injection
-    # Or implement a dedicated crud.get_act_by_id that injects perms
     act = db.query(models.ServiceAcceptance).options(
         joinedload(models.ServiceAcceptance.bc),
         joinedload(models.ServiceAcceptance.creator),
@@ -122,11 +185,8 @@ def get_act_details(
     if not act:
         raise HTTPException(status_code=404, detail="Acceptance not found")
 
-    # Security check: reuse the same logic as list_all_acceptances but for one record
-    # Simplified check for detail view
     is_admin = current_user.role == models.UserRole.ADMIN
     if not is_admin:
-        # Check if user is linked to the project in any capacity
         is_assigned = db.query(models.ProjectWorkflow).filter(
             models.ProjectWorkflow.project_id == act.bc.project_id,
             or_(
@@ -136,13 +196,11 @@ def get_act_details(
         ).first()
         
         if not is_assigned and act.creator_id != current_user.id:
-            # Check SBC ownership
             if current_user.role == "SBC" and act.bc.sbc_id == current_user.sbc_id:
                 pass
             else:
                 raise HTTPException(status_code=403, detail="Access Denied: You are not assigned to this project.")
 
-    # Inject permissions manually for single record
     if is_admin:
         act.user_permissions = [e.value for e in models.ProjectActionType]
     else:

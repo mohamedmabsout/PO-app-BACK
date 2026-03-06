@@ -4142,6 +4142,22 @@ def import_planning_targets(db: Session, df: pd.DataFrame):
     db.commit()
     return count
 
+def validate_bc_items(db: Session, bc_id: int, item_ids: List[int], user: models.User, action: str, comment: str = None):
+    """
+    Bulk version of validate_bc_item.
+    """
+    results = []
+    for item_id in item_ids:
+        try:
+            # We call the singular one to reuse its complex logic
+            res = validate_bc_item(db, item_id, user, action, comment)
+            results.append(res)
+        except Exception as e:
+            # We can choose to fail the whole batch or just skip
+            print(f"Error validating item {item_id}: {e}")
+            raise e 
+    return results
+
 def validate_bc_item(db: Session, item_id: int, user: models.User, action: str, comment: str = None):
     """
     Handles QC or PM approval/rejection with Matrix Security.
