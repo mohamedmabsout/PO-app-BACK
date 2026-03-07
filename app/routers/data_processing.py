@@ -526,7 +526,8 @@ def list_bcs_ready_for_act(
 
     # 2. Apply Visibility Security (Matrix Check)
     role_str = str(current_user.role).upper()
-    if role_str not in ["ADMIN", "RAF", "CEO"]:
+    print(f"User Role: {role_str}")  # Debugging line to check the role value
+    if role_str not in [models.UserRole.ADMIN, models.UserRole.RAF, models.UserRole.PD, models.UserRole.QUALITY]:
         if role_str == "SBC":
             if not current_user.sbc_id:
                 return []
@@ -621,21 +622,21 @@ def submit_bon_de_commande(
                     link=f"/configuration/bc/detail/{bc.id}",
                     created_at=datetime.now(),
                 )
-            crud.send_notification_email(
+            crud.send_notification_email_detailled(
                 background_tasks,
                 pd_emails,
                 "BC Submitted - L1 Approval Required",
-                "",
+                "BC",
+                "L1 Approval Required",
                 {
-                    "message": "A new Purchase Order (BC) has been submitted and requires Project Director validation.",
-                    "details": {
-                        "BC Number": bc.bc_number,
-                        "Project": bc.internal_project.name,
-                        "Amount": f"{bc.total_amount_ttc:,.2f} MAD",
-                        "Subcontractor": bc.sbc.short_name
-                    },
-                    "link": f"/configuration/bc/detail/{bc.id}"
-                }
+                    "id": bc.bc_number,
+                    "project": bc.internal_project.name,
+                    "beneficiary": bc.sbc.short_name,
+                    "total": f"{bc.total_amount_ttc:,.2f} MAD",
+                    "category": "Purchase Order",
+                    "remark": "A new Purchase Order (BC) has been submitted and requires Project Director validation."
+                },
+                link=f"/configuration/bc/detail/{bc.id}"
             )
 
         db.commit()

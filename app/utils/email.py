@@ -84,7 +84,7 @@ def send_notification_email_detailled(
         "BC": "iPo.png",
         "ACCEPTANCE": "iAcceptance.png",
         "CAISSE": "iExpense.png",
-        "LOGISTIC": "iLogistic  .png",
+        "LOGISTIC": "iLogistic.png",
         "SYSTEM": "sib_logo.png"
     }
     
@@ -96,12 +96,19 @@ def send_notification_email_detailled(
 
     # Table Row Helper (Internal to the function)
     def row(label, value):
+        if value is None or value == "":
+            return ""
         return f"""
         <tr>
             <td style="padding: 6px 10px; border: 1px solid #333; background-color: #d9e1f2; font-weight: bold; width: 30%; font-size: 13px;">{label}</td>
-            <td style="padding: 6px 10px; border: 1px solid #333; font-size: 13px;">{str(value or "")}</td>
+            <td style="padding: 6px 10px; border: 1px solid #333; font-size: 13px;">{str(value)}</td>
         </tr>
         """
+
+    # Labels mapping based on module
+    is_expense = module in ["EXP", "CAISSE"]
+    id_label = "ID Expense:" if is_expense else "Reference ID:"
+    beneficiary_label = "The Beneficiary:" if is_expense else "Subcontractor/Entity:"
 
     # 3. HTML Content using "cid:" references
     # cid:siblogo and cid:modulelogo match the headers we set below
@@ -123,21 +130,21 @@ def send_notification_email_detailled(
                     </tr>
                     <tr>
                         <td colspan="3" style="background-color: #f7caac; border: 1px solid #333; padding: 5px; font-weight: bold; font-size: 14px;">
-                            Status { "Expense" if module == "EXP" or module == "CAISSE" else "Document" } "{status_text}"
+                            Status { "Expense" if is_expense else "Document" } "{status_text}"
                         </td>
                     </tr>
                 </table>
 
                 <table width="100%" style="border-collapse: collapse; border: 1px solid #333; margin-top: -1px;">
-                    {row("ID Expense:", details.get("id"))}
+                    {row(id_label, details.get("id"))}
                     {row("Project:", details.get("project"))}
                     {row("Project Manager:", details.get("pm"))}
                     {row("The creator:", details.get("creator"))}
                     {row("Date Creation:", details.get("date"))}
-                    {row("The Beneficiary:", details.get("beneficiary"))}
+                    {row(beneficiary_label, details.get("beneficiary"))}
                     {row("Cost category:", details.get("category"))}
                     {row("Total:", details.get("total"))}
-                    {row("Expense Description:", details.get("remark", details.get("description", "")))}
+                    {row("Description:", details.get("remark", details.get("description", "")))}
                 </table>
 
                 <div style="border: 1px solid #333; border-top: none; padding: 10px; font-size: 12px;">
