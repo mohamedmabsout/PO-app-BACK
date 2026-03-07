@@ -219,54 +219,96 @@ def is_user_project_lead(db: Session, user_id: int, project_id: int, role: str):
     
     return exists is not None
 
-def send_notification_email(
-    background_tasks: BackgroundTasks,
-    recipients: List[str],
+
+def trigger_workflow_notification(
+    db: Session,
+    project_id: int,
+    action_type: models.ProjectActionType,
+    module: models.NotificationModule,
     subject: str,
-    template_name: str,
-    context: dict
+    message: str,
+    details: dict,
+    link: str,
+    background_tasks: BackgroundTasks
 ):
     """
-    Generic helper to send HTML emails via background tasks.
+    The centralized engine for routing notifications based on the Project Matrix.
+    Applies the rules:
+    - Primary users get IN-APP + EMAIL.
+    - Support users get IN-APP ONLY (Silent Backup).
+    - If the Matrix is empty, Global Admins get IN-APP + EMAIL as a fallback.
     """
-    if not recipients:
-        return
+    
+    # 1. Fetch the configuration for this specific project and action
+    config = db.query(models.ProjectWorkflow).options(
+        joinedload(models.ProjectWorkflow.primary_users),
+        joinedload(models.ProjectWorkflow.support_users)
+    ).filter(
+        models.ProjectWorkflow.project_id == project_id,
+        models.ProjectWorkflow.action_type == action_type
+    ).first()
 
-    # Basic HTML builder (In a production app, use Jinja2 templates)
-    html_content = f"""
-    <html>
-        <body style="font-family: Arial, sans-serif; color: #333;">
-            <div style="background-color: #f8f9fa; padding: 20px; border-bottom: 2px solid #007bff;">
-                <h2 style="color: #007bff; margin: 0;">SIB Portal Notification</h2>
-            </div>
-            <div style="padding: 20px;">
-                <h3>{subject}</h3>
-                <p>Hello,</p>
-                <p>{context.get('message', '')}</p>
-                <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
-                    { "".join([f"<tr><td style='padding:8px; border:1px solid #ddd;'><b>{k}:</b></td><td style='padding:8px; border:1px solid #ddd;'>{v}</td></tr>" for k, v in context.get('details', {}).items()]) }
-                </table>
-                <p>Please log in to the portal to take action.</p>
-                <a href="{os.getenv('FRONTEND_URL', 'https://expense.sib.co.ma')}{context.get('link', '')}" 
-                   style="display: inline-block; padding: 10px 20px; background-color: #007bff; color: white; text-decoration: none; border-radius: 5px;">
-                   View in Portal
-                </a>
-            </div>
-            <div style="padding: 20px; font-size: 12px; color: #777;">
-                This is an automated message from the SIB Management System.
-            </div>
-        </body>
-    </html>
-    """
+    primary_users =[]
+    support_users =[]
 
-    message = MessageSchema(
-        subject=f"SIB Portal: {subject}",
-        recipients=recipients,
-        body=html_content,
-        subtype=MessageType.html
-    )
-    fm = FastMail(conf)
-    background_tasks.add_task(fm.send_message, message)
+    if config:
+        primary_users = config.primary_users
+        support_users = config.support_users
+
+    # 2. The "Empty Matrix" Fallback
+    if not primary_users and not support_users:
+        # Fallback to Global Admins if the matrix wasn't configured
+        admin_users = db.query(models.User).filter(models.User.role == models.UserRole.ADMIN).all()
+        primary_users = admin_users  # Treat Admins as Primary so they get emails
+        
+        # Modify the subject/message to indicate it's a fallback alert
+        subject = f"[MATRIX FALLBACK] {subject}"
+        message = f"Warning: No users configured for {action_type.value}. " + message
+
+    # 3. Notify Support Users (In-App Only - "Silent Backup")
+    for user in support_users:
+        create_notification(
+            db=db,
+            recipient_id=user.id,
+            type=models.NotificationType.TODO,
+            module=module,
+            title=subject,
+            message=message,
+            link=link
+        )
+
+    # 4. Notify Primary Users (In-App AND Email)
+    primary_emails =[]
+    for user in primary_users:
+        create_notification(
+            db=db,
+            recipient_id=user.id,
+            type=models.NotificationType.TODO,
+            module=module,
+            title=subject,
+            message=message,
+            link=link
+        )
+        if user.email:
+            primary_emails.append(user.email)
+
+    db.commit() # Save the in-app notifications
+
+    # 5. Send Emails via Background Task
+    if primary_emails:
+        # We assume send_notification_email is the formatted HTML email function we wrote earlier
+        # Ensure it expects these parameters
+        status_text = action_type.value.split("_")[-1] # Extracts "L1", "SUBMIT", etc., for the email banner
+        
+        send_notification_email_detailled(
+            background_tasks=background_tasks,
+            recipients=primary_emails,
+            subject=subject,
+            module=module.value, # e.g., "EXP", "BC"
+            status_text=status_text,
+            details=details,
+            link=link
+        )
 
 # --- ROLE HELPER ---
 def get_emails_by_role(db: Session, role: UserRole) -> List[str]:
@@ -2883,22 +2925,21 @@ def create_sbc(db: Session, form_data: dict, contract_file, tax_file, creator_id
     creator_full_name = f"{creator_user.first_name} {creator_user.last_name}" if creator_user else "System"
     admin_emails = get_emails_by_role(db, UserRole.ADMIN)
     
-    send_notification_email(
+    send_notification_email_detailled(
         background_tasks,
         admin_emails,
         "New Subcontractor Pending Approval",
-        "SBC Registration Alert",
-
+        "SYSTEM",
+        "Registration Alert",
         {
-            "message": "",
-            "details": {
-                "SBC Name": new_sbc.name, 
-                "SBC Code": new_sbc.sbc_code, 
-                "Creator": creator_full_name  # <-- Use the name here
-            },
-            "link": "/configuration/sbc/approve"
-        }
-    )
+            "id": new_sbc.sbc_code,
+            "beneficiary": new_sbc.name,
+            "creator": creator_full_name,
+            "category": "Subcontractor Registration"
+        },
+        link="/configuration/sbc/approve"
+    )    
+    
     return new_sbc
 
 
@@ -2941,16 +2982,19 @@ def update_sbc(db: Session, sbc_id: int, form_data: dict, contract_file=None, ta
 
     # 5. Notification
     admin_emails = get_emails_by_role(db, UserRole.ADMIN)
-    send_notification_email(
+    send_notification_email_detailled(
         background_tasks,
         admin_emails,
         "SBC Profile Updated",
-        "",
+        "SYSTEM",
+        "Profile Updated",
         {
-            "message": f"The profile for SBC '{sbc.short_name}' has been updated.",
-            "details": {"SBC Name": sbc.name, "Status": sbc.status},
-            "link": f"/configuration/sbc/view/{sbc.id}"
-        }
+            "id": sbc.sbc_code,
+            "beneficiary": sbc.name,
+            "category": "Subcontractor Profile",
+            "remark": f"Status: {sbc.status}. The profile for SBC '{sbc.short_name}' has been updated."
+        },
+        link=f"/configuration/sbc/view/{sbc.id}"
     )
 
     return sbc
@@ -3099,7 +3143,7 @@ def approve_bc_l1(db: Session, bc_id: int, approver_id: int, background_tasks: B
     
     pd_user = db.query(models.User).get(approver_id)
     pd_name = f"{pd_user.first_name} {pd_user.last_name}" if pd_user else "N/A"
-
+    pm_name = bc.internal_project.project_manager.first_name + " " + bc.internal_project.project_manager.last_name if bc.internal_project and bc.internal_project.project_manager else "N/A"
     # --- UPDATED NOTIFICATIONS: Fetch L2 Approvers for this specific project ---
     target_l2_approvers = get_project_users_by_action(
         db, 
@@ -3114,16 +3158,21 @@ def approve_bc_l1(db: Session, bc_id: int, approver_id: int, background_tasks: B
     admin_emails = [u.email for u in target_l2_approvers if u.email]
 
     if admin_emails:
-        send_notification_email(
+        send_notification_email_detailled(
             background_tasks,
             admin_emails,
             "BC Validated L1 - Final Approval (L2) Required",
-            "",
+            "BC",
+            "L1 Validated - Pending L2",
             {
-                "message": "A BC has passed L1 validation and is now pending final Admin approval.",
-                "details": {"BC Number": bc.bc_number, "L1 Approver": f"{pd_name}"},
-                "link": f"/configuration/bc/detail/{bc.id}"
-            }
+                "id": bc.bc_number,
+                "project": bc.internal_project.name if bc.internal_project else "N/A",
+                "pm": f"{pm_name} (Project Manager)",
+                "total": f"{bc.total_amount_ttc:,.2f} MAD",
+                "category": "Purchase Order",
+                "remark": "A BC has passed L1 validation and is now pending final Admin approval."
+            },
+            link=f"/configuration/bc/detail/{bc.id}"
         )
 
     return bc
@@ -3467,20 +3516,19 @@ def bulk_assign_sites(db: Session, site_ids: List[int], target_project_id: int, 
     if target_project and target_project.project_manager:
         pm_email = target_project.project_manager.email
         if pm_email:
-            send_notification_email(
+            send_notification_email_detailled(
                 background_tasks,
                 [pm_email],
                 "New Site Assignments Pending Review",
-                "",
+                "ACCEPTANCE",
+                "Sites Assigned",
                 {
-                    "message": f"Admin {admin_user.first_name} has assigned new sites/POs to your project. Please review and approve the assignments.",
-                    "details": {
-                        "Project": target_project.name,
-                        "Total PO Lines": result_count,
-                        "Sites Count": len(site_ids)
-                    },
-                    "link": "/projects/approvals"
-                }
+                    "project": target_project.name,
+                    "creator": f"{admin_user.first_name} {admin_user.last_name}",
+                    "category": "Site/PO Assignment",
+                    "remark": f"Total PO Lines: {result_count}, Sites Count: {len(site_ids)}. Admin {admin_user.first_name} has assigned new sites/POs to your project. Please review and approve the assignments."
+                },
+                link="/projects/approvals"
             )
 
     return {"updated": result_count, "skipped": len(site_ids) - len(valid_site_ids)}
@@ -4170,7 +4218,7 @@ def validate_bc_item(db: Session, item_id: int, user: models.User, action: str, 
     if not project_id: raise ValueError("Item not linked to a valid project.")
 
     # 1. Determine Role via Matrix (Strict)
-    is_qc = check_workflow_permission(db, project_id, models.ProjectActionType.ACT_APPROVE_RQC, user.id)
+    is_qc = check_workflow_permission(db, project_id, models.ProjectActionType.ACT_APPROVE_RQC, user.id) or check_workflow_permission(db, project_id, models.ProjectActionType.ROLE_RQC, user.id)
     is_pm = check_workflow_permission(db, project_id, models.ProjectActionType.ACT_APPROVE_PM, user.id)
     is_pd = check_workflow_permission(db, project_id, models.ProjectActionType.ACT_APPROVE_PD, user.id)
 
@@ -5503,20 +5551,21 @@ def check_missing_expense_uploads(db: Session, background_tasks: BackgroundTasks
     for exp in missing_docs:
         # We notify the PD (L1 Approver) who is responsible for the physical paper
         if exp.l1_approver and exp.l1_approver.email:
-            send_notification_email(
+            send_notification_email_detailled(
                 background_tasks,
                 [exp.l1_approver.email],
                 "ACTION REQUIRED: Missing Signed Expense Voucher",
-                "",
+                "EXP",
+                "Missing Signed Voucher",
                 {
-                    "message": f"The expense #{exp.id} is marked as PAID, but the signed physical voucher has not been uploaded yet.",
-                    "details": {
-                        "Amount": f"{exp.amount} MAD",
-                        "Project": exp.internal_project.name if exp.internal_project else "N/A",
-                        "Beneficiary": exp.beneficiary
-                    },
-                    "link": f"/expenses/{exp.id}" # Link to upload page
-                }
+                    "id": exp.id,
+                    "project": exp.internal_project.name if exp.internal_project else "N/A",
+                    "beneficiary": exp.beneficiary,
+                    "total": f"{exp.amount} MAD",
+                    "category": exp.category,
+                    "remark": f"The expense #{exp.id} is marked as PAID, but the signed physical voucher has not been uploaded yet."
+                },
+                link=f"/expenses/{exp.id}"
             )
             count += 1
             
@@ -7039,21 +7088,20 @@ def notify_raf_new_invoice(db: Session, invoice: models.Invoice, background_task
 
     # 3. Trigger the Email Notification via Background Tasks
     if raf_emails:
-        send_notification_email(
+        send_notification_email_detailled(
             background_tasks=background_tasks,
             recipients=raf_emails,
             subject=f"New Billing Submission: {invoice.invoice_number}",
-            template_name="", # Placeholder for future templates
-            context={
-                "message": f"A new payment bundle has been generated by {invoice.sbc.name} and is waiting for your physical verification.",
-                "details": {
-                    "Invoice Number": invoice.invoice_number,
-                    "Total Amount": f"{invoice.total_amount_ttc:,.2f} MAD",
-                    "Category": invoice.category,
-                    "SBC": invoice.sbc.short_name
-                },
-                "link": f"/raf/facturation/verify/{invoice.id}"
-            }
+            module="ACCEPTANCE",
+            status_text="Billing Submitted",
+            details={
+                "id": invoice.invoice_number,
+                "beneficiary": invoice.sbc.name,
+                "total": f"{invoice.total_amount_ttc:,.2f} MAD",
+                "category": invoice.category,
+                "remark": f"A new payment bundle has been generated by {invoice.sbc.name} and is waiting for your physical verification."
+            },
+            link=f"/raf/facturation/verify/{invoice.id}"
         )
 
 def acknowledge_invoice_receipt(db: Session, invoice_id: int, sbc_user_id: int):
