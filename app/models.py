@@ -49,71 +49,94 @@ class User(Base):
     )
     sbc_id = Column(Integer, ForeignKey("sbcs.id"), nullable=True)
     # New Relationship: See all projects where this user has a specific role
-    project_assignments = relationship("ProjectStakeholder", back_populates="user", cascade="all, delete-orphan")
+    primary_workflows = relationship(
+        "ProjectWorkflow", 
+        secondary="workflow_primary_rel", 
+        back_populates="primary_users"
+    )
     
+    support_workflows = relationship(
+        "ProjectWorkflow", 
+        secondary="workflow_support_rel", 
+        back_populates="support_users"
+    )
     
     # Relationship
     sbc = relationship("SBC", back_populates="users",foreign_keys=[sbc_id])
     expenses = relationship("Expense", back_populates="requester", foreign_keys="[Expense.requester_id]")
     notifications = relationship("Notification", back_populates="recipient") 
-class ProjectStakeholder(Base):
-    __tablename__ = "project_stakeholders"
+# class ProjectStakeholder(Base):
+#     __tablename__ = "project_stakeholders"
 
-    id = Column(Integer, primary_key=True, index=True)
+#     id = Column(Integer, primary_key=True, index=True)
     
-    # Links
-    project_id = Column(Integer, ForeignKey("internal_projects.id"), nullable=False)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+#     # Links
+#     project_id = Column(Integer, ForeignKey("internal_projects.id"), nullable=False)
+#     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     
-    # Role Definition
-    role = Column(Enum(ProjectRoleType), nullable=False)
+#     # Role Definition
+#     role = Column(Enum(ProjectRoleType), nullable=False)
     
-    # Hierarchy: 
-    # If True, this is the "L1 / First Owner" (e.g., The Main PM).
-    # If False, this is a "Support" member (e.g., A secondary Coordinator).
-    is_lead = Column(Boolean, default=False) 
+#     # Hierarchy: 
+#     # If True, this is the "L1 / First Owner" (e.g., The Main PM).
+#     # If False, this is a "Support" member (e.g., A secondary Coordinator).
+#     is_lead = Column(Boolean, default=False) 
     
-    created_at = Column(DateTime, default=datetime.utcnow)
+#     created_at = Column(DateTime, default=datetime.utcnow)
 
-    # Relationships
-    project = relationship("InternalProject", back_populates="stakeholders")
-    user = relationship("User", back_populates="project_assignments")
+#     # Relationships
+#     project = relationship("InternalProject", back_populates="stakeholders")
+#     user = relationship("User", back_populates="project_assignments")
 
-    # Constraint: A user cannot have the same role twice on the same project
-    __table_args__ = (
-        sa.UniqueConstraint('project_id', 'user_id', 'role', name='uix_proj_user_role'),
-    )
+#     # Constraint: A user cannot have the same role twice on the same project
+#     __table_args__ = (
+#         sa.UniqueConstraint('project_id', 'user_id', 'role', name='uix_proj_user_role'),
+#     )
 
-# Association table for Support Users (Many-to-Many)
-workflow_support_table = Table(
-    'workflow_support_rel', Base.metadata,
-    Column('workflow_id', Integer, ForeignKey('project_workflows.id')),
-    Column('user_id', Integer, ForeignKey('users.id'))
+# NEW: Association table for Primary Users (Multi-select L1)
+workflow_primary_table = Table(
+    'workflow_primary_rel', Base.metadata,
+    Column('workflow_id', Integer, ForeignKey('project_workflows.id', ondelete="CASCADE")),
+    Column('user_id', Integer, ForeignKey('users.id', ondelete="CASCADE"))
 )
 
+# EXISTING: Association table for Support Users
+workflow_support_table = Table(
+    'workflow_support_rel', Base.metadata,
+    Column('workflow_id', Integer, ForeignKey('project_workflows.id', ondelete="CASCADE")),
+    Column('user_id', Integer, ForeignKey('users.id', ondelete="CASCADE"))
+)
+
+# --- 2. The Unified Workflow Model ---
 class ProjectWorkflow(Base):
     __tablename__ = "project_workflows"
 
     id = Column(Integer, primary_key=True, index=True)
-    project_id = Column(Integer, ForeignKey("internal_projects.id"), nullable=False)
-    
-    # The specific action (e.g., "EXP_APPROVE_L1")
+    project_id = Column(Integer, ForeignKey("internal_projects.id", ondelete="CASCADE"), nullable=False)
     action_type = Column(Enum(ProjectActionType), nullable=False)
     
-    # The "Only 1" First Owner
-    primary_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    # --- UPDATE THESE TWO LINES ---
+    primary_users = relationship(
+        "User", 
+        secondary=workflow_primary_table, 
+        back_populates="primary_workflows"
+    )
     
-    # The "0 or multiple" Support users
-    support_users = relationship("User", secondary=workflow_support_table)
+    support_users = relationship(
+        "User", 
+        secondary=workflow_support_table, 
+        back_populates="support_workflows"
+    )
 
-    # Relationships
-    project = relationship("InternalProject", backref="workflow_config")
-    primary_user = relationship("User", foreign_keys=[primary_user_id])
+    created_at = Column(DateTime, default=datetime.utcnow)
     
-    # Constraint: One config per action per project
+    project = relationship("InternalProject", back_populates="workflow_config")
+    
     __table_args__ = (
         sa.UniqueConstraint('project_id', 'action_type', name='uix_proj_action'),
     )
+
+
 
 
 
@@ -158,8 +181,8 @@ class InternalProject(Base):
     direct_customer_id = Column(Integer, ForeignKey("customers.id"), nullable=True)
     final_customer_id = Column(Integer, ForeignKey("customers.id"), nullable=True)
     project_manager_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-  # New Relationship: Access all team members
-    stakeholders = relationship("ProjectStakeholder", back_populates="project", cascade="all, delete-orphan")
+    # We remove the 'stakeholders' relationship if it pointed to the old table
+    # We add this helper to get everything:
     account = relationship("Account")
     direct_customer = relationship("Customer", foreign_keys=[direct_customer_id])
     final_customer = relationship("Customer", foreign_keys=[final_customer_id])
@@ -167,9 +190,12 @@ class InternalProject(Base):
   # CORRECT : une seule définition pointant vers 'project' (qui existe dans Expense)
     expenses = relationship("Expense", back_populates="internal_project")
    
-    # --- CRITICAL FIX: REMOVED customer_projects relationship ---
-    # Since CustomerProject no longer has a foreign key to this table, 
-    # this relationship cannot exist.
+    workflow_config = relationship(
+        "ProjectWorkflow", 
+        back_populates="project", 
+        cascade="all, delete-orphan"
+    )
+
     
     # Direct link to Merged POs
     merged_pos = relationship("MergedPO", back_populates="internal_project")
@@ -474,13 +500,15 @@ class BonDeCommande(Base):
 
     submitted_at = Column(DateTime, nullable=True)
     
-    # L1 Approval (Project Director)
+    # L1 Approval
     approver_l1_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     approved_l1_at = Column(DateTime, nullable=True)
-    
-    # L2 Approval (Admin)
+    l1_approval_comment = Column(Text, nullable=True) # <--- NEW
+
+    # L2 Approval
     approver_l2_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     approved_l2_at = Column(DateTime, nullable=True)
+    l2_approval_comment = Column(Text, nullable=True) # <--- NEW
 
     # Relationships for the approvers
     approver_l1 = relationship("User", foreign_keys=[approver_l1_id])
@@ -679,14 +707,15 @@ class Transaction(Base):
     status= Column(String(50), default=TransactionStatus.COMPLETED) # PENDING, COMPLETED, FAILED
     # Optional links for traceability
     related_request_id = Column(Integer, ForeignKey("fund_requests.id"), nullable=True)
-    
+    expense_id = Column(Integer, ForeignKey("expenses.id"), nullable=True)
+
     created_at = Column(DateTime, server_default=func.now())
     created_by_id = Column(Integer, ForeignKey("users.id")) # Who performed the action
     proof_file = Column(String(255), nullable=True)
     # Relationships
     caisse = relationship("Caisse", back_populates="transactions")
     created_by = relationship("User", foreign_keys=[created_by_id])
-
+    expense = relationship("Expense", foreign_keys=[expense_id])
 class Expense(Base):
     __tablename__ = "expenses"
     

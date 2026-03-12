@@ -1,18 +1,43 @@
 # backend/app/routers/notifications.py
 from datetime import datetime
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 from sqlalchemy.orm import Session
 from sqlalchemy import func
-from typing import List, Dict
+from typing import List, Optional
 from .. import crud, models, schemas, auth
 from ..dependencies import get_db
-
+from fastapi import Query
 router = APIRouter(
     prefix="/api/notifications",
     tags=["Notifications"],
     dependencies=[Depends(auth.get_current_user)]
 )
 
+
+@router.get("/")
+def get_notifications(
+    module: Optional[str] = Query(None),
+    limit: int = 50,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """
+    Fetches notifications for the current user, optionally filtered by module.
+    """
+    query = db.query(models.Notification).filter(
+        models.Notification.recipient_id == current_user.id
+    )
+
+    if module:
+        query = query.filter(models.Notification.module == module)
+
+    # Sort by unread first, then by newest
+    notifications = query.order_by(
+        models.Notification.is_read.asc(),
+        models.Notification.created_at.desc()
+    ).limit(limit).all()
+
+    return notifications
 # @router.get("/dashboard-widget")
 # def get_dashboard_notifications(
 #     db: Session = Depends(get_db), 
@@ -132,7 +157,21 @@ def mark_notification_read_endpoint(
 ):
     crud.mark_notification_read(db, id, current_user.id)
     return {"ok": True}
+@router.post("/read-all", status_code=204)
+def mark_all_notifications_as_read(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """
+    Marks all notifications for the current user as read.
+    """
+    db.query(models.Notification).filter(
+        models.Notification.recipient_id == current_user.id,
+        models.Notification.is_read == False
+    ).update({"is_read": True}, synchronize_session=False)
 
+    db.commit()
+    return Response(status_code=204)
 @router.get("/dashboard-summary")
 def get_dashboard_summary(
     db: Session = Depends(get_db),

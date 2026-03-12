@@ -374,3 +374,5 @@ def update_internal_control(
 ):
     count = crud.bulk_update_internal_control(db, payload.identifiers, payload.set_to_value)
     return {"message": f"Updated {count} records successfully."}
+
+

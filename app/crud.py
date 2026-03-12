@@ -29,8 +29,9 @@ from datetime import datetime, timedelta
 from sqlalchemy import func,or_
 from fastapi import UploadFile, File, Form,HTTPException
 from fastapi.responses import FileResponse
-from .utils.email import send_bc_status_email, send_email_background, LOGOS
+from .utils.email import send_bc_status_email, send_email_background, LOGOS,send_notification_email_detailled
 import json
+from collections import defaultdict
 
 
 logger = logging.getLogger(__name__)
@@ -52,85 +53,185 @@ PAYMENT_TERM_MAP = {
 def format_currency_python(value):
     """Formats a number to '10 000,00 MAD' style in Python"""
     return f"{value:,.2f} MAD".replace(",", " ").replace(".", ",")
+# --- 1. CHECK PERMISSION (The Engine) ---
+# backend/app/crud.py
 
-def get_project_users_by_role(db: Session, project_id: int, role: str):
+def check_workflow_permission(db: Session, project_id: int, action: models.ProjectActionType, user_id: int):
     """
-    Fetches users assigned to a specific project with a specific role.
-    Example: Who is the PD for Project #12?
+    Checks if a user is authorized for a specific action on a project.
+    - Admins: Always True.
+    - Primary/Support: True if user exists in the project matrix for this action.
     """
-    return db.query(models.User).join(models.ProjectStakeholder).filter(
-        models.ProjectStakeholder.project_id == project_id,
-        models.ProjectStakeholder.role == role
-    ).all()
-
-def is_user_project_lead(db: Session, user_id: int, project_id: int, role: str):
-    """
-    Security Check: Is this user the LEAD (L1) for this role on this project?
-    Admins bypass this check.
-    """
-    # 1. Admin Override
     user = db.query(models.User).get(user_id)
+    if not user: return False
+    
+    # 1. Global Admin Bypass
     if user.role == models.UserRole.ADMIN:
         return True
 
-    # 2. Stakeholder Check
-    exists = db.query(models.ProjectStakeholder).filter(
-        models.ProjectStakeholder.user_id == user_id,
-        models.ProjectStakeholder.project_id == project_id,
-        models.ProjectStakeholder.role == role,
-        models.ProjectStakeholder.is_lead == True
+    # 2. Check the Matrix for this Project + Action
+    config = db.query(models.ProjectWorkflow).filter(
+        models.ProjectWorkflow.project_id == project_id,
+        models.ProjectWorkflow.action_type == action
     ).first()
+
+    if not config:
+        return False
+
+    # 3. Check if user is in Primary or Support lists (Many-to-Many)
+    is_primary = any(u.id == user_id for u in config.primary_users)
+    is_support = any(u.id == user_id for u in config.support_users)
+
+    return is_primary or is_support
+
+# --- 2. GET MATRIX ---
+# In backend/app/crud.py
+
+def get_project_workflow_matrix(db: Session, project_id: int):
+    configs = db.query(models.ProjectWorkflow).filter(
+        models.ProjectWorkflow.project_id == project_id
+    ).all()
     
-    return exists is not None
+    # Return a clean dictionary to avoid Pydantic serialization issues,
+    # now including the mandatory 'id' and 'project_id' fields.
+    return[{
+        "id": c.id,                                   # <--- ADD THIS
+        "project_id": c.project_id,                   # <--- ADD THIS
+        "action_type": c.action_type.value if hasattr(c.action_type, 'value') else c.action_type,
+        "primary_user_ids": [u.id for u in c.primary_users],
+        "support_user_ids": [u.id for u in c.support_users]
+    } for c in configs]
 
-def send_notification_email(
-    background_tasks: BackgroundTasks,
-    recipients: List[str],
-    subject: str,
-    template_name: str,
-    context: dict
-):
-    """
-    Generic helper to send HTML emails via background tasks.
-    """
-    if not recipients:
-        return
 
-    # Basic HTML builder (In a production app, use Jinja2 templates)
-    html_content = f"""
-    <html>
-        <body style="font-family: Arial, sans-serif; color: #333;">
-            <div style="background-color: #f8f9fa; padding: 20px; border-bottom: 2px solid #007bff;">
-                <h2 style="color: #007bff; margin: 0;">SIB Portal Notification</h2>
-            </div>
-            <div style="padding: 20px;">
-                <h3>{subject}</h3>
-                <p>Hello,</p>
-                <p>{context.get('message', '')}</p>
-                <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
-                    { "".join([f"<tr><td style='padding:8px; border:1px solid #ddd;'><b>{k}:</b></td><td style='padding:8px; border:1px solid #ddd;'>{v}</td></tr>" for k, v in context.get('details', {}).items()]) }
-                </table>
-                <p>Please log in to the portal to take action.</p>
-                <a href="{os.getenv('FRONTEND_URL', 'https://expense.sib.co.ma')}{context.get('link', '')}" 
-                   style="display: inline-block; padding: 10px 20px; background-color: #007bff; color: white; text-decoration: none; border-radius: 5px;">
-                   View in Portal
-                </a>
-            </div>
-            <div style="padding: 20px; font-size: 12px; color: #777;">
-                This is an automated message from the SIB Management System.
-            </div>
-        </body>
-    </html>
-    """
+def update_project_workflow_matrix(db: Session, project_id: int, updates: List[schemas.WorkflowConfigBase]):
+    for row in updates:
+        # 1. Attempt to find the existing config row
+        config = db.query(models.ProjectWorkflow).filter(
+            models.ProjectWorkflow.project_id == project_id,
+            models.ProjectWorkflow.action_type == row.action_type
+        ).first()
 
-    message = MessageSchema(
-        subject=f"SIB Portal: {subject}",
-        recipients=recipients,
-        body=html_content,
-        subtype=MessageType.html
-    )
-    fm = FastMail(conf)
-    background_tasks.add_task(fm.send_message, message)
+        if config:
+            # 2. Update existing record
+            config.primary_users = [] # Clear Many-to-Many
+            if row.primary_user_ids:
+                config.primary_users = db.query(models.User).filter(models.User.id.in_(row.primary_user_ids)).all()
+            
+            config.support_users = [] # Clear Many-to-Many
+            if row.support_user_ids:
+                config.support_users = db.query(models.User).filter(models.User.id.in_(row.support_user_ids)).all()
+        else:
+            # 3. Create NEW record only if it doesn't exist
+            config = models.ProjectWorkflow(
+                project_id=project_id,
+                action_type=row.action_type
+            )
+            # Link Users
+            if row.primary_user_ids:
+                config.primary_users = db.query(models.User).filter(models.User.id.in_(row.primary_user_ids)).all()
+            if row.support_user_ids:
+                config.support_users = db.query(models.User).filter(models.User.id.in_(row.support_user_ids)).all()
+            
+            db.add(config)
+            
+    db.commit()
+    return True
+# --- 4. AUTO-FILL DEFAULTS (Migration Helper) ---
+def auto_configure_project_defaults(db: Session, project_id: int):
+    """
+    Reads the ProjectStakeholders (PD, PM, etc.) and fills the Workflow Matrix.
+    Used when a Project is created.
+    """
+    # Fetch Stakeholders
+    pd = db.query(models.ProjectStakeholder).filter_by(project_id=project_id, role="PD", is_lead=True).first()
+    pm = db.query(models.ProjectStakeholder).filter_by(project_id=project_id, role="PM", is_lead=True).first()
+    # Assuming Admin ID 1 for L2 defaults if no other logic
+    admin_id = 1 
+
+    pd_id = pd.user_id if pd else None
+    pm_id = pm.user_id if pm else None
+
+    # Map Actions to Default Users
+    defaults = {
+        # BC
+        "BC_CREATE_DRAFT": pm_id,
+        "BC_SUBMIT": pm_id,
+        "BC_APPROVE_L1": pd_id,
+        "BC_APPROVE_L2": admin_id, 
+        
+        # Expense
+        "EXP_CREATE_DRAFT": pm_id,
+        "EXP_SUBMIT": pm_id,
+        "EXP_APPROVE_L1": pd_id,
+        "EXP_APPROVE_L2": admin_id,
+        
+        # Acceptance
+        "ACC_CREATE_DRAFT": pm_id,
+        "ACC_SUBMIT": pm_id,
+        "ACC_APPROVE_L1": pd_id,
+        "ACC_APPROVE_L2": admin_id,
+
+        # Funds
+        "FUND_CREATE": pm_id,
+        "FUND_APPROVE": pd_id,
+        "FUND_CONFIRM": admin_id,
+        "FUND_UPLOAD": pm_id,
+
+    }
+
+    updates = []
+    for action, uid in defaults.items():
+        if uid:
+            updates.append(schemas.WorkflowConfigBase(action_type=action, primary_user_id=uid, support_user_ids=[]))
+            
+    update_project_workflow_matrix(db, project_id, updates)
+def get_project_users_by_action(db: Session, project_id: int, action: models.ProjectActionType):
+    """
+    Returns all users (Primary + Support) assigned to a specific action for a project.
+    """
+    config = db.query(models.ProjectWorkflow).filter(
+        models.ProjectWorkflow.project_id == project_id,
+        models.ProjectWorkflow.action_type == action
+    ).first()
+
+    if not config:
+        return []
+
+    # Combine both Many-to-Many lists
+    return list(config.primary_users) + list(config.support_users)
+
+def get_project_users_by_role(db: Session, project_id: int, role: str):
+    """
+    Helper to find people holding a specific title (e.g., ROLE_PD).
+    'role' can be 'PD' or 'ROLE_PD'
+    """
+    action_key = f"ROLE_{role}" if not role.startswith("ROLE_") else role
+    return get_project_users_by_action(db, project_id, action_key)
+
+
+def get_action_notification_targets(db: Session, project_id: int, action_type: models.ProjectActionType) -> List[models.User]:
+    """
+    Resolves who should receive the notification for a specific workflow step.
+    Rule 1: Notify ONLY the Primary owner(s) [No support spam].
+    Rule 2: If matrix is empty/missing, fallback to Global Admins.
+    """
+    config = db.query(models.ProjectWorkflow).filter(
+        models.ProjectWorkflow.project_id == project_id,
+        models.ProjectWorkflow.action_type == action_type
+    ).first()
+
+    # Apply Rule 1: We have a config AND it has at least one Primary user
+    if config and config.primary_users:
+        return config.primary_users
+    
+    # Apply Rule 2: Fallback to Admins
+    admins = db.query(models.User).filter(
+        models.User.role == models.UserRole.ADMIN,
+        models.User.is_active == True
+    ).all()
+    
+    return admins
+
 
 # --- ROLE HELPER ---
 def get_emails_by_role(db: Session, role: UserRole) -> List[str]:
@@ -642,6 +743,18 @@ def process_acceptance_file_background(file_path: str, history_id: int, user_id:
             mask = acceptance_df['excel_status'].astype(str).str.strip().str.lower() == 'approved'
             acceptance_df = acceptance_df[mask]
         
+
+        # ========================================================
+        # 🚨 THE FIX: DEDUPLICATE THE HUAWEI EXPORT
+        # If Huawei exports the same Shipment twice, keep only the latest one
+        # ========================================================
+        acceptance_df.sort_values('application_processed_date', inplace=True)
+        acceptance_df.drop_duplicates(
+            subset=['po_no', 'po_line_no', 'shipment_no'], 
+            keep='last', 
+            inplace=True
+        )
+        
         rows_to_process = len(acceptance_df)
         skipped_rows = total_rows_received - rows_to_process
         # -----------------------------------------------------
@@ -840,7 +953,7 @@ def get_eligible_pos_for_bc(
         models.BonDeCommande, models.BCItem.bc_id == models.BonDeCommande.id
     ).filter(
         # Only count items if the BC is NOT rejected and NOT a draft
-        models.BonDeCommande.status.notin_([models.BCStatus.REJECTED, models.BCStatus.DRAFT])
+        models.BonDeCommande.status.notin_([models.BCStatus.REJECTED])
     ).group_by(models.BCItem.merged_po_id).subquery()
 
     # --- FIX ENDS HERE ---
@@ -1052,7 +1165,19 @@ def process_acceptances_by_ids(db: Session, raw_acceptance_ids: List[int]):
     
     if acceptance_df.empty:
         return 0
-
+    # =========================================================================
+    # 🚨 THE FIX PART 1: DEDUPLICATE THE HUAWEI EXPORT
+    # If Huawei exports the same Shipment twice, keep only the most recent one
+    # =========================================================================
+    # Sort by date so we keep the most recent "Approved" status row
+    acceptance_df.sort_values('application_processed_date', inplace=True)
+    # Drop duplicates matching the exact same PO Line and Shipment Number
+    acceptance_df.drop_duplicates(
+        subset=['po_no', 'po_line_no', 'shipment_no'], 
+        keep='last', 
+        inplace=True
+    )
+    # =========================================================================
     # 2. Generate IDs for Aggregation (Exact same logic as before)
     acceptance_df['po_id'] = acceptance_df['po_no'] + '-' + acceptance_df['po_line_no'].astype(int).astype(str)
     acceptance_df['id2'] = acceptance_df['po_id'] + '-' + acceptance_df['shipment_no'].astype(int).astype(str)
@@ -1097,48 +1222,43 @@ def process_acceptances_by_ids(db: Session, raw_acceptance_ids: List[int]):
 
             unit_price = merged_po_to_update.unit_price or 0
             req_qty = merged_po_to_update.requested_qty or 0
-            agg_acceptance_qty = acceptance_row['acceptance_qty']
+
+            # =========================================================================
+            # 🚨 THE FIX PART 2: MATHEMATICAL CAP
+            # Never accept a quantity higher than what was requested
+            # =========================================================================
+            raw_acceptance_qty = acceptance_row['acceptance_qty']
+            agg_acceptance_qty = min(raw_acceptance_qty, req_qty)
+            # =========================================================================
+
             shipment_no = acceptance_row['shipment_no']
 
             merged_po_to_update.category = deduce_category(merged_po_to_update.item_description)
             payment_term = merged_po_to_update.payment_term
 
             # --- Apply the CORRECTED date to AC/PAC fields ---
-
             if shipment_no == 1:
                 merged_po_to_update.total_ac_amount = unit_price * req_qty * 0.80
                 merged_po_to_update.accepted_ac_amount = unit_price * agg_acceptance_qty * 0.80
-                # Use the fixed date here
                 merged_po_to_update.date_ac_ok = final_processed_date 
                 
                 if payment_term == "AC PAC 100%":
                     merged_po_to_update.total_pac_amount = unit_price * req_qty * 0.20
                     merged_po_to_update.accepted_pac_amount = unit_price * agg_acceptance_qty * 0.20
-                    # Use the fixed date here
                     merged_po_to_update.date_pac_ok = final_processed_date 
 
             elif shipment_no == 2:
                 if payment_term == "AC1 80 | PAC 20":
                     merged_po_to_update.total_pac_amount = unit_price * req_qty * 0.20
                     merged_po_to_update.accepted_pac_amount = unit_price * agg_acceptance_qty * 0.20
-                    # Use the fixed date here
                     merged_po_to_update.date_pac_ok = final_processed_date
-
-
-            # --- Logic: Update Total Acceptance Qty (Optional - remove if column doesn't exist) ---
-            # Since you got an error here, I am removing this block to respect your current DB schema.
-            # If you WANT this, you must run the migration first. 
-            # For now, I'm commenting it out to fix the crash.
-            # if hasattr(merged_po_to_update, 'total_acceptance_qty'):
-            #     if merged_po_to_update.total_acceptance_qty is None:
-            #         merged_po_to_update.total_acceptance_qty = 0.0
-            #     merged_po_to_update.total_acceptance_qty += agg_acceptance_qty
 
     # 6. Mark as Processed & Commit
     query_raw.update({"is_processed": True})
     db.commit()
 
     return len(updated_po_ids)
+
 # --- FINAL REVISED FUNCTION ---
 def process_acceptance_dataframe(db: Session, acceptance_df: pd.DataFrame):
     """
@@ -2344,43 +2464,52 @@ def get_planning_matrix(db: Session, year: int, user: Optional[models.User] = No
 
 def get_internal_projects_for_user(db: Session, user: models.User):
     """
-    Returns projects based on role:
-    - Admin: All projects
-    - PM/PD: Only projects where they are the manager
-    - Others: Empty list (or all, depending on your needs)
+    Returns projects available to a user based on the unified Workflow Matrix.
+    - Admin, RAF, and CEO: See all projects in the company.
+    - PM, PD, PC, RQC: See only projects where they appear in the Matrix (Primary or Support).
     """
-    query = db.query(models.InternalProject)
+    # 1. Management Roles: Global Visibility
+    MANAGEMENT_ROLES = [models.UserRole.ADMIN, models.UserRole.RAF, models.UserRole.CEO]
     
-    if user.role in [models.UserRole.ADMIN, models.UserRole.RAF]:
+    if user.role in MANAGEMENT_ROLES:
         return db.query(models.InternalProject).order_by(models.InternalProject.name).all()
-    return db.query(models.InternalProject).join(
-        models.ProjectStakeholder
-    ).filter(
-        models.ProjectStakeholder.user_id == user.id
-    ).order_by(models.InternalProject.name).distinct().all() # Or raise error
 
-# Update the selector too
+    # 2. Others: Join with the Unified Workflow table
+    # We look for ANY entry in the matrix for this user on a specific project.
+    # This includes both 'ROLE_' entries (Stakeholders) and 'EXP_/BC_' entries (Actions).
+    return db.query(models.InternalProject).join(
+        models.ProjectWorkflow
+    ).filter(
+        or_(
+            # Is user a Primary Owner for any task in this project?
+            models.ProjectWorkflow.primary_users.any(id=user.id),
+            # Is user a Support Member for any task in this project?
+            models.ProjectWorkflow.support_users.any(id=user.id)
+        )
+    ).distinct().order_by(models.InternalProject.name).all()
 def get_internal_project_selector_for_user(db: Session, user: models.User, search: str = None):
     """
-    Returns projects for dropdowns.
-    - ADMIN/RAF: See ALL projects.
-    - Others (PM/PD): See only assigned projects.
+    Returns projects where the user has ANY assigned role or action.
+    - Admin/RAF/CEO: See all projects.
+    - PD/PM/Coordinators: See projects where they appear in the Matrix.
     """
-    query = db.query(models.InternalProject)
-    
-    # 1. Security Filter
-    # If NOT Admin/RAF, restrict to assigned projects
-    if user.role not in [models.UserRole.ADMIN, models.UserRole.RAF]:
-        query = query.join(models.ProjectStakeholder).filter(
-            models.ProjectStakeholder.user_id == user.id
-        )
+    # 1. Management Roles: Global Visibility
+    if user.role in [models.UserRole.ADMIN, models.UserRole.RAF, models.UserRole.CEO]:
+        query = db.query(models.InternalProject)
+    else:
+        # 2. Project Team: Filter by assignment in ProjectWorkflow
+        # We look for ANY record in the matrix for this user on a project
+        query = db.query(models.InternalProject).join(models.ProjectWorkflow).filter(
+            or_(
+                models.ProjectWorkflow.primary_users.any(id=user.id),
+                models.ProjectWorkflow.support_users.any(id=user.id)
+            )
+        ).distinct()
 
-    # 2. Apply Search Filter (Applied to everyone)
     if search:
         query = query.filter(models.InternalProject.name.ilike(f"%{search}%"))
         
-    return query.order_by(models.InternalProject.name).limit(20).all()
-
+    return query.order_by(models.InternalProject.name).limit(100).all()
     
 def get_remaining_to_accept_dataframe(
     db: Session,
@@ -2531,11 +2660,20 @@ def get_tax_rate(db: Session, category: str, year: int):
 
 # --- MAIN ACTION: Create BC ---
 def create_bon_de_commande(db: Session, bc_data: schemas.BCCreate, creator_id: int):
-    
+
+    # 1. Workflow Permission Check
+    is_authorized = check_workflow_permission(
+        db, 
+        project_id=bc_data.internal_project_id, 
+        action=models.ProjectActionType.BC_CREATE_DRAFT, 
+        user_id=creator_id
+    )
+    if not is_authorized:
+        raise ValueError("Permission Denied: You are not assigned to create BC drafts for this project.")
+
     sbc = db.query(models.SBC).get(bc_data.sbc_id)
     if not sbc:
         raise ValueError("SBC not found")
-        
     # ---------------------------------------------------------
     # NEW: CATEGORY MIXING VALIDATION
     # ---------------------------------------------------------
@@ -2586,14 +2724,30 @@ def create_bon_de_commande(db: Session, bc_data: schemas.BCCreate, creator_id: i
         po = db.query(models.MergedPO).get(item_data.merged_po_id)
         if not po:        
             raise ValueError(f"PO Line ID {item_data.merged_po_id} not found.")
-        
+        # --- STRICT LOCK CHECK ---
+        # Check if this PO is already in ANY active BC (including drafts)
+        # existing_assignment = db.query(models.BCItem).join(
+        #     models.BonDeCommande, models.BCItem.bc_id == models.BonDeCommande.id
+        # ).filter(
+        #     models.BCItem.merged_po_id == po.id,
+        #     models.BonDeCommande.status != models.BCStatus.REJECTED
+        # ).first()
+
+        # if existing_assignment:
+        #     raise ValueError(
+        #         f"Error: PO Line '{po.po_id}' is already assigned to "
+        #         f"BC '{existing_assignment.bc.bc_number}'. "
+        #         "A PO line cannot be assigned to multiple BCs."
+        #     )
+
         # 1. Calculate how much has ALREADY been assigned to other BCs (excluding REJECTED and DRAFT)
         consumed_qty = db.query(func.sum(models.BCItem.quantity_sbc)).join(
             models.BonDeCommande, models.BCItem.bc_id == models.BonDeCommande.id
         ).filter(
             models.BCItem.merged_po_id == po.id,
-            models.BonDeCommande.status.notin_([models.BCStatus.REJECTED, models.BCStatus.DRAFT])
+            models.BonDeCommande.status != models.BCStatus.REJECTED # <--- THE FIX
         ).scalar() or 0.0
+
         
         # 2. Calculate what is actually available
         available_qty = po.requested_qty - consumed_qty
@@ -2642,13 +2796,14 @@ def create_bon_de_commande(db: Session, bc_data: schemas.BCCreate, creator_id: i
         total_tax += line_tax
 
     # 4. Finalize
-    new_bc.total_amount_ht = total_ht
-    new_bc.total_tax_amount = total_tax
-    new_bc.total_amount_ttc = total_ht + total_tax
+    new_bc.total_amount_ht = round(total_ht, 2)
+    new_bc.total_tax_amount = round(total_tax, 2)
+    new_bc.total_amount_ttc = round(total_ht + total_tax, 2)
     
     db.commit()
     db.refresh(new_bc)
     return new_bc
+
 def generate_sbc_code(db: Session):
     """Auto-generates SBC-001, SBC-002..."""
     last = db.query(models.SBC).order_by(models.SBC.id.desc()).first()
@@ -2729,22 +2884,21 @@ def create_sbc(db: Session, form_data: dict, contract_file, tax_file, creator_id
     creator_full_name = f"{creator_user.first_name} {creator_user.last_name}" if creator_user else "System"
     admin_emails = get_emails_by_role(db, UserRole.ADMIN)
     
-    send_notification_email(
+    send_notification_email_detailled(
         background_tasks,
         admin_emails,
         "New Subcontractor Pending Approval",
-        "SBC Registration Alert",
-
+        "SYSTEM",
+        "Registration Alert",
         {
-            "message": "",
-            "details": {
-                "SBC Name": new_sbc.name, 
-                "SBC Code": new_sbc.sbc_code, 
-                "Creator": creator_full_name  # <-- Use the name here
-            },
-            "link": "/configuration/sbc/approve"
-        }
-    )
+            "id": new_sbc.sbc_code,
+            "beneficiary": new_sbc.name,
+            "creator": creator_full_name,
+            "category": "Subcontractor Registration"
+        },
+        link="/configuration/sbc/approve"
+    )    
+    
     return new_sbc
 
 
@@ -2787,16 +2941,19 @@ def update_sbc(db: Session, sbc_id: int, form_data: dict, contract_file=None, ta
 
     # 5. Notification
     admin_emails = get_emails_by_role(db, UserRole.ADMIN)
-    send_notification_email(
+    send_notification_email_detailled(
         background_tasks,
         admin_emails,
         "SBC Profile Updated",
-        "",
+        "SYSTEM",
+        "Profile Updated",
         {
-            "message": f"The profile for SBC '{sbc.short_name}' has been updated.",
-            "details": {"SBC Name": sbc.name, "Status": sbc.status},
-            "link": f"/configuration/sbc/view/{sbc.id}"
-        }
+            "id": sbc.sbc_code,
+            "beneficiary": sbc.name,
+            "category": "Subcontractor Profile",
+            "remark": f"Status: {sbc.status}. The profile for SBC '{sbc.short_name}' has been updated."
+        },
+        link=f"/configuration/sbc/view/{sbc.id}"
     )
 
     return sbc
@@ -2896,94 +3053,248 @@ def cancel_bc(db: Session, bc_id: int, user_id: int):
     db.delete(bc)
     db.commit()
 
-def submit_bc(db: Session, bc_id: int):
+def submit_bc(db: Session, bc_id: int, user_id: int, background_tasks: BackgroundTasks = None):
     """Moves BC from DRAFT to SUBMITTED (Ready for L1)"""
     bc = db.query(models.BonDeCommande).get(bc_id)
     if not bc or bc.status != models.BCStatus.DRAFT:
         raise ValueError("BC not found or not in Draft status.")
+
+    # 1. Workflow Permission Check
+    is_authorized = check_workflow_permission(
+        db, 
+        project_id=bc.project_id, 
+        action=models.ProjectActionType.BC_SUBMIT, 
+        user_id=user_id
+    )
+    if not is_authorized:
+        raise ValueError("Permission Denied: You are not assigned to submit BCs for this project.")
+
     bc.status = models.BCStatus.SUBMITTED
     bc.submitted_at = datetime.now()
     db.commit()
-    # pd_emails = get_emails_by_role(db, UserRole.PD)
-    # send_notification_email(
-    #     background_tasks,
-    #     pd_emails,
-    #     "BC Submitted - L1 Approval Required",
-    #     "",
-    #     {
-    #         "message": "A new Purchase Order (BC) has been submitted and requires Project Director validation.",
-    #         "details": {
-    #             "BC Number": bc.bc_number,
-    #             "Project": bc.internal_project.name,
-    #             "Amount": f"{bc.total_amount_ttc:,.2f} MAD",
-    #             "Subcontractor": bc.sbc.short_name
-    #         },
-    #         "link": f"/bcs/{bc.id}"
-    #     }
-    # )
 
+    # --- 2. NOTIFICATIONS ---
+    targets = get_action_notification_targets(
+        db, bc.project_id, models.ProjectActionType.BC_APPROVE_L1
+    )
+    target_emails = [u.email for u in targets if u.email]
+
+    for target in targets:
+        create_notification(
+            db, recipient_id=target.id, 
+            type=models.NotificationType.TODO,
+            module=models.NotificationModule.BC,
+            title="BC Approval Required (L1)",
+            message=f"A new BC #{bc.bc_number} has been submitted for project {bc.internal_project.name if bc.internal_project else 'N/A'}.",
+            link=f"/configuration/bc/detail/{bc.id}"
+        )
+
+    if target_emails and BackgroundTasks:
+        pm_obj = bc.internal_project.project_manager if bc.internal_project else None
+        pm_name = f"{pm_obj.first_name} {pm_obj.last_name}" if pm_obj else "N/A"
+        creator_name = f"{bc.creator.first_name} {bc.creator.last_name}" if bc.creator else "N/A"
+
+        details = {
+            "id": bc.bc_number,
+            "project": bc.internal_project.name if bc.internal_project else "N/A",
+            "pm": pm_name,
+            "creator": creator_name,
+            "date": bc.submitted_at.strftime("%d/%m/%Y"),
+            "beneficiary": bc.sbc.name if bc.sbc else "N/A",
+            "category": "Bon de Commande",
+            "total": f"{bc.total_amount_ttc:,.2f} MAD"
+        }
+
+        send_notification_email_detailled(
+            background_tasks=background_tasks,
+            recipients=target_emails,
+            subject=f"Action Required: BC {bc.bc_number} Submitted",
+            module="BC",
+            status_text="SUBMITTED - PENDING L1",
+            details=details,
+            link=f"/configuration/bc/detail/{bc.id}"
+        )
+    
     return bc
 
 
-def approve_bc_l1(db: Session, bc_id: int, approver_id: int, background_tasks: BackgroundTasks):
-    # 1. Fetch the Approver User to check permissions
-    approver = db.query(models.User).get(approver_id)
-    if not approver:
-        raise ValueError("Approver user not found.")
-        
-    # --- SECURITY CHECK: Must be PD or Admin ---
-    # (Admins usually have super-powers, so including them is safe, but strict PD is fine too)
-    if approver.role not in [models.UserRole.PD, models.UserRole.ADMIN]:
-        raise ValueError("Permission Denied: Only a Project Director (PD) can perform L1 validation.")
-    # -------------------------------------------
-
+def approve_bc_l1(db: Session, bc_id: int, approver_id: int, comment: str, background_tasks: BackgroundTasks):
     bc = db.query(models.BonDeCommande).get(bc_id)
+    if not bc:
+        raise ValueError("BC not found.")
+
+    # 1. Workflow Permission Check
+    is_authorized = check_workflow_permission(
+        db, 
+        project_id=bc.project_id, 
+        action=models.ProjectActionType.BC_APPROVE_L1, 
+        user_id=approver_id
+    )
+    if not is_authorized:
+        raise ValueError("Permission Denied: You are not assigned to L1 Approval for this project.")
+
     # Check if it is SUBMITTED
-    if not bc or bc.status != models.BCStatus.SUBMITTED:
+    if bc.status != models.BCStatus.SUBMITTED:
         raise ValueError("BC must be in SUBMITTED status for L1 Validation.")
     
     bc.status = models.BCStatus.PENDING_L2
+    invalidate_notifications_for_link(db, f"/configuration/bc/detail/{bc_id}")
     bc.approver_l1_id = approver_id
     bc.approved_l1_at = datetime.now()
-    db.commit()
-    pd_user = db.query(models.User).get(approver_id)
-    pd_name = f"{pd_user.first_name} {pd_user.last_name}" if pd_user else "N/A"
+    bc.l1_approval_comment = comment # <--- SAVE COMMENT
 
-    admin_emails = get_emails_by_role(db, UserRole.ADMIN)
-    send_notification_email(
-        background_tasks,
-        admin_emails,
-        "BC Validated L1 - Final Approval (L2) Required",
-        "",
-        {
-            "message": "A BC has passed L1 validation and is now pending final Admin approval.",
-            "details": {"BC Number": bc.bc_number, "L1 Approver": f"{pd_name}"},
-            "link": f"/bcs/{bc.id}"
-        }
+    db.commit()
+    link = f"/configuration/bc/detail/{bc_id}"
+    invalidate_notifications_for_link(db, link)
+    # --- 2. NOTIFICATIONS (L2) ---
+    targets = get_action_notification_targets(
+        db, bc.project_id, models.ProjectActionType.BC_APPROVE_L2
     )
+    target_emails = [u.email for u in targets if u.email]
+    
+    for target in targets:
+        create_notification(
+            db, recipient_id=target.id, 
+            type=models.NotificationType.TODO,
+            module=models.NotificationModule.BC,
+            title="BC Approval Required (L2)",
+            message=f"BC #{bc.bc_number} passed L1. Please provide final Finance approval.",
+            link=f"/configuration/bc/detail/{bc.id}"
+        )
+
+    if target_emails and background_tasks:
+        pm_obj = bc.internal_project.project_manager if bc.internal_project else None
+        pm_name = f"{pm_obj.first_name} {pm_obj.last_name}" if pm_obj else "N/A"
+        creator_name = f"{bc.creator.first_name} {bc.creator.last_name}" if bc.creator else "N/A"
+
+        details = {
+            "id": bc.bc_number,
+            "project": bc.internal_project.name if bc.internal_project else "N/A",
+            "pm": pm_name,
+            "creator": creator_name,
+            "date": bc.approved_l1_at.strftime("%d/%m/%Y"),
+            "beneficiary": bc.sbc.name if bc.sbc else "N/A",
+            "category": "Bon de Commande",
+            "total": f"{bc.total_amount_ttc:,.2f} MAD"
+        }
+
+        send_notification_email_detailled(
+            background_tasks=background_tasks,
+            recipients=target_emails,
+            subject=f"Action Required: BC {bc.bc_number} Pending L2 Approval",
+            module="BC",
+            status_text="L1 APPROVED - PENDING L2",
+            details=details,
+            link=f"/configuration/bc/detail/{bc.id}"
+        )
 
     return bc
 
 
-def approve_bc_l2(db: Session, bc_id: int, approver_id: int):
-    # 1. Fetch the Approver User
-    approver = db.query(models.User).get(approver_id)
-    if not approver:
-        raise ValueError("Approver user not found.")
-
-    # --- SECURITY CHECK: Must be Admin ---
-    if approver.role != models.UserRole.ADMIN:
-        raise ValueError("Permission Denied: Only an Administrator can perform Final Approval (L2).")
-    # -------------------------------------
-
+def approve_bc_l2(db: Session, bc_id: int, approver_id: int, comment: str, background_tasks: BackgroundTasks):
     bc = db.query(models.BonDeCommande).get(bc_id)
-    if not bc or bc.status != models.BCStatus.PENDING_L2:
+    if not bc:
+        raise ValueError("BC not found.")
+
+    # 1. Workflow Permission Check
+    is_authorized = check_workflow_permission(
+        db, 
+        project_id=bc.project_id, 
+        action=models.ProjectActionType.BC_APPROVE_L2, 
+        user_id=approver_id
+    )
+    if not is_authorized:
+        raise ValueError("Permission Denied: You are not assigned to L2 Approval for this project.")
+
+    if bc.status != models.BCStatus.PENDING_L2:
         raise ValueError("BC must be in PENDING_L2 status for Final Approval.")
     
     bc.status = models.BCStatus.APPROVED # Final
     bc.approver_l2_id = approver_id
     bc.approved_l2_at = datetime.now()
+    bc.l2_approval_comment = comment # <--- SAVE COMMENT
+    link = f"/configuration/bc/detail/{bc.id}"
+    invalidate_notifications_for_link(db, link)
     db.commit()
+
+    # --- 2. NOTIFICATIONS (Creator & SBC) ---
+    # Notify Creator (In-App)
+    if bc.creator_id:
+        create_notification(
+            db, recipient_id=bc.creator_id, 
+            type=models.NotificationType.APP,
+            module=models.NotificationModule.BC,
+            title="BC Fully Approved ✅",
+            message=f"Your BC #{bc.bc_number} has received final Finance approval.",
+            link=f"/configuration/bc/detail/{bc.id}"
+        )
+
+    # Notify SBC (Email)
+    if bc.sbc and bc.sbc.email:
+        pm_obj = bc.internal_project.project_manager if bc.internal_project else None
+        pm_name = f"{pm_obj.first_name} {pm_obj.last_name}" if pm_obj else "N/A"
+        creator_name = f"{bc.creator.first_name} {bc.creator.last_name}" if bc.creator else "N/A"
+
+        details = {
+            "id": bc.bc_number,
+            "project": bc.internal_project.name if bc.internal_project else "N/A",
+            "pm": pm_name,
+            "creator": creator_name,
+            "date": bc.approved_l2_at.strftime("%d/%m/%Y"),
+            "beneficiary": bc.sbc.name,
+            "category": "Bon de Commande",
+            "total": f"{bc.total_amount_ttc:,.2f} MAD"
+        }
+
+        # We also notify the creator via email for their records
+        recipients = [bc.sbc.email]
+        if bc.creator and bc.creator.email:
+            recipients.append(bc.creator.email)
+
+        send_notification_email_detailled(
+            background_tasks=background_tasks,
+            recipients=recipients,
+            subject=f"BC Approved: {bc.bc_number}",
+            module="BC",
+            status_text="FULLY APPROVED",
+            details=details,
+            link=f"/configuration/bc/detail/{bc.id}"
+        )
+
+    # --- 3. NOTIFICATIONS (ACT Validators) ---
+    pm_targets = get_action_notification_targets(db, bc.project_id, models.ProjectActionType.ACT_APPROVE_PM) 
+    rqc_targets = get_action_notification_targets(db, bc.project_id, models.ProjectActionType.ACT_APPROVE_RQC)
+    
+    combined_targets = list({u.id: u for u in pm_targets + rqc_targets}.values())
+    target_emails = [u.email for u in combined_targets if u.email]
+
+    for target in combined_targets:
+        create_notification(
+            db, recipient_id=target.id,
+            type=models.NotificationType.TODO,
+            module=models.NotificationModule.ACCEPTANCE,
+            title="BC Approved - Items Ready for Validation",
+            message=f"BC #{bc.bc_number} is approved. Items are ready for PM/RQC validation.",
+            link=f"/configuration/acceptance/workflow/{bc.id}"
+        )
+    
+    if target_emails:
+        details = {
+            "id": bc.bc_number,
+            "project": bc.internal_project.name if bc.internal_project else "N/A",
+            "category": "Acceptance Validation",
+            "remark": "BC is fully approved. Please proceed with PM/RQC validation of items."
+        }
+        send_notification_email_detailled(
+            background_tasks=background_tasks,
+            recipients=target_emails,
+            subject=f"Action Required: BC Approved - Ready for Validation {bc.bc_number}",
+            module="ACCEPTANCE",
+            status_text="READY FOR VALIDATION",
+            details=details,
+            link=f"/configuration/acceptance/workflow/{bc.id}"
+        )
+
     return bc
 def get_bcs_by_status(db: Session, status: models.BCStatus, search_term: Optional[str] = None):
     query = db.query(models.BonDeCommande).filter(models.BonDeCommande.status == status)
@@ -3005,30 +3316,68 @@ def get_all_bcs(db: Session, current_user: models.User, search: Optional[str] = 
     query = db.query(models.BonDeCommande)
 
     # 2. MANDATORY: Explicit Joins
-    # We join these tables so SQL can actually see the "name" and "short_name" columns
     query = query.join(models.InternalProject, models.BonDeCommande.project_id == models.InternalProject.id)
     query = query.join(models.SBC, models.BonDeCommande.sbc_id == models.SBC.id)
 
-    # 3. Role-based filtering
+    # =========================================================
+    # 3. ROLE-BASED FILTERING (The Fix)
+    # =========================================================
     role_str = str(current_user.role).upper()
+    
     if "ADMIN" in role_str or "RAF" in role_str:
-        pass # Admin sees everything
-    elif "PM" in role_str:
-        query = query.filter(
+        pass # Admin/RAF sees everything
+
+    elif "PM" in role_str or "PD" in role_str or "STAFF" in role_str:
+        # Define the exact actions/roles that grant visibility to a project's BCs
+        allowed_bc_actions =[
+            # Roles (Stakeholders)
+            models.ProjectActionType.ROLE_PD,
+            models.ProjectActionType.ROLE_PM,
+            models.ProjectActionType.ROLE_PC,
+            models.ProjectActionType.ROLE_RQC,
+            models.ProjectActionType.ROLE_SALES,
+            # BC Tasks
+            models.ProjectActionType.BC_CREATE_DRAFT,
+            models.ProjectActionType.BC_SUBMIT,
+            models.ProjectActionType.BC_APPROVE_L1,
+            models.ProjectActionType.BC_APPROVE_L2,
+            models.ProjectActionType.BC_GENERATE
+        ]
+        
+        # Ask the Matrix: Which projects is this user assigned to for the above actions?
+        allowed_projects_query = db.query(models.ProjectWorkflow.project_id).filter(
+            models.ProjectWorkflow.action_type.in_(allowed_bc_actions),
             or_(
-                models.BonDeCommande.creator_id == current_user.id,
-                models.InternalProject.project_manager_id == current_user.id
+                models.ProjectWorkflow.primary_users.any(id=current_user.id),
+                models.ProjectWorkflow.support_users.any(id=current_user.id)
             )
         )
+        # Extract to a simple list: [1, 5, 12]
+        allowed_project_ids = [row[0] for row in allowed_projects_query.all()]
+
+        # Apply the filter: You must either be authorized via the Matrix OR be the creator
+        if allowed_project_ids:
+            query = query.filter(
+                or_(
+                    models.BonDeCommande.project_id.in_(allowed_project_ids),
+                    models.BonDeCommande.creator_id == current_user.id
+                )
+            )
+        else:
+            # If not assigned to any project, they ONLY see BCs they explicitly created
+            query = query.filter(models.BonDeCommande.creator_id == current_user.id)
+
     elif "SBC" in role_str:
         if not current_user.sbc_id:
-            return []
+            return[]
         query = query.filter(
             models.BonDeCommande.sbc_id == current_user.sbc_id,
             models.BonDeCommande.status != models.BCStatus.DRAFT
         )
 
-    # 4. SEARCH LOGIC (Now correctly linked to joined tables)
+    # =========================================================
+    # 4. SEARCH LOGIC
+    # =========================================================
     if search:
         search_term = f"%{search}%"
         query = query.filter(
@@ -3036,7 +3385,11 @@ def get_all_bcs(db: Session, current_user: models.User, search: Optional[str] = 
                 models.BonDeCommande.bc_number.ilike(search_term),
                 models.SBC.short_name.ilike(search_term),
                 models.SBC.name.ilike(search_term),
-                models.InternalProject.name.ilike(search_term)
+                models.InternalProject.name.ilike(search_term),
+                models.BonDeCommande.creator.has(func.concat(models.User.first_name, " ", models.User.last_name).ilike(search_term)),
+                models.BonDeCommande.internal_project.has(
+                    models.InternalProject.project_manager.has(func.concat(models.User.first_name, " ", models.User.last_name).ilike(search_term))
+                )
             )
         )
 
@@ -3044,46 +3397,186 @@ def get_all_bcs(db: Session, current_user: models.User, search: Optional[str] = 
     if status_filter and status_filter != "ALL":
         query = query.filter(models.BonDeCommande.status == status_filter)
 
-    # 6. EAGER LOADING & EXECUTION
-    # We use contains_eager because we already did .join() above. 
-    # This prevents the Cartesian Product warning.
-    return (
-        query.options(
-            contains_eager(models.BonDeCommande.internal_project),
-            contains_eager(models.BonDeCommande.sbc),
-            joinedload(models.BonDeCommande.creator) # creator wasn't joined manually, so joinedload is fine
-        )
-        .order_by(models.BonDeCommande.created_at.desc())
-        .all()
-    )
+    # 6. Fetch the BCs
+    bcs = query.order_by(models.BonDeCommande.created_at.desc()).all()
+
+    # =========================================================
+    # 7. INJECT PERMISSIONS (For dynamic Frontend Buttons)
+    # =========================================================
+    is_admin = current_user.role == models.UserRole.ADMIN
+    is_sbc = current_user.role == models.UserRole.SBC
     
-def reject_bc(db: Session, bc_id: int, reason: str, rejector_id: int):
+    from collections import defaultdict
+    user_permissions_by_project = defaultdict(list)
+    
+    if not is_admin and not is_sbc:
+        project_ids = list(set(bc.project_id for bc in bcs))
+        
+        if project_ids:
+            workflows = db.query(models.ProjectWorkflow).filter(
+                models.ProjectWorkflow.project_id.in_(project_ids),
+                or_(
+                    models.ProjectWorkflow.primary_users.any(id=current_user.id),
+                    models.ProjectWorkflow.support_users.any(id=current_user.id)
+                )
+            ).all()
+            
+            for w in workflows:
+                action_val = w.action_type.value if hasattr(w.action_type, 'value') else w.action_type
+                user_permissions_by_project[w.project_id].append(action_val)
+
+    for bc in bcs:
+        if is_admin:
+            bc.user_permissions = [e.value for e in models.ProjectActionType]
+        elif is_sbc:
+            if bc.sbc_id == current_user.sbc_id:
+                bc.user_permissions = ["BC_CONFIRM"]
+            else:
+                bc.user_permissions =[]
+        else:
+            perms = user_permissions_by_project.get(bc.project_id,[])
+            if bc.creator_id == current_user.id and "BC_CREATE_DRAFT" not in perms:
+                perms.append("BC_CREATE_DRAFT")
+            bc.user_permissions = perms
+
+    return bcs
+    
+def reject_bc(db: Session, bc_id: int, reason: str, rejector_id: int, background_tasks: BackgroundTasks = None):
     bc = db.query(models.BonDeCommande).get(bc_id)
     if not bc or bc.status not in [models.BCStatus.SUBMITTED, models.BCStatus.PENDING_L2]:
         raise ValueError("BC not found or cannot be rejected in its current state.")
     
     bc.status = models.BCStatus.REJECTED
     bc.rejection_reason = reason
-    # You could also add a 'rejected_by_id' foreign key if you want to track this
-    
+    bc.rejected_at = datetime.now()
+    bc.rejected_by_id = rejector_id
+    link = f"/configuration/bc/detail/{bc_id}"
+    invalidate_notifications_for_link(db, link)
+
     db.commit()
+
+    # --- 2. NOTIFICATIONS (Creator) ---
+    if bc.creator_id:
+        create_notification(
+            db, recipient_id=bc.creator_id, 
+            type=models.NotificationType.ALERT,
+            module=models.NotificationModule.BC,
+            title="BC Rejected ❌",
+            message=f"Your BC #{bc.bc_number} was rejected. Reason: {reason}",
+            link=f"/configuration/bc/detail/{bc.id}"
+        )
+
+        # Email Notification
+        creator = bc.creator
+        if creator and creator.email:
+            pm_obj = bc.internal_project.project_manager if bc.internal_project else None
+            pm_name = f"{pm_obj.first_name} {pm_obj.last_name}" if pm_obj else "N/A"
+            
+            details = {
+                "id": bc.bc_number,
+                "project": bc.internal_project.name if bc.internal_project else "N/A",
+                "pm": pm_name,
+                "creator": f"{creator.first_name} {creator.last_name}",
+                "date": bc.created_at.strftime("%d/%m/%Y"),
+                "beneficiary": bc.sbc.name if bc.sbc else "N/A",
+                "category": "Bon de Commande",
+                "total": f"{bc.total_amount_ttc:,.2f} MAD",
+                "remark": f"REJECTED: {reason}"
+            }
+
+            send_notification_email_detailled(
+                background_tasks=background_tasks, 
+                recipients=[creator.email],
+                subject=f"BC Rejected: {bc.bc_number}",
+                module="BC",
+                status_text="REJECTED",
+                details=details,
+                link=f"/configuration/bc/detail/{bc.id}"
+            )
+
     return bc
-def get_bc_by_id(db: Session, bc_id: int):
 
-    check_rejections_and_notify(db, bc_id)
 
-    return db.query(models.BonDeCommande).options(
-        # 1. Load items, and for each item, load the associated MergedPO
+def resolve_next_approvers(db: Session, bc: models.BonDeCommande) -> List[dict]:
+    """
+    Looks at a BC's status and determines who is next in line to approve it.
+    Returns a list of dictionaries with user info.
+    """
+    next_action = None
+    if bc.status == models.BCStatus.DRAFT:
+        next_action = models.ProjectActionType.BC_SUBMIT
+    elif bc.status == models.BCStatus.SUBMITTED:
+        next_action = models.ProjectActionType.BC_APPROVE_L1
+    elif bc.status == models.BCStatus.PENDING_L2:
+        next_action = models.ProjectActionType.BC_APPROVE_L2
+
+    if not next_action:
+        return []
+
+    # Get users for this action from the Matrix
+    users = get_project_users_by_role(db, bc.project_id, next_action)
+    
+    return [
+        {"id": u.id, "name": f"{u.first_name} {u.last_name}"} for u in users
+    ]
+
+def get_bc_by_id(db: Session, bc_id: int, current_user: models.User):
+    # 1. Fetch BC with ALL relationships pre-loaded
+    bc = db.query(models.BonDeCommande).options(
         joinedload(models.BonDeCommande.items).joinedload(models.BCItem.merged_po),
-        # 2. Load other relationships
         joinedload(models.BonDeCommande.sbc),
         joinedload(models.BonDeCommande.internal_project),
         joinedload(models.BonDeCommande.creator),
+        
+        # --- ADD THESE LINES TO PRE-LOAD APPROVERS ---
+        joinedload(models.BonDeCommande.approver_l1),
+        joinedload(models.BonDeCommande.approver_l2),
+        
         joinedload(models.BonDeCommande.items)
             .joinedload(models.BCItem.rejection_history)
             .joinedload(models.ItemRejectionHistory.rejected_by)
-
+            
     ).filter(models.BonDeCommande.id == bc_id).first()
+
+    if not bc:
+        return None
+
+    # 2. Check Rejections (Your existing notification logic)
+    check_rejections_and_notify(db, bc_id)
+
+    # 3. Calculate Permissions for this specific project
+    is_admin = current_user.role == models.UserRole.ADMIN
+    is_sbc = current_user.role == models.UserRole.SBC
+    
+    if is_admin:
+        bc.user_permissions = [e.value for e in models.ProjectActionType]
+    elif is_sbc:
+        bc.user_permissions = ["BC_CONFIRM"] if bc.sbc_id == current_user.sbc_id else []
+    else:
+        # Query matrix for this project and this user
+        workflows = db.query(models.ProjectWorkflow).filter(
+            models.ProjectWorkflow.project_id == bc.project_id,
+            or_(
+                models.ProjectWorkflow.primary_users.any(id=current_user.id),
+                models.ProjectWorkflow.support_users.any(id=current_user.id)
+            )
+        ).all()
+        
+        perms = []
+        for w in workflows:
+            # Safely extract the string whether SQLAlchemy returns an Enum or a raw string
+            action_val = w.action_type.value if hasattr(w.action_type, 'value') else w.action_type
+            perms.append(action_val)
+        
+        # Creator logic
+        if bc.creator_id == current_user.id and "BC_CREATE_DRAFT" not in perms:
+            perms.append("BC_CREATE_DRAFT")
+            
+        bc.user_permissions = perms
+    bc.next_approvers = resolve_next_approvers(db, bc)
+
+    return bc
+
 
 def assign_site_to_internal_project_by_code(
     db: Session,
@@ -3227,20 +3720,19 @@ def bulk_assign_sites(db: Session, site_ids: List[int], target_project_id: int, 
     if target_project and target_project.project_manager:
         pm_email = target_project.project_manager.email
         if pm_email:
-            send_notification_email(
+            send_notification_email_detailled(
                 background_tasks,
                 [pm_email],
                 "New Site Assignments Pending Review",
-                "",
+                "ACCEPTANCE",
+                "Sites Assigned",
                 {
-                    "message": f"Admin {admin_user.first_name} has assigned new sites/POs to your project. Please review and approve the assignments.",
-                    "details": {
-                        "Project": target_project.name,
-                        "Total PO Lines": result_count,
-                        "Sites Count": len(site_ids)
-                    },
-                    "link": "/projects/approvals"
-                }
+                    "project": target_project.name,
+                    "creator": f"{admin_user.first_name} {admin_user.last_name}",
+                    "category": "Site/PO Assignment",
+                    "remark": f"Total PO Lines: {result_count}, Sites Count: {len(site_ids)}. Admin {admin_user.first_name} has assigned new sites/POs to your project. Please review and approve the assignments."
+                },
+                link="/projects/approvals"
             )
 
     return {"updated": result_count, "skipped": len(site_ids) - len(valid_site_ids)}
@@ -3592,6 +4084,7 @@ def get_bc_export_dataframe(db: Session, current_user: models.User, export_type:
             for item in items:
                 row = header_info.copy()
                 row.update({
+                    "PO ID": item.merged_po.po_id if item.merged_po else "-",
                     "BC Line": item.merged_po.po_line_no if item.merged_po else "-",
                     "Site Code / DUID": item.merged_po.site_code if item.merged_po else "-",
                     "Description": item.merged_po.item_description if item.merged_po else "N/A",
@@ -3772,6 +4265,17 @@ def create_notification(
     # We usually commit in the main flow, but you can commit here if you want it instant
     # db.commit() 
     return notif
+def invalidate_notifications_for_link(db: Session, link_pattern: str):
+    """
+    Finds all unread 'TODO' notifications that match a specific link pattern
+    and marks them as read.
+    """
+    db.query(models.Notification).filter(
+        models.Notification.link == link_pattern,
+        models.Notification.type == models.NotificationType.TODO,
+        models.Notification.is_read == False
+    ).update({"is_read": True}, synchronize_session=False)
+    # The commit is handled by the parent function.
 
 def get_my_notifications(db: Session, user_id: int, unread_only: bool = False):
     query = db.query(models.Notification).filter(models.Notification.recipient_id == user_id)
@@ -3902,24 +4406,43 @@ def import_planning_targets(db: Session, df: pd.DataFrame):
     db.commit()
     return count
 
-def validate_bc_item(db: Session, item_id: int, user: models.User, action: str, comment: str = None):
+def validate_bc_items(db: Session, bc_id: int, item_ids: List[int], user: models.User, action: str, comment: str = None, background_tasks: BackgroundTasks = None):
     """
-    Handles QC or PM approval/rejection.
+    Bulk version of validate_bc_item.
+    """
+    results = []
+    for item_id in item_ids:
+        try:
+            # We call the singular one to reuse its complex logic
+            res = validate_bc_item(db, item_id, user, action, comment, background_tasks)
+            results.append(res)
+        except Exception as e:
+            # We can choose to fail the whole batch or just skip
+            print(f"Error validating item {item_id}: {e}")
+            raise e 
+    return results
+
+def validate_bc_item(db: Session, item_id: int, user: models.User, action: str, comment: str = None, background_tasks: BackgroundTasks = None):
+    """
+    Handles QC or PM approval/rejection with Matrix Security.
     action: "APPROVE" or "REJECT"
     """
-    item = db.query(models.BCItem).get(item_id)
+    item = db.query(models.BCItem).options(joinedload(models.BCItem.bc)).get(item_id)
     if not item: raise ValueError("Item not found")
 
-    # 1. Determine Role
-    is_qc = user.role == UserRole.QUALITY # Adjust to your Enum
-    is_pm = user.role in [UserRole.PM, UserRole.ADMIN] # PMs and Admins can approve as PM
-    is_pd = user.role in [UserRole.PD, UserRole.ADMIN]
-    print(f"DEBUG: User Role: {user.role}, is_qc: {is_qc}, is_pm: {is_pm}, is_pd: {is_pd}")
-        
+    project_id = item.bc.project_id if item.bc else None
+    if not project_id: raise ValueError("Item not linked to a valid project.")
+
+    # 0. Capture Old Status (For Notification Trigger)
+    old_status = item.global_status
+
+    # 1. Determine Role via Matrix (Strict)
+    is_qc = check_workflow_permission(db, project_id, models.ProjectActionType.ACT_APPROVE_RQC, user.id) or check_workflow_permission(db, project_id, models.ProjectActionType.ROLE_RQC, user.id)
+    is_pm = check_workflow_permission(db, project_id, models.ProjectActionType.ACT_APPROVE_PM, user.id)
+    is_pd = check_workflow_permission(db, project_id, models.ProjectActionType.ACT_APPROVE_PD, user.id)
 
     if not (is_qc or is_pm or is_pd):
-        print(f"user.role:{user.role}")
-        raise ValueError("Unauthorized role.")
+        raise ValueError("Permission Denied: You are not assigned to any validation role for this project.")
 
 
 
@@ -3953,6 +4476,7 @@ def validate_bc_item(db: Session, item_id: int, user: models.User, action: str, 
 
     elif action == "REJECT":
         if not comment: raise ValueError("Comment is mandatory for rejection.")
+        invalidate_notifications_for_link(db, f"/configuration/acceptance/workflow/{item.bc_id}")
         
         # Record History
         history = models.ItemRejectionHistory(
@@ -4005,16 +4529,76 @@ def validate_bc_item(db: Session, item_id: int, user: models.User, action: str, 
         
         item.global_status = models.ItemGlobalStatus.PENDING_PD_APPROVAL
 
+    db.flush()
+ # =======================================================
+    # 4. NOTIFICATION ENGINE (Triggered by State Changes)
+    # =======================================================
+    if background_tasks:
+        
+        # State Change 1: PENDING PD APPROVAL
+        if old_status != models.ItemGlobalStatus.PENDING_PD_APPROVAL and item.global_status == models.ItemGlobalStatus.PENDING_PD_APPROVAL:
+            pd_targets = get_action_notification_targets(db, project_id, models.ProjectActionType.ACT_APPROVE_PD)
+            pd_emails = [u.email for u in pd_targets if u.email]
+            
+            for target in pd_targets:
+                create_notification(db, recipient_id=target.id, type=models.NotificationType.TODO, module=models.NotificationModule.ACCEPTANCE, title="Item Pending PD Approval", message=f"Item from BC {item.bc.bc_number} is ready for your final approval.", link=f"/configuration/acceptance/workflow/{item.bc_id}")
+            
+            if pd_emails:
+                details = {"id": item.bc.bc_number, "project": item.bc.internal_project.name, "category": "Acceptance Validation", "remark": "QC and PM have approved. Item awaits PD final approval."}
+                send_notification_email_detailled(background_tasks, pd_emails, "Action Required: PD Approval", "ACCEPTANCE", "QC/PM APPROVED - PENDING PD", details, f"/configuration/acceptance/workflow/{item.bc_id}")
+
+        # State Change 2: READY FOR ACT GENERATION
+        if old_status != models.ItemGlobalStatus.READY_FOR_ACT and item.global_status == models.ItemGlobalStatus.READY_FOR_ACT:
+            # Notify generators AND the SBC
+            gen_targets = get_action_notification_targets(db, project_id, models.ProjectActionType.ACT_GENERATE)
+            sbc_users = item.bc.sbc.users if item.bc.sbc else[]
+            all_targets = list({u.id: u for u in gen_targets + sbc_users}.values()) # Remove duplicates
+            
+            for target in all_targets:
+                notif_type = models.NotificationType.APP if target in sbc_users else models.NotificationType.TODO
+                create_notification(db, recipient_id=target.id, type=notif_type, module=models.NotificationModule.ACCEPTANCE, title="Item Ready for ACT", message=f"Item from BC {item.bc.bc_number} is fully approved and ready for generation.", link=f"/configuration/acceptance/workflow/{item.bc_id}")
+            
+            target_emails =[u.email for u in all_targets if u.email]
+            if target_emails:
+                details = {"id": item.bc.bc_number, "project": item.bc.internal_project.name, "category": "ACT Generation", "remark": "Item is fully approved. The Acceptance document can now be generated."}
+                send_notification_email_detailled(background_tasks, target_emails, "Item Ready for Generation", "ACCEPTANCE", "READY FOR ACT GENERATION", details, f"/configuration/acceptance/workflow/{item.bc_id}")
+
+        # State Change 3: REJECTION
+        if action == "REJECT":
+            creator_id = item.bc.creator_id
+            sbc_users = item.bc.sbc.users if item.bc.sbc else[]
+            
+            # Notify BC Creator
+            if creator_id:
+                create_notification(db, recipient_id=creator_id, type=models.NotificationType.ALERT, module=models.NotificationModule.ACCEPTANCE, title="Item Rejected", message=f"Item from BC {item.bc.bc_number} was rejected.", link=f"/configuration/acceptance/workflow/{item.bc_id}")
+                creator = db.query(models.User).get(creator_id)
+                if creator and creator.email:
+                    details = {"id": item.bc.bc_number, "project": item.bc.internal_project.name, "remark": f"Rejection Reason: {comment}"}
+                    send_notification_email_detailled(background_tasks, [creator.email], "Item Rejected", "ACCEPTANCE", "ITEM REJECTED", details, f"/configuration/acceptance/workflow/{item.bc_id}")
+            
+            # Notify SBC
+            for sbc_user in sbc_users:
+                create_notification(db, recipient_id=sbc_user.id, type=models.NotificationType.ALERT, module=models.NotificationModule.ACCEPTANCE, title="Validation Rejected", message=f"Work validation rejected for BC {item.bc.bc_number}.", link=f"/sbc/bc/view/{item.bc_id}")
+
     db.commit()
     return item
-
-def generate_act_record(db: Session, bc_id: int, creator_id: int, item_ids: List[int]):
+def generate_act_record(db: Session, bc_id: int, creator_id: int, item_ids: List[int], background_tasks: BackgroundTasks = None):
     # 1. Fetch the Parent BC to check its Type
     bc = db.query(models.BonDeCommande).get(bc_id)
     if not bc:
         raise ValueError("BC not found.")
 
-    # 2. Fetch the Items requested for Acceptance
+    # 2. Workflow Permission Check
+    is_authorized = check_workflow_permission(
+        db, 
+        project_id=bc.project_id, 
+        action=models.ProjectActionType.ACT_GENERATE, 
+        user_id=creator_id
+    )
+    if not is_authorized:
+        raise ValueError("Permission Denied: You are not assigned to Generate ACTs for this project.")
+
+    # 3. Fetch the Items requested for Acceptance
     items = db.query(models.BCItem).options(
         joinedload(models.BCItem.merged_po) # Ensure we have the category
     ).filter(
@@ -4092,6 +4676,40 @@ def generate_act_record(db: Session, bc_id: int, creator_id: int, item_ids: List
     act.total_tax_amount = total_tax
     act.total_amount_ttc = total_ttc
     
+    # --- NOTIFICATIONS (Notify SBC) ---
+    if bc.sbc:
+        # Fetch all users linked to this SBC
+        sbc_users = bc.sbc.users
+        sbc_emails = [u.email for u in sbc_users if u.email]
+        if bc.sbc.email and bc.sbc.email not in sbc_emails:
+            sbc_emails.append(bc.sbc.email)
+
+        for sbc_user in sbc_users:
+            create_notification(
+                db, recipient_id=sbc_user.id, 
+                type=models.NotificationType.APP,
+                module=models.NotificationModule.ACCEPTANCE,
+                title="ACT Generated",
+                message=f"ACT {act.act_number} has been generated. You can now include it in your next Invoice.",
+                link=f"/sbc/acceptance/view/{act.id}"
+            )
+        
+        if sbc_emails:
+            details = {
+                "id": act.act_number,
+                "project": bc.internal_project.name if bc.internal_project else "N/A",
+                "total_ttc": f"{act.total_amount_ttc:,.2f} MAD"
+            }
+            send_notification_email_detailled(
+                background_tasks=background_tasks,
+                recipients=sbc_emails,
+                subject=f"ACT Generated: {act.act_number}",
+                module="ACCEPTANCE",
+                status_text="ACT GENERATED",
+                details=details,
+                link=f"/sbc/acceptance/view/{act.id}"
+            )
+
     db.commit()
     db.refresh(act)
     return act
@@ -4219,22 +4837,123 @@ def get_sbc_kpis(db: Session, user: models.User):
     }
 # backend/app/crud.py
 
-def get_sbc_acceptances(db: Session, user: models.User):
+def get_all_acts(db: Session, current_user: models.User, search: Optional[str] = None):
     """
-    Fetches the specific BC Items assigned to this SBC that are approved for payment.
+    Returns a list of all Acceptance Certificates (ACTs) with project-specific workflow filtering.
+    Injects 'user_permissions' for each row based on the Project Matrix.
     """
-    if user.role != "SBC" or not user.sbc_id:
-        return []
+    # 1. Start query from ServiceAcceptance
+    query = db.query(models.ServiceAcceptance).options(
+        joinedload(models.ServiceAcceptance.bc),
+        joinedload(models.ServiceAcceptance.creator),
+        joinedload(models.ServiceAcceptance.items)
+    )
 
-    acts = db.query(models.ServiceAcceptance).join(models.BonDeCommande).filter(
-        models.BonDeCommande.sbc_id == user.sbc_id
-    ).order_by(models.ServiceAcceptance.created_at.desc()).all()
-    
+    # 2. ROLE-BASED FILTERING
+    role_str = str(current_user.role).upper()
+
+    if "ADMIN" in role_str or "RAF" in role_str:
+        pass # Admin/RAF sees everything
+
+    elif "PM" in role_str or "PD" in role_str or "STAFF" in role_str:
+        # Define allowed actions for visibility
+        allowed_act_actions = [
+            models.ProjectActionType.ROLE_PD,
+            models.ProjectActionType.ROLE_PM,
+            models.ProjectActionType.ROLE_PC,
+            models.ProjectActionType.ROLE_RQC,
+            models.ProjectActionType.ACT_APPROVE_RQC,
+            models.ProjectActionType.ACT_APPROVE_PM,
+            models.ProjectActionType.ACT_APPROVE_PD,
+            models.ProjectActionType.ACT_GENERATE
+        ]
+
+        allowed_projects_query = db.query(models.ProjectWorkflow.project_id).filter(
+            models.ProjectWorkflow.action_type.in_(allowed_act_actions),
+            or_(
+                models.ProjectWorkflow.primary_users.any(id=current_user.id),
+                models.ProjectWorkflow.support_users.any(id=current_user.id)
+            )
+        )
+        allowed_project_ids = [row[0] for row in allowed_projects_query.all()]
+
+        # Filter by project OR creator
+        # ACT has bc_id, so we need to join BC to get project_id
+        query = query.join(models.BonDeCommande, models.ServiceAcceptance.bc_id == models.BonDeCommande.id)
+
+        if allowed_project_ids:
+            query = query.filter(
+                or_(
+                    models.BonDeCommande.project_id.in_(allowed_project_ids),
+                    models.ServiceAcceptance.creator_id == current_user.id
+                )
+            )
+        else:
+            query = query.filter(models.ServiceAcceptance.creator_id == current_user.id)
+
+    elif "SBC" in role_str:
+        if not current_user.sbc_id:
+            return []
+        query = query.join(models.BonDeCommande, models.ServiceAcceptance.bc_id == models.BonDeCommande.id)
+        query = query.filter(models.BonDeCommande.sbc_id == current_user.sbc_id)
+
+    # 3. SEARCH LOGIC
+    if search:
+        search_term = f"%{search}%"
+        # Since we might have already joined BC for PM/PD filtering, we handle it safely
+        if not any(j.mapper.class_ == models.BonDeCommande for j in query.get_label_info() if hasattr(j, 'mapper')):
+             # This is a bit complex in SQLAlchemy, simpler to check if search requires it
+             pass # In this specific implementation, search always joins if needed
+
+        # Add a join for search if not already there (safe to add if unique)
+        # Note: If PM filter already joined BC, this won't double join if handled correctly
+        query = query.filter(
+            or_(
+                models.ServiceAcceptance.act_number.ilike(search_term),
+                models.BonDeCommande.bc_number.ilike(search_term)
+            )
+        )
+
+    # 4. Fetch the ACTs
+    acts = query.order_by(models.ServiceAcceptance.created_at.desc()).all()
+
+    # 5. INJECT PERMISSIONS
+    is_admin = current_user.role == models.UserRole.ADMIN
+    is_sbc = current_user.role == models.UserRole.SBC
+
+    user_permissions_by_project = defaultdict(list)
+
+    if not is_admin and not is_sbc:
+        project_ids = list(set(act.bc.project_id for act in acts if act.bc))
+
+        if project_ids:
+            workflows = db.query(models.ProjectWorkflow).filter(
+                models.ProjectWorkflow.project_id.in_(project_ids),
+                or_(
+                    models.ProjectWorkflow.primary_users.any(id=current_user.id),
+                    models.ProjectWorkflow.support_users.any(id=current_user.id)
+                )
+            ).all()
+
+            for w in workflows:
+                action_val = w.action_type.value if hasattr(w.action_type, 'value') else w.action_type
+                user_permissions_by_project[w.project_id].append(action_val)
+
+    for act in acts:
+        if is_admin:
+            act.user_permissions = [e.value for e in models.ProjectActionType]
+        elif is_sbc:
+            act.user_permissions = [] # SBCs don't have special ACT actions in matrix yet
+        else:
+            # act.bc is loaded via joinedload
+            project_id = act.bc.project_id if act.bc else None
+            perms = user_permissions_by_project.get(project_id, [])
+            act.user_permissions = perms
+
     return acts
 
 
-
-def create_pm_fund_request(db: Session, pm_id: int, payload: schemas.FundRequestCreate):
+def create_pm_fund_request(db: Session, pm_id: int, payload: schemas.FundRequestCreate, background_tasks: BackgroundTasks = None):
     # Calculate initial total from PM input
     total = sum(item.amount for item in payload.items)
     now = datetime.now()
@@ -4286,17 +5005,81 @@ def create_pm_fund_request(db: Session, pm_id: int, payload: schemas.FundRequest
         )
         db.add(db_item)
 
+    # --- 2. NOTIFICATIONS ---
+    # Global Admins (No matrix)
+    admins = db.query(models.User).filter(models.User.role == models.UserRole.ADMIN, models.User.is_active == True).all()
+    admin_emails = [u.email for u in admins if u.email]
+
+    for admin in admins:
+        create_notification(
+            db, recipient_id=admin.id, 
+            type=models.NotificationType.TODO,
+            module=models.NotificationModule.CAISSE,
+            title="New PM Fund Request",
+            message=f"Request {db_req.request_number} needs validation.",
+            link="/caisse"
+        )
+
+    if admin_emails:
+        pm_user_obj = db.query(models.User).get(pm_id)
+        pm_name = f"{pm_user_obj.first_name} {pm_user_obj.last_name}" if pm_user_obj else "N/A"
+        
+        details = {
+            "id": db_req.request_number,
+            "creator": pm_name,
+            "date": db_req.created_at.strftime("%d/%m/%Y"),
+            "total": f"{total:,.2f} MAD"
+        }
+
+        send_notification_email_detailled(
+            background_tasks=background_tasks, 
+            recipients=admin_emails,
+            subject=f"Action Required: New PM Fund Request {db_req.request_number}",
+            module="CAISSE",
+            status_text="PENDING VALIDATION",
+            details=details,
+            link="/caisse"
+        )
     
     db.commit()
     return db_req
 
-def pd_validate_request(db: Session, req_id: int, pd_id: int, payload: schemas.PDReviewAction):
+def pd_validate_request(db: Session, req_id: int, pd_id: int, payload: schemas.PDReviewAction, background_tasks: BackgroundTasks = None):
     req = db.query(models.FundRequest).get(req_id)
     if not req: return None
 
     if payload.action == "REJECT":
         req.status = models.FundRequestStatus.REJECTED
         req.admin_comment = payload.comment
+        
+        # --- NOTIFICATIONS (Notify Requester) ---
+        requester = req.requester
+        if requester:
+            create_notification(
+                db, recipient_id=requester.id,
+                type=models.NotificationType.ALERT,
+                module=models.NotificationModule.CAISSE,
+                title="Fund Request Rejected ❌",
+                message=f"Your fund request {req.request_number} was rejected by PD.",
+                link="/caisse"
+            )
+            if requester.email:
+                details = {
+                    "id": req.request_number,
+                    "creator": f"{requester.first_name} {requester.last_name}",
+                    "date": req.created_at.strftime("%d/%m/%Y"),
+                    "total": f"{sum(i.requested_amount for i in req.items):,.2f} MAD",
+                    "remark": f"REJECTED BY PD: {payload.comment}"
+                }
+                send_notification_email_detailled(
+                    background_tasks=background_tasks,
+                    recipients=[requester.email],
+                    subject=f"Fund Request Rejected: {req.request_number}",
+                    module="CAISSE",
+                    status_text="REJECTED BY PD",
+                    details=details,
+                    link="/caisse"
+                )
 
     else:
         req.status = models.FundRequestStatus.VALIDATED_PD
@@ -4323,12 +5106,43 @@ def pd_validate_request(db: Session, req_id: int, pd_id: int, payload: schemas.P
             
         # Update parent total
         req.pd_validated_amount = sum(i.pd_approved_amount for i in req.items)
+
+        # --- NOTIFICATIONS (Notify Admins) ---
+        admins = db.query(models.User).filter(models.User.role == models.UserRole.ADMIN, models.User.is_active == True).all()
+        admin_emails = [u.email for u in admins if u.email]
+        for admin in admins:
+            create_notification(
+                db, recipient_id=admin.id,
+                type=models.NotificationType.TODO,
+                module=models.NotificationModule.CAISSE,
+                title="Fund Request Validated (PD)",
+                message=f"Request {req.request_number} is validated by PD and needs authorization.",
+                link="/caisse"
+            )
+        if admin_emails:
+            pd_user = db.query(models.User).get(pd_id)
+            pd_name = f"{pd_user.first_name} {pd_user.last_name}" if pd_user else "PD"
+            details = {
+                "id": req.request_number,
+                "creator": pd_name,
+                "date": req.pd_approved_at.strftime("%d/%m/%Y"),
+                "total": f"{req.pd_validated_amount:,.2f} MAD"
+            }
+            send_notification_email_detailled(
+                background_tasks=background_tasks,
+                recipients=admin_emails,
+                subject=f"Action Required: Fund Request Authorized by PD {req.request_number}",
+                module="CAISSE",
+                status_text="PD VALIDATED - PENDING ADMIN",
+                details=details,
+                link="/caisse"
+            )
         
     db.commit()
     return req
 
 
-def admin_authorize_request(db: Session, req_id: int, admin_id: int, payload: schemas.AdminReviewAction):
+def admin_authorize_request(db: Session, req_id: int, admin_id: int, payload: schemas.AdminReviewAction, background_tasks: BackgroundTasks = None):
     req = db.query(models.FundRequest).get(req_id)
     if not req: return None
 
@@ -4388,13 +5202,73 @@ def admin_authorize_request(db: Session, req_id: int, admin_id: int, payload: sc
     # Reset variance flags because new money is traveling
     req.variance_acknowledged = False 
     
+    # --- NOTIFICATIONS ---
+    # 1. Notify RAFs
+    rafs = db.query(models.User).filter(models.User.role == models.UserRole.RAF, models.User.is_active == True).all()
+    raf_emails = [u.email for u in rafs if u.email]
+    for raf in rafs:
+        create_notification(
+            db, recipient_id=raf.id,
+            type=models.NotificationType.TODO,
+            module=models.NotificationModule.CAISSE,
+            title="Funds Transfer Required",
+            message=f"Fund request {req.request_number} is authorized. Please transfer funds.",
+            link="/caisse"
+        )
+    if raf_emails:
+        admin_user = db.query(models.User).get(admin_id)
+        admin_name = f"{admin_user.first_name} {admin_user.last_name}" if admin_user else "Admin"
+        details = {
+            "id": req.request_number,
+            "creator": admin_name,
+            "date": req.admin_approved_at.strftime("%d/%m/%Y"),
+            "total": f"{total_released_this_session:,.2f} MAD"
+        }
+        send_notification_email_detailled(
+            background_tasks=background_tasks,
+            recipients=raf_emails,
+            subject=f"Action Required: Transfer Funds for {req.request_number}",
+            module="CAISSE",
+            status_text="AUTHORIZED - WAITING TRANSFER",
+            details=details,
+            link="/caisse"
+        )
+    
+    # 2. Notify Requester
+    requester = req.requester
+    if requester:
+        create_notification(
+            db, recipient_id=requester.id,
+            type=models.NotificationType.APP,
+            module=models.NotificationModule.CAISSE,
+            title="Fund Request Authorized ✅",
+            message=f"Your fund request {req.request_number} has been authorized for {total_released_this_session:,.2f} MAD.",
+            link="/caisse"
+        )
+        if requester.email:
+            details = {
+                "id": req.request_number,
+                "creator": f"{requester.first_name} {requester.last_name}",
+                "date": req.admin_approved_at.strftime("%d/%m/%Y"),
+                "total": f"{total_released_this_session:,.2f} MAD"
+            }
+            send_notification_email_detailled(
+                background_tasks=background_tasks,
+                recipients=[requester.email],
+                subject=f"Fund Request Authorized: {req.request_number}",
+                module="CAISSE",
+                status_text="AUTHORIZED - AWAITING FUNDS",
+                details=details,
+                link="/caisse"
+            )
+
     db.commit()
     db.refresh(req)
     return req
 
 
 
-def raf_confirm_reception(db: Session, req_id: int, raf_id: int, item_confirmations: dict, file_name: str):
+def raf_confirm_reception(db: Session, req_id: int, raf_id: int, item_confirmations: dict, file_name: str, background_tasks: BackgroundTasks = None):
     req = db.query(models.FundRequest).get(req_id)
     if not req: raise ValueError("Request not found")
 
@@ -4423,7 +5297,6 @@ def raf_confirm_reception(db: Session, req_id: int, raf_id: int, item_confirmati
             wallet.reserved_balance = max(0, (wallet.reserved_balance or 0.0) - received_now)
 
             # 3. TRANSACTION LOGIC
-            # Try to find a PENDING transaction to close
             pending_tx = db.query(models.Transaction).filter(
                 models.Transaction.related_request_id == req.id,
                 models.Transaction.caisse_id == wallet.id,
@@ -4431,22 +5304,16 @@ def raf_confirm_reception(db: Session, req_id: int, raf_id: int, item_confirmati
             ).order_by(models.Transaction.created_at.asc()).first()
             
             if pending_tx:
-                # Scenario A: Standard confirmation
-                # If we received LESS than the pending tx, we update the amount and close it.
-                # The remaining difference "vanishes" into the variance gap.
                 pending_tx.amount = received_now 
                 pending_tx.status = models.TransactionStatus.COMPLETED
                 pending_tx.created_at = now
                 pending_tx.proof_file = file_name
             else:
-                # Scenario B: "Late Arrival" (No pending TX exists)
-                # The Admin already sent it, but the TX was closed in a previous partial confirmation.
-                # We must create a new COMPLETED transaction to record this new cash entry.
                 new_tx = models.Transaction(
                     caisse_id=wallet.id,
                     amount=received_now,
                     type=models.TransactionType.CREDIT,
-                    status=models.TransactionStatus.COMPLETED, # Directly completed
+                    status=models.TransactionStatus.COMPLETED,
                     related_request_id=req.id,
                     created_by_id=req.admin_approver_id,
                     description=f"Refill (Late Arrival): {req.request_number}",
@@ -4461,8 +5328,7 @@ def raf_confirm_reception(db: Session, req_id: int, raf_id: int, item_confirmati
     req.raf_id = raf_id
     
     # 5. Status Logic
-    # If the gap is closed, mark as COMPLETED.
-    total_pm_goal = sum(i.requested_amount for i in req.items) # Or PD approved amount
+    total_pm_goal = sum(i.requested_amount for i in req.items)
     
     if req.confirmed_reception_amount >= (total_pm_goal - 0.1):
         req.status = models.FundRequestStatus.COMPLETED
@@ -4472,58 +5338,158 @@ def raf_confirm_reception(db: Session, req_id: int, raf_id: int, item_confirmati
 
     db.commit()
     db.refresh(req)
+
+    # --- NOTIFICATIONS ---
+    requester = req.requester
+    if requester:
+        create_notification(
+            db, recipient_id=requester.id, 
+            type=models.NotificationType.APP,
+            module=models.NotificationModule.CAISSE,
+            title="Funds Received ✅",
+            message=f"Funds for request {req.request_number} are now in your wallet.",
+            link="/caisse"
+        )
+        if requester.email and background_tasks:
+            details = {
+                "id": req.request_number,
+                "creator": f"{requester.first_name} {requester.last_name}",
+                "date": now.strftime("%d/%m/%Y"),
+                "total": f"{total_received_now:,.2f} MAD"
+            }
+            send_notification_email_detailled(
+                background_tasks=background_tasks,
+                recipients=[requester.email],
+                subject=f"Funds Received: {req.request_number}",
+                module="CAISSE",
+                status_text="FUNDS RECEIVED",
+                details=details,
+                link="/caisse"
+            )
+
     return req
 
-def create_fund_request(db: Session, pd_user: int, items: list):
-    now = datetime.now()
-    year = now.year
-    month = now.month
+# def create_fund_request(db: Session, pd_user: int, items: list):
+#     now = datetime.now()
+#     year = now.year
+#     month = now.month
     
-    # Generate ID based on Year-Month
-    # Count requests in this specific month to restart sequence or just keep global sequence?
-    # Global sequence is safer: REQ-2026-01-001
+#     # Generate ID based on Year-Month
+#     # Count requests in this specific month to restart sequence or just keep global sequence?
+#     # Global sequence is safer: REQ-2026-01-001
     
-    # Find last request from this month
-    pattern = f"REQ-{year}-{month:02d}-%"
-    last_req = db.query(models.FundRequest).filter(
-        models.FundRequest.request_number.like(pattern)
-    ).order_by(models.FundRequest.id.desc()).first()
+#     # Find last request from this month
+#     pattern = f"REQ-{year}-{month:02d}-%"
+#     last_req = db.query(models.FundRequest).filter(
+#         models.FundRequest.request_number.like(pattern)
+#     ).order_by(models.FundRequest.id.desc()).first()
     
-    if last_req:
-        try:
-            last_seq = int(last_req.request_number.split('-')[-1])
-            new_seq = last_seq + 1
-        except:
-            new_seq = 1
-    else:
-        new_seq = 1
+#     if last_req:
+#         try:
+#             last_seq = int(last_req.request_number.split('-')[-1])
+#             new_seq = last_seq + 1
+#         except:
+#             new_seq = 1
+#     else:
+#         new_seq = 1
         
-    req_num = f"REQ-{year}-{month:02d}-{new_seq:03d}"
+#     req_num = f"REQ-{year}-{month:02d}-{new_seq:03d}"
     
-    new_req = models.FundRequest(
-        request_number=req_num,
-        requester_id=pd_user,
-        status=models.FundRequestStatus.PENDING_APPROVAL,
-        created_at=datetime.now()
-    )
+#     new_req = models.FundRequest(
+#         request_number=req_num,
+#         requester_id=pd_user,
+#         status=models.FundRequestStatus.PENDING_APPROVAL,
+#         created_at=datetime.now()
+#     )
 
-    db.add(new_req)
-    db.flush() # Get ID
+#     db.add(new_req)
+#     db.flush() # Get ID
     
-    for item in items:
-        db_item = models.FundRequestItem(
-            request_id=new_req.id,
-            target_pm_id=item.pm_id,
-            requested_amount=item.amount,
-            approved_amount=0.0, 
-            remarque=item.remarque # <--- Save the remark
-        )
-        db.add(db_item)
+#     for item in items:
+#         db_item = models.FundRequestItem(
+#             request_id=new_req.id,
+#             target_pm_id=item.pm_id,
+#             requested_amount=item.amount,
+#             approved_amount=0.0, 
+#             remarque=item.remarque # <--- Save the remark
+#         )
+#         db.add(db_item)
+
+#         # --- 2. NOTIFICATIONS ---
+#         # Global Admins (No matrix)
+#         admins = db.query(models.User).filter(models.User.role == models.UserRole.ADMIN, models.User.is_active == True).all()
+#         admin_emails = [u.email for u in admins if u.email]
+
+#         for admin in admins:
+#         create_notification(
+#             db, recipient_id=admin.id, 
+#             type=models.NotificationType.TODO,
+#             module=models.NotificationModule.CAISSE,
+#             title="New Fund Request",
+#             message=f"Request {db_req.request_number} needs approval",
+#             link="/caisse"
+#         )
+
+#         if admin_emails:
+#         pm_user_obj = db.query(models.User).get(pm_id)
+#         pm_name = f"{pm_user_obj.first_name} {pm_user_obj.last_name}" if pm_user_obj else "N/A"
+
+#         details = {
+#             "id": db_req.request_number,
+#             "creator": pm_name,
+#             "date": db_req.created_at.strftime("%d/%m/%Y"),
+#             "total": f"{sum(item.amount for item in payload.items):,.2f} MAD"
+#         }
+
+#         send_notification_email_detailled(
+#             background_tasks=None, 
+#             recipients=admin_emails,
+#             subject=f"Action Required: New Fund Request {db_req.request_number}",
+#             module="CAISSE",
+#             status_text="PENDING APPROVAL",
+#             details=details,
+#             link="/caisse"
+#         )
+
+#         db.commit()    db.refresh(new_req) # Refresh to load relationships/IDs
+
+#     # --- 2. NOTIFICATIONS ---
+#     # Global Admins (No matrix)
+#     admins = db.query(models.User).filter(models.User.role == models.UserRole.ADMIN, models.User.is_active == True).all()
+#     admin_emails = [u.email for u in admins if u.email]
+
+#     for admin in admins:
+#         create_notification(
+#             db, recipient_id=admin.id, 
+#             type=models.NotificationType.TODO,
+#             module=models.NotificationModule.CAISSE,
+#             title="New Fund Request",
+#             message=f"Request {new_req.request_number} needs approval",
+#             link="/caisse"
+#         )
+
+#     if admin_emails:
+#         pd_user_obj = db.query(models.User).get(pd_user)
+#         pd_name = f"{pd_user_obj.first_name} {pd_user_obj.last_name}" if pd_user_obj else "N/A"
         
-    db.commit()
-    db.refresh(new_req) # Refresh to load relationships/IDs
+#         details = {
+#             "id": new_req.request_number,
+#             "creator": pd_name,
+#             "date": new_req.created_at.strftime("%d/%m/%Y"),
+#             "total": f"{sum(i.amount for i in items):,.2f} MAD"
+#         }
 
-    return new_req
+#         send_notification_email_detailled(
+#             background_tasks=None, 
+#             recipients=admin_emails,
+#             subject=f"Action Required: New Fund Request {new_req.request_number}",
+#             module="CAISSE",
+#             status_text="PENDING APPROVAL",
+#             details=details,
+#             link="/caisse"
+#         )
+
+#     return new_req
     
 def approve_fund_request(db: Session, req_id: int, admin_id: int, approved_items: dict):
     # approved_items is a dict: { item_id: approved_amount }
@@ -4755,10 +5721,13 @@ def get_transactions(
     
     if search:
         term = f"%{search}%"
+        # Combine first and last name for full-name matching
+        full_name = func.concat(models.User.first_name, " ", models.User.last_name)
         query = query.filter(or_(
             models.Transaction.description.ilike(term),
             models.User.first_name.ilike(term),
-            models.User.last_name.ilike(term)
+            models.User.last_name.ilike(term),
+            full_name.ilike(term)
         ))
 
     total_items = query.count()
@@ -5019,103 +5988,134 @@ def get_all_wallets_summary(db: Session):
         })
         
     return sorted(results, key=lambda x: x['balance'], reverse=True)
-def process_fund_request(
-    db: Session, 
-    req_id: int, 
-    payload: schemas.FundRequestReviewAction, 
-    admin_id: int
-):
-    req = db.query(models.FundRequest).get(req_id)
-    if not req: 
-        raise ValueError("Request not found")
+# def process_fund_request(
+#     db: Session, 
+#     req_id: int, 
+#     payload: schemas.FundRequestReviewAction, 
+#     admin_id: int
+# ):
+#     req = db.query(models.FundRequest).get(req_id)
+#     if not req: 
+#         raise ValueError("Request not found")
 
-    # 1. HANDLE REJECTION (No changes needed)
-    if payload.action == "REJECT":
-        if not payload.comment:
-            raise ValueError("A comment is mandatory when rejecting.")
-        req.status = models.FundRequestStatus.REJECTED
-        req.admin_comment = payload.comment
-        req.approver_id = admin_id
-        req.approved_at = datetime.now()
-        db.commit()
-        return req
-    
-    # 2. CALCULATE REMAINING BUDGET BASED ON SOURCE OF TRUTH (Confirmed)
-    total_requested = sum(item.requested_amount for item in req.items)
-    
-    # CHANGE: Use the confirmed amount, not the paid amount.
-    # This represents the money actually in the PD's hands.
-    total_confirmed = sum(item.confirmed_amount or 0.0 for item in req.items)
-    total_in_flight = db.query(func.sum(models.Transaction.amount)).filter(
-        models.Transaction.related_request_id == req.id,
-        models.Transaction.status == models.TransactionStatus.PENDING
-    ).scalar() or 0.0
+#     # --- 1. HANDLE REJECTION ---
+#     if payload.action == "REJECT":
+#         if not payload.comment:
+#             raise ValueError("A comment is mandatory when rejecting.")
+#         req.status = models.FundRequestStatus.REJECTED
+#         req.admin_comment = payload.comment
+#         req.approver_id = admin_id
+#         req.approved_at = datetime.now()
+#         db.commit()
 
-    # The "Real" Gap is what is left after considering what was sent
-    authorized_so_far = total_confirmed + total_in_flight
-    remaining_allocatable_gap = total_requested - authorized_so_far
+#         # NOTIFY REQUESTER (In-App & Email)
+#         create_notification(
+#             db, recipient_id=req.requester_id, 
+#             type=models.NotificationType.ALERT,
+#             module=models.NotificationModule.CAISSE,
+#             title="Fund Request Rejected ❌",
+#             message=f"Your fund request #{req.request_number} was rejected.",
+#             link="/caisse"
+#         )
 
+#         requester = req.requester
+#         if requester and requester.email:
+#             details = {
+#                 "id": req.request_number,
+#                 "creator": f"{requester.first_name} {requester.last_name}",
+#                 "date": req.created_at.strftime("%d/%m/%Y"),
+#                 "total": f"{sum(i.requested_amount for i in req.items):,.2f} MAD",
+#                 "remark": req.admin_comment # The rejection reason
+#             }
 
-    if payload.action == "APPROVE":
-        if not payload.items:
-             raise ValueError("Approval requires item details.")
+#             send_notification_email_detailled(
+#                 background_tasks=None, 
+#                 recipients=[requester.email],
+#                 subject=f"Fund Request Rejected: {req.request_number}",
+#                 module="CAISSE",
+#                 status_text="REJECTED",
+#                 details=details,
+#                 link="/caisse"
+#             )
 
-        amount_giving_now = sum(i.amount_to_pay for i in payload.items)
+#         return req
+
+#     # ... (rest of math logic) ...
+
+#     if payload.action == "APPROVE":
+#         # ... (approval math logic) ...
+
+#         # --- NOTIFICATIONS (After commit) ---
+#         db.commit()
+#         db.refresh(req)
+
+#         # Global RAFs (No matrix)
+#         rafs = db.query(models.User).filter(models.User.role == models.UserRole.RAF, models.User.is_active == True).all()
+#         raf_emails = [u.email for u in rafs if u.email]
         
-        # VALIDATION: Check against the confirmed base.
-        # Max allowed = Requested - Confirmed
-        if amount_giving_now > (remaining_allocatable_gap + 1.0): 
-            raise ValueError(
-                f"Validation Error: You already have {total_in_flight} MAD pending confirmation. "
-                f"The maximum additional amount you can approve now is {remaining_allocatable_gap} MAD."
-            )
+#         total_val = sum(i.requested_amount for i in req.items)
 
-        # Update parent record
-        req.paid_amount = authorized_so_far + amount_giving_now # Total authorized by Admin
-        req.variance_acknowledged = False 
-        req.variance_note = None
-        req.approver_id = admin_id
-        req.approved_at = datetime.now()
+#         for raf in rafs:
+#             create_notification(
+#                 db, recipient_id=raf.id, 
+#                 type=models.NotificationType.TODO,
+#                 module=models.NotificationModule.CAISSE,
+#                 title="Funds Transfer Required",
+#                 message=f"Fund request #{req.request_number} is approved. Please transfer funds.",
+#                 link="/caisse"
+#             )
 
-        # 3. CREATE PENDING TRANSACTIONS
-        for item_review in payload.items:
-            db_item = next((i for i in req.items if i.id == item_review.item_id), None)
-            if not db_item or item_review.amount_to_pay <= 0: 
-                continue
+#         # 2. Notify Requester (In-App & Email)
+#         create_notification(
+#             db, recipient_id=req.requester_id, 
+#             type=models.NotificationType.APP,
+#             module=models.NotificationModule.CAISSE,
+#             title="Fund Request Approved ✅",
+#             message=f"Your fund request #{req.request_number} has been approved.",
+#             link="/caisse"
+#         )
+        
+#         requester = req.requester
+#         if requester and requester.email:
+#             details = {
+#                 "id": req.request_number,
+#                 "creator": f"{requester.first_name} {requester.last_name}",
+#                 "date": req.created_at.strftime("%d/%m/%Y"),
+#                 "total": f"{total_val:,.2f} MAD"
+#             }
+#             send_notification_email_detailled(
+#                 background_tasks=None, 
+#                 recipients=[requester.email],
+#                 subject=f"Fund Request Approved: {req.request_number}",
+#                 module="CAISSE",
+#                 status_text="APPROVED - AWAITING FUNDS",
+#                 details=details,
+#                 link="/caisse"
+#             )
 
-            # Update the item's authorized amount (Resetting it to Confirmed + New)
-            db_item.approved_amount = (db_item.confirmed_amount or 0.0) + item_review.amount_to_pay
+#         # 3. Email to RAFs
+#         if raf_emails:
+#             admin_user = db.query(models.User).get(admin_id)
+#             admin_name = f"{admin_user.first_name} {admin_user.last_name}" if admin_user else "Admin"
             
-            if hasattr(item_review, 'admin_note') and item_review.admin_note:
-                db_item.admin_note = item_review.admin_note
-            
-            wallet = db.query(models.Caisse).filter(models.Caisse.user_id == db_item.target_pm_id).first()
-            if not wallet:
-                wallet = models.Caisse(user_id=db_item.target_pm_id, balance=0.0, reserved_balance=0.0)
-                db.add(wallet)
-                db.flush()
+#             details = {
+#                 "id": req.request_number,
+#                 "creator": admin_name,
+#                 "date": req.approved_at.strftime("%d/%m/%Y"),
+#                 "total": f"{total_val:,.2f} MAD"
+#             }
 
-            trx = models.Transaction(
-                caisse_id=wallet.id,
-                type=models.TransactionType.CREDIT,
-                amount=item_review.amount_to_pay,
-                description=f"Refill {req.request_number} (Approval Session)",
-                related_request_id=req.id,
-                created_by_id=admin_id,
-                created_at=datetime.now(),
-                status=models.TransactionStatus.PENDING 
-            )
-            db.add(trx)
+#             send_notification_email_detailled(
+#                 background_tasks=None, 
+#                 recipients=raf_emails,
+#                 subject=f"Action Required: Transfer Funds for {req.request_number}",
+#                 module="CAISSE",
+#                 status_text="APPROVED - WAITING FOR TRANSFER",
+#                 details=details,
+#                 link="/caisse"
+#             )
 
-        # 4. FINAL STATUS LOGIC
-        if payload.close_request or (authorized_so_far + amount_giving_now >= total_requested - 0.1):
-            req.status = models.FundRequestStatus.APPROVED_WAITING_FUNDS
-        else:
-            req.status = models.FundRequestStatus.PARTIALLY_PAID
-
-    db.commit()
-    db.refresh(req)
-    return req
+#         return req
     
 # ==================== EXPENSES CRUD ====================
 
@@ -5136,20 +6136,21 @@ def check_missing_expense_uploads(db: Session, background_tasks: BackgroundTasks
     for exp in missing_docs:
         # We notify the PD (L1 Approver) who is responsible for the physical paper
         if exp.l1_approver and exp.l1_approver.email:
-            send_notification_email(
+            send_notification_email_detailled(
                 background_tasks,
                 [exp.l1_approver.email],
                 "ACTION REQUIRED: Missing Signed Expense Voucher",
-                "",
+                "EXP",
+                "Missing Signed Voucher",
                 {
-                    "message": f"The expense #{exp.id} is marked as PAID, but the signed physical voucher has not been uploaded yet.",
-                    "details": {
-                        "Amount": f"{exp.amount} MAD",
-                        "Project": exp.internal_project.name if exp.internal_project else "N/A",
-                        "Beneficiary": exp.beneficiary
-                    },
-                    "link": f"/expenses/{exp.id}" # Link to upload page
-                }
+                    "id": exp.id,
+                    "project": exp.internal_project.name if exp.internal_project else "N/A",
+                    "beneficiary": exp.beneficiary,
+                    "total": f"{exp.amount} MAD",
+                    "category": exp.category,
+                    "remark": f"The expense #{exp.id} is marked as PAID, but the signed physical voucher has not been uploaded yet."
+                },
+                link=f"/expenses/{exp.id}"
             )
             count += 1
             
@@ -5193,7 +6194,7 @@ def create_expense(db: Session, payload: schemas.ExpenseCreate, user_id: int, ba
                 if existing_exp and existing_exp.status != models.ExpenseStatus.REJECTED:
                     raise ValueError(f"Validation Error: ACT {act.act_number} is already assigned to Expense #{existing_exp.id}.")
 
-        gross_amount = sum(a.total_amount_ht for a in acts)
+        gross_amount = round(sum(a.total_amount_ht for a in acts), 2)
         beneficiary_name = acts[0].bc.sbc.name
         if acts[0].bc.sbc.users:
             beneficiary_user_id = acts[0].bc.sbc.users[0].id
@@ -5268,6 +6269,7 @@ def create_expense(db: Session, payload: schemas.ExpenseCreate, user_id: int, ba
     # This records the movement in the PM's ledger immediately
     new_trx = models.Transaction(
         caisse_id=caisse.id,
+        expense_id=db_expense.id,
         type=models.TransactionType.DEBIT,
         amount=net_amount,
         description=f"Expense #{db_expense.id}: {payload.exp_type} - {beneficiary_name}",
@@ -5279,47 +6281,47 @@ def create_expense(db: Session, payload: schemas.ExpenseCreate, user_id: int, ba
 
     # --- 5. NOTIFICATIONS ---
     if not payload.is_draft:
-        # Fetch PDs assigned to this project
-        target_pds = get_project_users_by_role(db, db_expense.project_id, models.ProjectRoleType.PD)
+        # 1. Resolve Targets using the Project Matrix
+        targets = get_action_notification_targets(
+            db, db_expense.project_id, models.ProjectActionType.EXP_APPROVE_L1
+        )
 
-        # Fallback to Global Admins if no PD assigned
-        if not target_pds:
-            target_pds = db.query(models.User).filter(models.User.role == models.UserRole.ADMIN).all()
-
-        pd_emails = [u.email for u in target_pds if u.email]
-        
-        for pd in target_pds:
+        for target in targets:
             create_notification(
-                db, recipient_id=pd.id, type=models.NotificationType.TODO,
+                db, recipient_id=target.id, 
+                type=models.NotificationType.TODO,
                 module=models.NotificationModule.EXP,
                 title="Expense Approval Required",
                 message=f"PM {user.first_name} submitted an expense for {net_amount:,.2f} MAD.",
-                link="/expenses?tab=l1",
-                created_at=datetime.now()
+                link="/expenses?tab=l1"
             )
         
-        if pd_emails:
+        # 2. Send Detailed Email
+        target_emails = [u.email for u in targets if u.email]
+        if target_emails:
+            pm_obj = db_expense.internal_project.project_manager if db_expense.internal_project else None
+            pm_name = f"{pm_obj.first_name} {pm_obj.last_name}" if pm_obj else "N/A"
+            
             details = {
                 "id": f"#{db_expense.id}",
                 "project": db_expense.internal_project.name if db_expense.internal_project else "N/A",
-                "PM": pm_full_name,
+                "pm": pm_name,
+                "creator": pm_full_name,
                 "date": db_expense.created_at.strftime("%d/%m/%Y"),
                 "beneficiary": db_expense.beneficiary,
-                "type": db_expense.exp_type,
-                "net_amount": f"{net_amount:,.2f} MAD",
+                "category": db_expense.exp_type,
+                "total": f"{net_amount:,.2f} MAD",
                 "remark": db_expense.remark
             }
 
-            send_notification_email(
-                background_tasks,
-                pd_emails,
-                "Action Required: New Expense Submitted",
-                "",
-                {
-                    "message": "A new expense has been submitted and is awaiting your L1 operational validation.",
-                    "details": details,
-                    "link": f"/expenses/details/{db_expense.id}"
-                }
+            send_notification_email_detailled(
+                background_tasks=background_tasks,
+                recipients=target_emails,
+                subject="Action Required: New Expense Submitted",
+                module="EXP",
+                status_text="SUBMITTED - PENDING L1",
+                details=details,
+                link=f"/expenses/details/{db_expense.id}"
             )
 
     db.commit()
@@ -5340,45 +6342,63 @@ def approve_expense_l1(db: Session, expense_id: int, pd_id: int, background_task
 
     # --- NEW SECURITY CHECK ---
     # Check if the approver is the PD (Lead) for THIS specific project
-    is_allowed = is_user_project_lead(
-        db, 
-        pd_id, 
-        expense.project_id, 
-        models.ProjectRoleType.PD
+    is_authorized = check_workflow_permission(
+        db, expense.project_id, models.ProjectActionType.EXP_APPROVE_L1, pd_id
     )
 
-    if not is_allowed:
-        # Optional: Allow if user has Global PD Role? 
-        # Ideally no, we want strict project assignment.
-        raise ValueError("Permission Denied: You are not the assigned Project Director for this project.")
+    if not is_authorized:
+        raise ValueError("Permission Denied: You are not assigned to L1 Approval for this project.")
+    
     # --------------------------
    
    
     expense.status = models.ExpenseStatus.PENDING_L2
+    invalidate_notifications_for_link(db, f"/expenses/details/{expense_id}")
     expense.l1_approver_id = pd_id
     expense.l1_at = datetime.now()
     if comment:
         expense.l1_comment = comment # <--- SAVE COMMENT
         
-    # NOTIFY ADMINS
-    admins = db.query(models.User).filter(models.User.role == UserRole.ADMIN).all()
-    admin_emails = [u.email for u in admins if u.email]
+    # NOTIFY ADMINS (L2)
+    targets = get_action_notification_targets(
+        db, expense.project_id, models.ProjectActionType.EXP_APPROVE_L2
+    )
+    target_emails = [u.email for u in targets if u.email]
     
-    for admin in admins:
+    for target in targets:
         create_notification(
-            db, recipient_id=admin.id, type=NotificationType.TODO,
+            db, recipient_id=target.id, type=NotificationType.TODO,
             module=models.NotificationModule.EXP,
             title="Expense L2 Finance Approval",
             message=f"Expense #{expense.id} passed L1. Please validate for payment.",
-            link=f"/expenses?tab=l2",
-            created_at=datetime.now()
+            link=f"/expenses?tab=l2"
         )
     
-    send_notification_email(background_tasks, admin_emails, "Expense Pending L2 Approval", "", {
-        "message": "An expense has been approved by PD and is ready for Finance validation.",
-        "details": {"ID": expense.id, "Amount": expense.amount},
-        "link": f"/expenses/details/{expense.id}"
-    })
+    if target_emails:
+        pm_obj = expense.internal_project.project_manager if expense.internal_project else None
+        pm_name = f"{pm_obj.first_name} {pm_obj.last_name}" if pm_obj else "N/A"
+        
+        details = {
+            "id": f"#{expense.id}",
+            "project": expense.internal_project.name if expense.internal_project else "N/A",
+            "pm": pm_name,
+            "creator": f"{expense.requester.first_name} {expense.requester.last_name}" if expense.requester else "N/A",
+            "date": expense.created_at.strftime("%d/%m/%Y"),
+            "beneficiary": expense.beneficiary,
+            "category": expense.exp_type,
+            "total": f"{expense.amount:,.2f} MAD",
+            "remark": expense.remark
+        }
+
+        send_notification_email_detailled(
+            background_tasks=background_tasks,
+            recipients=target_emails,
+            subject="Action Required: Expense Pending L2 Approval",
+            module="EXP",
+            status_text="L1 APPROVED - PENDING L2",
+            details=details,
+            link=f"/expenses/details/{expense.id}"
+        )
 
     db.commit()
     return expense
@@ -5389,13 +6409,24 @@ def approve_expense_l2(db: Session, expense_id: int, admin_id: int, background_t
     Action: Notify PD to proceed with physical payment.
     """
     expense = db.query(models.Expense).get(expense_id)
+    if not expense: raise ValueError("Expense not found")
+
+    # --- THE NEW STRICT CHECK ---
+    # Check if this specific user is assigned to L2 Approval for THIS project
+    is_authorized = check_workflow_permission(
+        db, expense.project_id, models.ProjectActionType.EXP_APPROVE_L2, admin_id
+    )
+
+    if not is_authorized:
+        raise ValueError("Permission Denied: You are not assigned to L2 Approval for this project.")
     expense.status = models.ExpenseStatus.APPROVED_L2
+    invalidate_notifications_for_link(db, f"/expenses/details/{expense_id}")
     expense.l2_approver_id = admin_id
     expense.l2_at = datetime.now()
     if comment:
         expense.l2_comment = comment # <--- SAVE COMMENT
 
-    # 1. Fetch all RAF users
+    # 1. Fetch all RAF users (Global Role)
     rafs = db.query(models.User).filter(models.User.role == models.UserRole.RAF).all()
     raf_emails = [u.email for u in rafs if u.email]
 
@@ -5411,17 +6442,29 @@ def approve_expense_l2(db: Session, expense_id: int, admin_id: int, background_t
 
     # 3. Send Email
     if raf_emails:
-        send_notification_email(
-            background_tasks, 
-            raf_emails, 
-            "Expense Approved (L2) - Ready for Payment", 
-            "EXP", 
-            {
-                "id": expense.id,
-                "project": expense.internal_project.name,
-                "beneficiary": expense.beneficiary,
-                "amount": f"{expense.amount} MAD",
-            }
+        pm_obj = expense.internal_project.project_manager if expense.internal_project else None
+        pm_name = f"{pm_obj.first_name} {pm_obj.last_name}" if pm_obj else "N/A"
+        
+        details = {
+            "id": f"#{expense.id}",
+            "project": expense.internal_project.name if expense.internal_project else "N/A",
+            "pm": pm_name,
+            "creator": f"{expense.requester.first_name} {expense.requester.last_name}" if expense.requester else "N/A",
+            "date": expense.created_at.strftime("%d/%m/%Y"),
+            "beneficiary": expense.beneficiary,
+            "category": expense.exp_type,
+            "total": f"{expense.amount:,.2f} MAD",
+            "remark": expense.remark
+        }
+
+        send_notification_email_detailled(
+            background_tasks=background_tasks,
+            recipients=raf_emails,
+            subject="Action Required: Expense Ready for Payment",
+            module="EXP",
+            status_text="L2 APPROVED - READY FOR PAYMENT",
+            details=details,
+            link=f"/expenses/details/{expense.id}"
         )
 
     db.commit()
@@ -5457,7 +6500,12 @@ def confirm_expense_payment(db: Session, expense_id: int, filename: str, pd_id: 
         caisse.reserved_balance -= expense.amount
 
     # 4. LEDGER: Completed Transaction
-    # (Existing transaction code remains same...)
+    trx = db.query(models.Transaction).filter(models.Transaction.expense_id == expense.id).first()
+    if trx:
+        trx.status = models.TransactionStatus.COMPLETED
+        if filename:
+            trx.proof_file = filename
+            trx.description += " - Receipt Uploaded"
 
     expense.status = models.ExpenseStatus.PAID
     expense.payment_confirmed_at = datetime.now()
@@ -5476,11 +6524,30 @@ def confirm_expense_payment(db: Session, expense_id: int, filename: str, pd_id: 
         )
         beneficiary = db.query(models.User).get(expense.beneficiary_user_id)
         if beneficiary and beneficiary.email:
-            send_notification_email(background_tasks, [beneficiary.email], "Payment Received - Action Required", "", {
-                "message": "Funds have been handed over. Please log in and acknowledge receipt in the portal.",
-                "details": {"Amount": expense.amount},
-                "link": f"/expenses/details/{expense.id}"
-            })
+            pm_obj = expense.internal_project.project_manager if expense.internal_project else None
+            pm_name = f"{pm_obj.first_name} {pm_obj.last_name}" if pm_obj else "N/A"
+            
+            details = {
+                "id": f"#{expense.id}",
+                "project": expense.internal_project.name if expense.internal_project else "N/A",
+                "pm": pm_name,
+                "creator": f"{expense.requester.first_name} {expense.requester.last_name}" if expense.requester else "N/A",
+                "date": expense.created_at.strftime("%d/%m/%Y"),
+                "beneficiary": expense.beneficiary,
+                "category": expense.exp_type,
+                "total": f"{expense.amount:,.2f} MAD",
+                "remark": expense.remark
+            }
+
+            send_notification_email_detailled(
+                background_tasks=background_tasks,
+                recipients=[beneficiary.email],
+                subject="Payment Handed Over - Action Required",
+                module="EXP",
+                status_text="PAID",
+                details=details,
+                link=f"/expenses/details/{expense.id}"
+            )
 
     db.commit()
     db.refresh(expense)
@@ -5526,12 +6593,19 @@ def reject_expense(db: Session, expense_id: int, reason: str, rejector_id: int, 
         caisse.balance = current_balance + expense.amount
 
     # 2. MARK TRANSACTION AS FAILED (Ledger Logic)
-    # We look for the pending transaction created during submission
+    # We look for the transaction created for this expense
     trx = db.query(models.Transaction).filter(
-        models.Transaction.description.like(f"Expense #{expense.id}:%")
+        models.Transaction.expense_id == expense.id
     ).first()
     if trx:
-        trx.status = "FAILED"
+        trx.status = models.TransactionStatus.FAILED
+    else:
+        # Fallback for old records without expense_id
+        trx = db.query(models.Transaction).filter(
+            models.Transaction.description.like(f"Expense #{expense.id}:%")
+        ).first()
+        if trx:
+            trx.status = models.TransactionStatus.FAILED
 
     # 3. THE CRITICAL FIX: UNLINK THE ACTs
     # This allows the ACTs to appear back in the "Payable" list for a new attempt
@@ -5541,6 +6615,7 @@ def reject_expense(db: Session, expense_id: int, reason: str, rejector_id: int, 
 
     # 4. UPDATE EXPENSE STATUS
     expense.status = models.ExpenseStatus.REJECTED
+    invalidate_notifications_for_link(db, f"/expenses/details/{expense_id}")
     expense.rejection_reason = reason
     expense.updated_at = datetime.now()
 
@@ -5551,23 +6626,37 @@ def reject_expense(db: Session, expense_id: int, reason: str, rejector_id: int, 
         type=models.NotificationType.ALERT,
         module=models.NotificationModule.EXP,
         title="Expense Rejected ❌",
-        message=f"Your expense for {expense.amount} MAD was rejected. Reason: {reason}",
-        link=f"/expenses/details/{expense.id}",
-        created_at=datetime.now()
+        message=f"Your expense for {expense.amount:,.2f} MAD was rejected. Reason: {reason}",
+        link=f"/expenses/details/{expense.id}"
     )
     
     # 6. NOTIFY PM (Email)
-    pm = db.query(models.User).get(expense.requester_id)
-    if pm and pm.email and background_tasks:
-        send_notification_email(background_tasks, [pm.email], "Expense Request Rejected", "", {
-            "message": f"Your expense request has been rejected and funds ({expense.amount} MAD) have been returned to your available balance.",
-            "details": {
-                "Expense ID": f"#{expense.id}",
-                "Reason": reason,
-                "Project": expense.internal_project.name if expense.internal_project else "N/A"
-            },
-            "link": "/expenses"
-        })
+    requester = db.query(models.User).get(expense.requester_id)
+    if requester and requester.email and background_tasks:
+        pm_obj = expense.internal_project.project_manager if expense.internal_project else None
+        pm_name = f"{pm_obj.first_name} {pm_obj.last_name}" if pm_obj else "N/A"
+        
+        details = {
+            "id": f"#{expense.id}",
+            "project": expense.internal_project.name if expense.internal_project else "N/A",
+            "pm": pm_name,
+            "creator": f"{requester.first_name} {requester.last_name}",
+            "date": expense.created_at.strftime("%d/%m/%Y"),
+            "beneficiary": expense.beneficiary,
+            "category": expense.exp_type,
+            "total": f"{expense.amount:,.2f} MAD",
+            "remark": f"REJECTED: {reason}"
+        }
+
+        send_notification_email_detailled(
+            background_tasks=background_tasks,
+            recipients=[requester.email],
+            subject="Expense Request Rejected",
+            module="EXP",
+            status_text="REJECTED",
+            details=details,
+            link=f"/expenses/details/{expense.id}"
+        )
 
     db.commit()
     db.refresh(expense)
@@ -5615,10 +6704,32 @@ def list_all_requests_global(db: Session, current_user: models.User):
 
     return query.order_by(models.Expense.created_at.desc()).all()
 
+def get_user_allowed_project_ids(db: Session, user_id: int, action_type: str = None):
+    """
+    Returns a list of project IDs where the user is either Primary or Support.
+    If action_type is provided, it strictly checks that action.
+    """
+    query = db.query(models.ProjectWorkflow.project_id)
+    
+    if action_type:
+        query = query.filter(models.ProjectWorkflow.action_type == action_type)
+        
+    query = query.filter(
+        or_(
+            models.ProjectWorkflow.primary_users.any(id=user_id),
+            models.ProjectWorkflow.support_users.any(id=user_id)
+        )
+    )
+    
+    # Returns[4, 7, 12...]
+    return [row[0] for row in query.all()]
+
+
+
 def search_expenses(
     db: Session, 
     user: models.User, 
-    scope: str,  # 'my', 'l1', 'l2', 'pay', 'history', 'all'
+    scope: str, 
     page: int = 1, 
     limit: int = 20,
     filters: dict = {}
@@ -5629,88 +6740,77 @@ def search_expenses(
         joinedload(models.Expense.sbc)
     )
 
+    MANAGEMENT_ROLES = [models.UserRole.ADMIN, models.UserRole.RAF, models.UserRole.CEO]
+    
     # =========================================================
-    # 1. STAKEHOLDER SECURITY FILTER (The New Logic)
+    # 1. SECURITY FILTER (Decoupled Logic - FIX)
     # =========================================================
     
-    # "My Requests" is exempt: You always see what you created.
-    if scope != "my":
+    if scope != "my" and user.role not in MANAGEMENT_ROLES:
+        target_action = None
         
-        # ADMIN and RAF are Global -> They see everything.
-        # Everyone else (PD, PM, Coordinator) is restricted by Project Assignment.
-        if user.role not in [models.UserRole.ADMIN, models.UserRole.RAF]:
+        # Determine which action we are verifying
+        if scope == "l1":
+            target_action = models.ProjectActionType.EXP_APPROVE_L1
+        elif scope == "l2":
+            target_action = models.ProjectActionType.EXP_APPROVE_L2
             
-            # Join Expense -> InternalProject -> ProjectStakeholder
-            query = query.join(
-                models.ProjectStakeholder,
-                models.Expense.project_id == models.ProjectStakeholder.project_id
-            ).filter(
-                models.ProjectStakeholder.user_id == user.id
-            )
+        # Fetch exact project IDs this user is allowed to see for this action
+        allowed_pids = get_user_allowed_project_ids(db, user.id, target_action)
+        
+        if not allowed_pids:
+            # If the user has no allowed projects, force the query to return 0 results safely
+            query = query.filter(sa.sql.false())
+        else:
+            # Filter the expenses to ONLY include these allowed projects
+            query = query.filter(models.Expense.project_id.in_(allowed_pids))
 
-            # --- Contextual Role Filtering ---
-            
-            # If looking at "L1 Approval", you MUST be the PD of that project
-            if scope == "l1":
-                query = query.filter(models.ProjectStakeholder.role == models.ProjectRoleType.PD)
-            
-            # Note: L2 and Pay are usually Admin/RAF scopes, so they bypass this block.
-            # For 'all' or 'history', the user sees expenses for ANY project 
-            # where they are a stakeholder (PM, PC, or PD).
 
     # =========================================================
-    # 2. STATUS SCOPE LOGIC (Existing)
+    # 2. STATUS SCOPE LOGIC
     # =========================================================
-    
     if scope == "my":
         query = query.filter(or_(
             models.Expense.requester_id == user.id,
             models.Expense.beneficiary_user_id == user.id
         ))
-    
     elif scope == "l1":
         query = query.filter(models.Expense.status == models.ExpenseStatus.SUBMITTED)
-    
     elif scope == "l2":
         query = query.filter(models.Expense.status == models.ExpenseStatus.PENDING_L2)
-    
     elif scope == "pay":
         query = query.filter(models.Expense.status == models.ExpenseStatus.APPROVED_L2)
-    
     elif scope == "history":
         query = query.filter(models.Expense.status.in_([
             models.ExpenseStatus.PAID, models.ExpenseStatus.ACKNOWLEDGED
         ]))
-    
     elif scope == "all":
         query = query.filter(models.Expense.status != models.ExpenseStatus.DRAFT)
 
     # =========================================================
-    # 3. USER FILTERS (Existing)
+    # 3. USER FILTERS
     # =========================================================
     if filters.get("project_id"):
         query = query.filter(models.Expense.project_id == filters["project_id"])
-    
     if filters.get("exp_type") and filters["exp_type"] != "ALL":
         query = query.filter(models.Expense.exp_type == filters["exp_type"])
-        
     if filters.get("beneficiary"):
-        term = f"%{filters['beneficiary']}%"
-        query = query.filter(models.Expense.beneficiary.ilike(term))
-        
+        query = query.filter(models.Expense.beneficiary.ilike(f"%{filters['beneficiary']}%"))
+    if filters.get("requester_id"):
+        query = query.filter(models.Expense.requester_id == filters["requester_id"])
     if filters.get("start_date"):
         query = query.filter(models.Expense.created_at >= filters["start_date"])
-        
     if filters.get("end_date"):
-        query = query.filter(models.Expense.created_at <= f"{filters['end_date']} 23:59:59")
+        end_val = filters["end_date"]
+        query = query.filter(models.Expense.created_at <= f"{end_val} 23:59:59")
 
     # --- 4. PAGINATION ---
     total = query.count()
-    items = query.order_by(models.Expense.created_at.desc())\
+    items = query.order_by(sa.desc(models.Expense.created_at))\
                  .offset((page - 1) * limit)\
                  .limit(limit)\
                  .all()
-                 
+
     return {
         "items": items,
         "total": total,
@@ -5718,8 +6818,6 @@ def search_expenses(
         "size": limit,
         "pages": (total + limit - 1) // limit if limit > 0 else 1
     }
-
-
 def list_pending_l1(db: Session):
     """Liste toutes les dépenses en attente de validation L1 (PD)"""
     return db.query(models.Expense).filter(
@@ -5769,12 +6867,32 @@ def submit_expense(db: Session, expense_id: int, background_tasks: BackgroundTas
     
     print(f"✅ Dépense soumise - ID: {expense_id}, Nouveau status: {expense.status}")
     pd_emails = get_emails_by_role(db, UserRole.PD)
-    send_notification_email(
-        background_tasks,
-        pd_emails,
-        "Expense Approval Required (L1)",
-        "",
-    )
+    if pd_emails:
+        pm_obj = expense.internal_project.project_manager if expense.internal_project else None
+        pm_name = f"{pm_obj.first_name} {pm_obj.last_name}" if pm_obj else "N/A"
+        requester_name = f"{expense.requester.first_name} {expense.requester.last_name}" if expense.requester else "N/A"
+        
+        details = {
+            "id": f"#{expense.id}",
+            "project": expense.internal_project.name if expense.internal_project else "N/A",
+            "pm": pm_name,
+            "creator": requester_name,
+            "date": expense.created_at.strftime("%d/%m/%Y"),
+            "beneficiary": expense.beneficiary,
+            "category": expense.exp_type,
+            "total": f"{expense.amount:,.2f} MAD",
+            "remark": expense.remark
+        }
+
+        send_notification_email_detailled(
+            background_tasks=background_tasks,
+            recipients=pd_emails,
+            subject="Action Required: Expense Approval Needed",
+            module="EXP",
+            status_text="SUBMITTED",
+            details=details,
+            link=f"/expenses/details/{expense.id}"
+        )
     return expense
 
 
@@ -5981,102 +7099,168 @@ def update_bon_de_commande(db: Session, bc_id: int, bc_data: schemas.BCCreate, u
     db.refresh(bc)
     return bc
 # app/crud.py
+def update_expense(db: Session, expense_id: int, payload: schemas.ExpenseCreate, user_id: int, background_tasks: BackgroundTasks, filename: str = None):
+    user = db.query(models.User).get(user_id)
+    pm_full_name = f"{user.first_name} {user.last_name}" if user else "Unknown User"
 
-def update_expense(db: Session, expense_id: int, payload: schemas.ExpenseCreate, user_id: int):
     # 1. Fetch Expense
     db_expense = db.query(models.Expense).get(expense_id)
     if not db_expense:
         return None
 
     # 2. Security Check
-    user = db.query(models.User).get(user_id)
-    if db_expense.requester_id != user_id and user.role != models.UserRole.ADMIN:
+    if db_expense.requester_id != user_id and db.query(models.User).get(user_id).role != models.UserRole.ADMIN:
         raise ValueError("Not authorized to edit this expense")
 
     if db_expense.status != models.ExpenseStatus.DRAFT:
         raise ValueError("Only Draft expenses can be edited.")
 
-    # --- 3. BATCH & CONSISTENCY LOGIC ---
-    new_final_amount = payload.amount
-    new_beneficiary = payload.beneficiary
-    new_beneficiary_id = user_id
+    # --- 3. IDENTIFY SBC & GROSS AMOUNT (Logic matching create) ---
+    gross_amount = 0
+    sbc_id = payload.sbc_id
+    beneficiary_name = payload.beneficiary
+    beneficiary_user_id = None
     
     if payload.exp_type == "ACCEPTANCE_PP":
-        if not payload.act_ids:
-            raise ValueError("For Acceptance PP, you must select at least one ACT.")
+        new_acts = db.query(models.ServiceAcceptance).filter(models.ServiceAcceptance.id.in_(payload.act_ids)).all()
+        if not new_acts: raise ValueError("No ACTs selected.")
         
-        # Fetch the new batch of ACTs
-        new_acts = db.query(models.ServiceAcceptance).filter(
-            models.ServiceAcceptance.id.in_(payload.act_ids)
-        ).all()
+        # Verify ACT availability
         for a in new_acts:
-            # If the ACT has an expense_id and it ISN'T THIS expense, check if it's taken
-            if a.expense_id is not None and a.expense_id != db_expense.id:
+            if a.expense_id and a.expense_id != db_expense.id:
                 existing_exp = db.query(models.Expense).get(a.expense_id)
                 if existing_exp and existing_exp.status != models.ExpenseStatus.REJECTED:
-                    raise ValueError(f"ACT {a.act_number} was just taken by Expense #{existing_exp.id}.")
+                    raise ValueError(f"ACT {a.act_number} is locked in Expense #{existing_exp.id}.")
 
-        # Check project and SBC consistency for the new batch
         sbc_ids = {a.bc.sbc_id for a in new_acts}
         if len(sbc_ids) > 1:
-            raise ValueError("All selected Acceptances must belong to the same Subcontractor.")
-        
-        for a in new_acts:
-            if a.bc.project_id != payload.project_id:
-                raise ValueError(f"ACT {a.act_number} does not belong to the selected Project.")
-
-        # Recalculate amount and beneficiary based on the new batch
-        new_final_amount = sum(a.total_amount_ht for a in new_acts)
-        new_beneficiary = new_acts[0].bc.sbc.name
+            raise ValueError("An expense cannot contain ACTs from multiple subcontractors.")
+            
+        sbc_id = list(sbc_ids)[0]
+        gross_amount = sum(a.total_amount_ht for a in new_acts)
+        beneficiary_name = new_acts[0].bc.sbc.name
         if new_acts[0].bc.sbc.users:
-            new_beneficiary_id = new_acts[0].bc.sbc.users[0].id
+            beneficiary_user_id = new_acts[0].bc.sbc.users[0].id
+            
+    elif payload.exp_type == "AVANCE_SBC":
+        if not sbc_id:
+            raise ValueError("SBC selection is required for an advance.")
+        gross_amount = payload.amount
+        sbc_profile = db.query(models.SBC).get(sbc_id)
+        beneficiary_name = f"Advance: {sbc_profile.name}"
+        if sbc_profile.users:
+            beneficiary_user_id = sbc_profile.users[0].id
+    else:
+        # Standard Expense
+        gross_amount = payload.amount
+        if not beneficiary_name or beneficiary_name.strip() == "":
+            beneficiary_name = pm_full_name
+        beneficiary_user_id = user_id
 
-    # --- 4. FINANCIAL ADJUSTMENT ---
+    # --- 4. SETTLEMENT MATH (Handle Pool) ---
+    advance_deduction = 0.0
+    if payload.exp_type == "ACCEPTANCE_PP" and payload.apply_advance:
+        # Check the pool. 
+        # Note: Since the advance is not marked 'Consumed' yet, it's still 1000 MAD.
+        pool_balance = get_sbc_unconsumed_balance(db, sbc_id=sbc_id, pm_id=user_id)
+        if pool_balance > 0:
+            advance_deduction = min(pool_balance, gross_amount)
+    
+    # Net amount is ALWAYS (Freshly Calculated Gross) - (Full Pool Deduction)
+    # 3000 - 1000 will always stay 2000, no matter how many times you update.
+    net_amount = gross_amount - advance_deduction
+
+    # --- 3. FINANCIAL ADJUSTMENT (Caisse) ---
     caisse = db.query(models.Caisse).filter(models.Caisse.user_id == db_expense.requester_id).first()
-    if not caisse:
-        raise ValueError("Wallet not found.")
-
-    # A. Refund the old amount completely (Undo old reservation)
-    caisse.reserved_balance = (caisse.reserved_balance or 0.0) - db_expense.amount
-    caisse.balance = (caisse.balance or 0.0) + db_expense.amount
-
-    # B. Check if we have enough for the NEW amount
-    if caisse.balance < new_final_amount:
-        # Revert the refund before crashing
-        caisse.balance -= db_expense.amount
-        caisse.reserved_balance += db_expense.amount
-        raise ValueError(f"Insufficient balance. New total is {new_final_amount} MAD.")
-
-    # C. Apply new reservation
-    caisse.balance -= new_final_amount
-    caisse.reserved_balance += new_final_amount
-
-    # --- 5. DATA SYNC (The Batch Part) ---
     
-    # A. Unlink current ACTs (set their expense_id back to NULL)
-    db.query(models.ServiceAcceptance).filter(
-        models.ServiceAcceptance.expense_id == db_expense.id
-    ).update({"expense_id": None})
+    # Logic: "Give back what I currently have reserved, then take what I need now"
+    # This prevents money leaks during edits.
+    current_balance = (caisse.balance or 0.0) + db_expense.amount
+    current_reserved = (caisse.reserved_balance or 0.0) - db_expense.amount
 
-    # B. Apply new field values to Expense
+    if current_balance < net_amount:
+        raise ValueError(f"Insufficient balance. Available: {current_balance:,.2f}, Required Net: {net_amount:,.2f}")
+
+    caisse.balance = current_balance - net_amount
+    caisse.reserved_balance = current_reserved + net_amount
+    # --- 6. DATA SYNC ---
+    # Unlink old ACTs
+    db.query(models.ServiceAcceptance).filter(models.ServiceAcceptance.expense_id == db_expense.id).update({"expense_id": None})
+
+    # Update Expense record
     db_expense.project_id = payload.project_id
+    db_expense.sbc_id = sbc_id
+    db_expense.bc_item_id = payload.bc_id
     db_expense.exp_type = payload.exp_type
-    db_expense.amount = new_final_amount
-    db_expense.beneficiary = new_beneficiary
-    db_expense.beneficiary_user_id = new_beneficiary_id
+    db_expense.amount = net_amount
+    db_expense.beneficiary = beneficiary_name
+    db_expense.beneficiary_user_id = beneficiary_user_id
     db_expense.remark = payload.remark
-    db_expense.attachment = payload.attachment
+    if filename: db_expense.attachment = filename
     
-    # C. Link new batch of ACTs
-    if payload.exp_type == "ACCEPTANCE_PP":
-        for a in new_acts:
-            a.expense_id = db_expense.id
-
-    # --- 6. FINALIZATION ---
     if not payload.is_draft:
         db_expense.status = models.ExpenseStatus.SUBMITTED
-    
-    db_expense.updated_at = datetime.now()
+
+    # Relink new batch of ACTs
+    if payload.exp_type == "ACCEPTANCE_PP":
+        db.query(models.ServiceAcceptance).filter(models.ServiceAcceptance.id.in_(payload.act_ids)).update({"expense_id": db_expense.id}, synchronize_session=False)
+
+    # Update Ledger Transaction
+    trx = db.query(models.Transaction).filter(models.Transaction.description.like(f"Expense #{db_expense.id}:%")).first()
+    if trx:
+        trx.amount = net_amount
+        trx.description = f"Expense #{db_expense.id}: {payload.exp_type} - {beneficiary_name}"
+
+    # --- 7. NOTIFICATIONS (If Submitting) ---
+    if not payload.is_draft:
+        # Fetch PDs/Approvers from Matrix (reuse the logic from create_expense)
+        target_approvers = get_project_users_by_action(
+            db, 
+            db_expense.project_id, 
+            models.ProjectActionType.EXP_APPROVE_L1
+        )
+        # Fallback to Global Admins if no PD assigned
+        if not target_approvers:
+            target_approvers = db.query(models.User).filter(models.User.role == models.UserRole.ADMIN).all()
+
+        pd_emails = [u.email for u in target_approvers if u.email]
+        
+        for pd in target_approvers:
+            create_notification(
+                db, recipient_id=pd.id, type=models.NotificationType.TODO,
+                module=models.NotificationModule.EXP,
+                title="Expense Approval Required",
+                message=f"PM {user.first_name} submitted an expense for {net_amount:,.2f} MAD.",
+                link="/expenses?tab=l1",
+                created_at=datetime.now()
+            )
+        
+        if pd_emails:
+            # Prepare details for the new detailed email format
+            pm_obj = db_expense.internal_project.project_manager if db_expense.internal_project else None
+            pm_name = f"{pm_obj.first_name} {pm_obj.last_name}" if pm_obj else "N/A"
+            
+            details = {
+                "id": f"#{db_expense.id}",
+                "project": db_expense.internal_project.name if db_expense.internal_project else "N/A",
+                "pm": pm_name,
+                "creator": pm_full_name,
+                "date": db_expense.created_at.strftime("%d/%m/%Y"),
+                "beneficiary": db_expense.beneficiary,
+                "category": db_expense.exp_type,
+                "total": f"{net_amount:,.2f} MAD",
+                "remark": db_expense.remark
+            }
+
+            send_notification_email_detailled(
+                background_tasks=background_tasks,
+                recipients=pd_emails,
+                subject="Action Required: New Expense Submitted (Updated)",
+                module="EXP",
+                status_text="SUBMITTED (UPDATED)",
+                details=details,
+                link=f"/expenses/details/{db_expense.id}"
+            )       
 
     db.commit()
     db.refresh(db_expense)
@@ -6159,18 +7343,138 @@ def get_grouped_history(db: Session, page: int = 1, limit: int = 10, status_filt
     }
 
     
-def verify_invoice_physical(db: Session, invoice_id: int, raf_id: int):
+def verify_invoice_physical(db: Session, invoice_id: int, raf_id: int, background_tasks: BackgroundTasks):
     """RAF confirms they received the signed paper folder."""
     inv = db.query(models.Invoice).get(invoice_id)
     inv.status = models.InvoiceStatus.VERIFIED
+    invalidate_notifications_for_link(db, f"/raf/facturation/verify/{invoice_id}")
     inv.verified_at = datetime.now()
     
-    # Notify SBC
-    create_notification(db, inv.sbc.users[0].id, NotificationType.APP, NotificationModule.FACTURATION, 
-                        "Invoice Verified", f"Your invoice {inv.invoice_number} has been verified by RAF.", created_at=datetime.now())
+    # Notifications to SBC Users
+    sbc_users = inv.sbc.users if inv.sbc else []
+    emails = [u.email for u in sbc_users if u.email]
+    
+    for user in sbc_users:
+        create_notification(
+            db=db,
+            recipient_id=user.id,
+            type=models.NotificationType.APP,
+            module=models.NotificationModule.FACTURATION,
+            title="Invoice Verified",
+            message=f"Invoice {inv.invoice_number} verified. Pending payment.",
+            link=f"/sbc/facture/{inv.id}"
+        )
+    
+    if emails:
+        details = {
+            "id": inv.invoice_number,
+            "beneficiary": inv.sbc.name if inv.sbc else "N/A",
+            "category": inv.category,
+            "total": inv.total_amount_ttc
+        }
+        send_notification_email_detailled(
+            background_tasks=background_tasks,
+            recipients=emails,
+            subject="Invoice Verified",
+            module="FACTURATION",
+            status_text="VERIFIED - PENDING PAYMENT",
+            details=details,
+            link=f"/sbc/facture/{inv.id}"
+        )
+
     db.commit()
     return inv
+def mark_invoice_paid(db: Session, invoice_id: int, filename: str, background_tasks: BackgroundTasks):
+    inv = db.query(models.Invoice).get(invoice_id)
+    if not inv: raise ValueError("Invoice not found")
 
+    # Only update status and paid_at if it wasn't already paid
+    if inv.status != models.InvoiceStatus.PAID and inv.status != models.InvoiceStatus.ACKNOWLEDGED:
+        inv.status = models.InvoiceStatus.PAID
+        inv.paid_at = datetime.now()
+
+    # Update filename if provided
+    if filename:
+        inv.payment_receipt_filename = filename
+
+    # Notify SBC
+    msg = f"Invoice {inv.invoice_number} has been paid."
+    if filename:
+        msg += " The payment receipt is now available in the portal."
+
+        
+    # Notifications to SBC Users
+    sbc_users = inv.sbc.users if inv.sbc else []
+    emails = [u.email for u in sbc_users if u.email]
+    remark = "Bank receipt uploaded." if filename else "Payment confirmed. Receipt will be uploaded shortly."
+    
+    for user in sbc_users:
+        create_notification(
+            db=db,
+            recipient_id=user.id,
+            type=models.NotificationType.APP,
+            module=models.NotificationModule.FACTURATION,
+            title="Payment Processed",
+            message=f"Payment for invoice {inv.invoice_number} has been processed.",
+            link=f"/sbc/facture/{inv.id}"
+        )
+    
+    if emails:
+        details = {
+            "id": inv.invoice_number,
+            "beneficiary": inv.sbc.name if inv.sbc else "N/A",
+            "category": inv.category,
+            "total": inv.total_amount_ttc,
+            "remark": remark
+        }
+        send_notification_email_detailled(
+            background_tasks=background_tasks,
+            recipients=emails,
+            subject="Payment Processed",
+            module="FACTURATION",
+            status_text="PAID",
+            details=details,
+            link=f"/sbc/facture/{inv.id}"
+        )
+
+    db.commit()
+    db.refresh(inv)
+    return inv
+
+# --- ADD THIS NEW FUNCTION TO CHECK FOR MISSING RECEIPTS ---
+def check_missing_invoice_receipts(db: Session, background_tasks: BackgroundTasks):
+    """
+    Finds PAID invoices missing the bank receipt. Sends email to RAFs.
+    Can be hooked up to your existing /run-compliance-checks admin endpoint.
+    """
+    missing_docs = db.query(models.Invoice).filter(
+        models.Invoice.status == models.InvoiceStatus.PAID,
+        models.Invoice.payment_receipt_filename.is_(None)
+    ).all()
+    
+    rafs = db.query(models.User).filter(models.User.role == models.UserRole.RAF).all()
+    raf_emails = [u.email for u in rafs if u.email]
+
+    count = 0
+    if raf_emails:
+        for inv in missing_docs:
+            details = {
+                "id": inv.invoice_number,
+                "project": "See Portal", # Invoices can span multiple projects
+                "beneficiary": inv.sbc.name,
+                "category": inv.category,
+                "total": f"{inv.total_amount_ttc:,.2f} MAD",
+                "remark": "Bank transfer receipt is missing!"
+            }
+            send_notification_email_detailled(
+                background_tasks, raf_emails,
+                f"ACTION REQUIRED: Missing Receipt for Invoice {inv.invoice_number}",
+                "FACTURATION", "PAID - MISSING RECEIPT",
+                details, f"/raf/facturation/details/{inv.id}"
+            )
+            count += 1
+            
+    return count
 def pay_invoice_bulk(db: Session, invoice_ids: list, receipt_filename: str, raf_id: int):
     """RAF pays multiple invoices at once."""
     invoices = db.query(models.Invoice).filter(models.Invoice.id.in_(invoice_ids)).all()
@@ -6268,7 +7572,7 @@ def get_invoice_export_dataframe(db: Session, current_user: models.User, export_
 
 
 
-def create_invoice_bundle(db: Session, sbc_id: int, act_ids: List[int], inv_number: str):
+def create_invoice_bundle(db: Session, sbc_id: int, act_ids: List[int], inv_number: str, background_tasks: BackgroundTasks):
     """
     Handles the creation or re-submission of an Invoice Bundle.
     - Ensures all ACTs belong to the same SBC.
@@ -6321,13 +7625,13 @@ def create_invoice_bundle(db: Session, sbc_id: int, act_ids: List[int], inv_numb
 
 
     # 5. Financial Summing (Fixes the 0% VAT bug)
-    total_ht = sum(a.total_amount_ht for a in acts)
-    total_tax = sum(a.total_tax_amount for a in acts)
-    total_ttc = total_ht + total_tax
+    total_ht = round(sum(a.total_amount_ht for a in acts), 2)
+    total_tax = round(sum(a.total_tax_amount for a in acts), 2)
+    total_ttc = round(total_ht + total_tax, 2)
 
     # 6. Database Object (Upsert Logic - Fixes Duplicate Entry Crash)
     invoice_obj = db.query(models.Invoice).filter(models.Invoice.invoice_number == inv_number).first()
-
+# 
     if invoice_obj:
         # Check if we are allowed to modify this existing record
         if invoice_obj.status not in [models.InvoiceStatus.SUBMITTED, models.InvoiceStatus.REJECTED]:
@@ -6371,6 +7675,36 @@ def create_invoice_bundle(db: Session, sbc_id: int, act_ids: List[int], inv_numb
     # Populate sbc_name attribute for the response
     invoice_obj.sbc_name = invoice_obj.sbc.name if invoice_obj.sbc else "Unknown"
     
+    # Notifications
+    rafs = db.query(models.User).filter(models.User.role == models.UserRole.RAF, models.User.is_active == True).all()
+    for raf in rafs:
+        create_notification(
+            db=db,
+            recipient_id=raf.id,
+            module=models.NotificationModule.FACTURATION,
+            type=models.NotificationType.TODO,
+            title="New Invoice Submitted",
+            message=f"Invoice {invoice_obj.invoice_number} pending verification."
+        )
+    
+    raf_emails = [r.email for r in rafs if r.email]
+    if raf_emails:
+        details = {
+            "id": invoice_obj.invoice_number,
+            "beneficiary": invoice_obj.sbc_name,
+            "category": invoice_obj.category,
+            "total": invoice_obj.total_amount_ttc
+        }
+        send_notification_email_detailled(
+            background_tasks=background_tasks,
+            recipients=raf_emails,
+            subject="New Invoice Submitted",
+            module="FACTURATION",
+            status_text="SUBMITTED - PENDING VERIFICATION",
+            details=details,
+            link=f"/raf/facturation/details/{invoice_obj.id}"
+        )
+        
     return invoice_obj
 
 def get_invoices_by_sbc(db: Session, sbc_id: int):
@@ -6399,19 +7733,51 @@ def get_all_invoices(db: Session):
 
 
 
-def mark_invoice_paid(db: Session, invoice_id: int, filename: str):
+def mark_invoice_paid(db: Session, invoice_id: int, filename: str, background_tasks: BackgroundTasks):
     inv = db.query(models.Invoice).get(invoice_id)
     inv.status = models.InvoiceStatus.PAID
+    invalidate_notifications_for_link(db, f"/raf/facturation/verify/{invoice_id}")
     inv.paid_at = datetime.now()
     inv.payment_receipt_filename = filename
     
-    # Notify SBC
-    create_notification(db, inv.sbc.users[0].id, NotificationType.APP, NotificationModule.FACTURATION,
-                        "Payment Confirmed", f"Invoice {inv.invoice_number} has been paid. View receipt in portal.", created_at=datetime.now())
+    # Notifications to SBC Users
+    sbc_users = inv.sbc.users if inv.sbc else []
+    emails = [u.email for u in sbc_users if u.email]
+    remark = "Bank receipt uploaded." if filename else "Payment confirmed. Receipt will be uploaded shortly."
+    
+    for user in sbc_users:
+        create_notification(
+            db=db,
+            recipient_id=user.id,
+            type=models.NotificationType.APP,
+            module=models.NotificationModule.FACTURATION,
+            title="Payment Processed",
+            message=f"Payment for invoice {inv.invoice_number} has been processed.",
+            link=f"/sbc/facture/{inv.id}"
+        )
+    
+    if emails:
+        details = {
+            "id": inv.invoice_number,
+            "beneficiary": inv.sbc.name if inv.sbc else "N/A",
+            "category": inv.category,
+            "total": inv.total_amount_ttc,
+            "remark": remark
+        }
+        send_notification_email_detailled(
+            background_tasks=background_tasks,
+            recipients=emails,
+            subject="Payment Processed",
+            module="FACTURATION",
+            status_text="PAID",
+            details=details,
+            link=f"/sbc/facture/{inv.id}"
+        )
+
     db.commit()
     return inv
 
-def reject_invoice(db: Session, invoice_id: int, reason: str):
+def reject_invoice(db: Session, invoice_id: int, reason: str, background_tasks: BackgroundTasks):
     inv = db.query(models.Invoice).get(invoice_id)
     if not inv:
         return None
@@ -6425,6 +7791,39 @@ def reject_invoice(db: Session, invoice_id: int, reason: str):
     inv.status = models.InvoiceStatus.REJECTED
     inv.rejection_reason = reason
     
+    # 3. Notifications to SBC Users
+    sbc_users = inv.sbc.users if inv.sbc else []
+    emails = [u.email for u in sbc_users if u.email]
+    
+    for user in sbc_users:
+        create_notification(
+            db=db,
+            recipient_id=user.id,
+            type=models.NotificationType.ALERT,
+            module=models.NotificationModule.FACTURATION,
+            title="Invoice Rejected",
+            message=f"Invoice {inv.invoice_number} was rejected: {reason}",
+            link=f"/sbc/facture/{inv.id}"
+        )
+    
+    if emails:
+        details = {
+            "id": inv.invoice_number,
+            "beneficiary": inv.sbc.name if inv.sbc else "N/A",
+            "category": inv.category,
+            "total": inv.total_amount_ttc,
+            "remark": reason
+        }
+        send_notification_email_detailled(
+            background_tasks=background_tasks,
+            recipients=emails,
+            subject="Invoice Rejected",
+            module="FACTURATION",
+            status_text="REJECTED",
+            details=details,
+            link=f"/sbc/facture/{inv.id}"
+        )
+
     db.commit()
     return inv
 
@@ -6510,21 +7909,20 @@ def notify_raf_new_invoice(db: Session, invoice: models.Invoice, background_task
 
     # 3. Trigger the Email Notification via Background Tasks
     if raf_emails:
-        send_notification_email(
+        send_notification_email_detailled(
             background_tasks=background_tasks,
             recipients=raf_emails,
             subject=f"New Billing Submission: {invoice.invoice_number}",
-            template_name="", # Placeholder for future templates
-            context={
-                "message": f"A new payment bundle has been generated by {invoice.sbc.name} and is waiting for your physical verification.",
-                "details": {
-                    "Invoice Number": invoice.invoice_number,
-                    "Total Amount": f"{invoice.total_amount_ttc:,.2f} MAD",
-                    "Category": invoice.category,
-                    "SBC": invoice.sbc.short_name
-                },
-                "link": f"/raf/facturation/verify/{invoice.id}"
-            }
+            module="ACCEPTANCE",
+            status_text="Billing Submitted",
+            details={
+                "id": invoice.invoice_number,
+                "beneficiary": invoice.sbc.name,
+                "total": f"{invoice.total_amount_ttc:,.2f} MAD",
+                "category": invoice.category,
+                "remark": f"A new payment bundle has been generated by {invoice.sbc.name} and is waiting for your physical verification."
+            },
+            link=f"/raf/facturation/verify/{invoice.id}"
         )
 
 def acknowledge_invoice_receipt(db: Session, invoice_id: int, sbc_user_id: int):
@@ -6917,64 +8315,147 @@ def auto_fill_planning_from_history(db: Session, year: int):
     db.commit()
     return count_updated
 
-
-# backend/app/crud.py
-
-def run_stakeholder_migration(db: Session):
+def smart_seed_project_workflows(db: Session):
     """
-    1. Converts existing project_manager_id to a 'PM' Stakeholder.
-    2. Assigns User ID 28 as 'PD' (Lead) for all projects.
+    Auto-configures the Project Matrix based on Project Name rules.
     """
+    # ==========================================
+    # 1. CONFIGURATION DICTIONARIES (EDIT THESE IDs)
+    # ==========================================
+    
+    # The Global PD
+    PD_ID = 28 
+    
+    # The RAF (Responsable Administratif et Financier - e.g., Kaoutar)
+    RAF_ID = 29  # <--- REPLACE WITH ACTUAL RAF USER ID
+    
+    # PM Mapping based on the project name suffix (e.g., "_MZ")
+    PM_MAPPING = {
+        "MZ": 2,   # Marouane Zbat
+        "NK": 1,   # Nabil Khalfi
+        "IEK": 4,  # Ikbal El Koutbi
+        "AA": 21    # Abdelkoudos
+    }
+    
+    # RQC Mapping based on operator keyword in project name
+    RQC_MAPPING = {
+        "INWI": 25,
+        "IAM": 23,
+        "ORANGE": 24,
+        "DEFAULT": 23
+    }
+
+    # ==========================================
+    # 2. ACTION BUNDLES
+    # ==========================================
+    
+    # PM Actions (Creation & Submission)
+    PM_ACTIONS =[
+        models.ProjectActionType.ROLE_PM,
+        models.ProjectActionType.BC_CREATE_DRAFT,
+        models.ProjectActionType.BC_SUBMIT,
+        models.ProjectActionType.BC_GENERATE,
+        models.ProjectActionType.EXP_CREATE_DRAFT,
+        models.ProjectActionType.EXP_SUBMIT,
+        models.ProjectActionType.ACT_APPROVE_PM,
+        models.ProjectActionType.ACT_GENERATE,
+        models.ProjectActionType.FUND_CREATE,
+        models.ProjectActionType.FUND_CONFIRM # PM confirms receipt of cash
+    ]
+    
+    # PD Actions (L1 Approvals)
+    PD_ACTIONS =[
+        models.ProjectActionType.ROLE_PD,
+        models.ProjectActionType.BC_APPROVE_L1,
+        models.ProjectActionType.EXP_APPROVE_L1,
+        models.ProjectActionType.ACT_APPROVE_PD,
+        models.ProjectActionType.FUND_APPROVE
+    ]
+    
+    # --- NEW: RAF Actions (L2 & Financial Execution) ---
+    RAF_ACTIONS =[
+        models.ProjectActionType.EXP_APPROVE_L2,   # Final validation before paying expense
+        # Note: Invoice/Facturation verification was kept Global per our previous 
+        # decision, so it doesn't need a matrix row here.
+    ]
+    
+    # RQC Actions (Quality)
+    RQC_ACTIONS =[
+        models.ProjectActionType.ROLE_RQC,
+        models.ProjectActionType.ACT_APPROVE_RQC
+    ]
+
+    # ==========================================
+    # 3. EXECUTION ENGINE
+    # ==========================================
     projects = db.query(models.InternalProject).all()
-    count_pm = 0
-    count_pd = 0
+    users_map = {u.id: u for u in db.query(models.User).all()}
 
-    # The designated PD
-    pd_user_id = 28
-    
-    pd_user = db.query(models.User).get(pd_user_id)
-    
-    if not pd_user:
-        print(f"WARNING: User ID {pd_user_id} not found. PD migration skipped.")
+    stats = {"processed": 0, "skipped": 0}
 
     for proj in projects:
-        # --- 1. Migrate Project Manager ---
-        if proj.project_manager_id:
-            # Check if exists
-            exists_pm = db.query(models.ProjectStakeholder).filter_by(
-                project_id=proj.id,
-                user_id=proj.project_manager_id,
-                role=models.ProjectRoleType.PM
-            ).first()
+        # Clean slate
+        db.query(models.ProjectWorkflow).filter(models.ProjectWorkflow.project_id == proj.id).delete()
+        
+        # Parse Project Name
+        parts = proj.name.upper().split("_")
+        suffix = parts[-1] if parts else ""
+        
+        target_pm_id = PM_MAPPING.get(suffix)
+        
+        target_rqc_id = RQC_MAPPING["DEFAULT"]
+        if "INWI" in proj.name.upper(): target_rqc_id = RQC_MAPPING["INWI"]
+        elif "IAM" in proj.name.upper(): target_rqc_id = RQC_MAPPING["IAM"]
+        elif "ORANGE" in proj.name.upper(): target_rqc_id = RQC_MAPPING["ORANGE"]
 
-            if not exists_pm:
-                new_pm = models.ProjectStakeholder(
-                    project_id=proj.id,
-                    user_id=proj.project_manager_id,
-                    role=models.ProjectRoleType.PM,
-                    is_lead=True # Old PMs are always the Lead PM
-                )
-                db.add(new_pm)
-                count_pm += 1
+        def assign_actions(action_list, user_id):
+            if not user_id or user_id not in users_map: return
+            user_obj = users_map[user_id]
+            for action in action_list:
+                pw = models.ProjectWorkflow(project_id=proj.id, action_type=action)
+                pw.primary_users.append(user_obj)
+                db.add(pw)
 
-        # --- 2. Assign Project Director (User 28) ---
-        if pd_user:
-            # Check if exists
-            exists_pd = db.query(models.ProjectStakeholder).filter_by(
-                project_id=proj.id,
-                user_id=pd_user_id,
-                role=models.ProjectRoleType.PD
-            ).first()
-
-            if not exists_pd:
-                new_pd = models.ProjectStakeholder(
-                    project_id=proj.id,
-                    user_id=pd_user_id,
-                    role=models.ProjectRoleType.PD,
-                    is_lead=True
-                )
-                db.add(new_pd)
-                count_pd += 1
+        # Apply the Bundles
+        assign_actions(PD_ACTIONS, PD_ID)
+        assign_actions(RAF_ACTIONS, RAF_ID)  # <--- NOW PROPERLY ASSIGNED TO RAF
+        assign_actions(RQC_ACTIONS, target_rqc_id)
+        
+        if target_pm_id:
+            assign_actions(PM_ACTIONS, target_pm_id)
+            stats["processed"] += 1
+        else:
+            stats["skipped"] += 1
 
     db.commit()
-    return {"pms_migrated": count_pm, "pds_assigned": count_pd}
+    return stats
+
+
+# --- THE HELPER FIX ---
+def upsert_workflow(db: Session, proj_id: int, action: str, user_id: int):
+    """
+    Helper to safely insert a user into the primary_users Many-to-Many list.
+    """
+    # 1. Fetch the user object (Required for Many-to-Many append)
+    user = db.query(models.User).get(user_id)
+    if not user:
+        return # Skip if user doesn't exist
+
+    # 2. Check if the configuration row exists
+    config = db.query(models.ProjectWorkflow).filter_by(
+        project_id=proj_id, 
+        action_type=action
+    ).first()
+    
+    if not config:
+        # Create new config row and append user
+        config = models.ProjectWorkflow(project_id=proj_id, action_type=action)
+        config.primary_users.append(user)
+        db.add(config)
+    else:
+        # Row exists. Check if user is already in the list. If not, add them.
+        if user not in config.primary_users:
+            config.primary_users.append(user)
+
+
+        

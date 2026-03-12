@@ -108,34 +108,38 @@ async def forgot_password(
     await fm.send_message(message)
     
     return {"message": "User invited and email sent."}
-@router.post("/impersonate/{user_id}", response_model=schemas.Token)
+@router.post("/impersonate/{user_id}")
 def impersonate_user(
     user_id: int, 
     db: Session = Depends(get_db), 
-    current_admin: models.User = Depends(require_admin) # SECURITY CRITICAL
+    current_admin: models.User = Depends(require_admin)
 ):
-    """
-    Generates a token for the target user without password check.
-    Only accessible by Admins.
-    """
-    # 1. Find the target user
     target_user = crud.get_user(db, user_id)
     if not target_user:
         raise HTTPException(status_code=404, detail="User not found")
         
-    # 2. Prevent impersonating another Admin (optional safety check)
-    if target_user.role == "ADMIN" and target_user.id != current_admin.id:
-         # You might want to allow this, but blocking it prevents 'super-admin' escalation issues
-         pass 
-
-    # 3. Create a token for the target user
-    access_token_expires = timedelta(minutes=config.settings.ACCESS_TOKEN_EXPIRE_DAYS)
+    # Create the token
+    access_token_expires = timedelta(days=config.settings.ACCESS_TOKEN_EXPIRE_DAYS)
     access_token = auth.create_access_token(
-        data={"sub": target_user.username, "role": target_user.role}, # Add claims as needed
+        data={
+            "sub": target_user.username, 
+            "role": target_user.role.value, # Ensure it's the string value
+            "user_id": target_user.id 
+        }, 
         expires_delta=access_token_expires
     )
     
-    return {"access_token": access_token, "token_type": "bearer"}
+    # Return both the token and the target user info
+    return {
+        "access_token": access_token, 
+        "token_type": "bearer",
+        "user": {
+            "username": target_user.username,
+            "role": target_user.role.value,
+            "name": f"{target_user.first_name} {target_user.last_name}",
+            "id": target_user.id
+        }
+    }
 @router.post("/change-password")
 def change_password(
     payload: schemas.ChangePasswordSchema,

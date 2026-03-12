@@ -1,0 +1,49 @@
+Context & Objective:
+We have just implemented a centralized notification routing engine called `trigger_workflow_notification` in `crud.py`. This engine reads our `ProjectWorkflow` matrix to figure out exactly who should receive an email and a system "To-Do" alert based on the *next required action* in a project.
+
+Your task is to refactor the entire `crud.py` file to replace all old, hardcoded notification blocks (which manually searched for PDs, Admins, or RAFs and called `create_notification` and `send_notification_email` or `send_bc_status_email`) with this single new engine.
+
+### THE GOLDEN RULES (CRITICAL):
+1. DO NOT touch any financial logic, status updates, `db.add()`, `db.commit()`, or `db.refresh()` calls. You are strictly swapping out the Notification/Email blocks.
+2. Ensure the `background_tasks: BackgroundTasks` parameter is present in the signature of any function where you inject the new trigger. Update the signature if it is missing.
+3. Determine the correct `project_id`. Be careful: for an Expense or BC it is usually `expense.project_id` or `bc.project_id`, but for an Acceptance (ACT) it might be `act.bc.project_id`.
+
+### The Target Engine Signature:
+You must replace the old notification code blocks with a call to this exact function:
+```python
+trigger_workflow_notification(
+    db=db,
+    project_id=..., # Must be an int
+    action_type=..., # Must be a models.ProjectActionType Enum representing the NEXT step
+    module=..., # Must be a models.NotificationModule Enum (EXP, BC, CAISSE, ACCEPTANCE)
+    subject="...", 
+    message="...",
+    details={
+        "ID/Ref": ...,
+        "Project": ...,
+        "Amount": ...,
+        "Description": ...
+    },
+    link="...",
+    background_tasks=background_tasks
+)
+Action Type Mapping (What triggers what):
+When replacing code in specific functions, use these exact action_type values to route to the next person in line:
+1. EXPENSE MODULE (module=models.NotificationModule.EXP)
+Inside create_expense (if not draft) OR submit_expense: The next action is -> models.ProjectActionType.EXP_APPROVE_L1
+Inside approve_expense_l1: The next action is -> models.ProjectActionType.EXP_APPROVE_L2
+2. BC MODULE (module=models.NotificationModule.BC)
+Inside submit_bc: The next action is -> models.ProjectActionType.BC_APPROVE_L1
+Inside approve_bc_l1: The next action is -> models.ProjectActionType.BC_APPROVE_L2
+Inside approve_bc_l2: The next action is -> models.ProjectActionType.BC_CONFIRM (To notify the SBC)
+3. FUNDS/CAISSE MODULE (module=models.NotificationModule.CAISSE)
+Inside create_fund_request: The next action is -> models.ProjectActionType.FUND_APPROVE
+Inside process_fund_request (when approved): The next action is -> models.ProjectActionType.FUND_UPLOAD
+4. ACCEPTANCE MODULE (module=models.NotificationModule.ACCEPTANCE)
+Inside generate_act: The next action is -> models.ProjectActionType.ACT_APPROVE_RQC
+Inside approve_act_rqc: The next action is -> models.ProjectActionType.ACT_APPROVE_PM
+Inside approve_act_pm: The next action is -> models.ProjectActionType.ACT_APPROVE_PD
+EXCEPTION: "Downward" or "Final" Notifications
+If an action is a REJECTION (e.g., reject_bc, reject_expense) or an ACKNOWLEDGEMENT (e.g., final receipt of funds), DO NOT use trigger_workflow_notification.
+For rejections and final closures, the notification goes directly to the original Creator (creator_id or requester_id). Leave the direct create_notification and direct email calls intact for these downward flows, as they do not use the forward-moving Matrix.
+Please output the updated functions for crud.py one by one, ensuring flawless integration.

@@ -482,6 +482,9 @@ class BCItemResponse(BCItemCreate):
 
     model_config = ConfigDict(from_attributes=True)
 
+# 1. Add this new payload schema for approvals
+class BCApprovalRequest(BaseModel):
+    comment: Optional[str] = None
 
 class BCResponse(BaseModel):
     id: int
@@ -499,8 +502,17 @@ class BCResponse(BaseModel):
     items: List[BCItemResponse]
     approver_l1: Optional[UserInfo] = None
     approved_l1_at: Optional[datetime] = None
+    l1_approval_comment: Optional[str] = None # <--- NEW
+    
     approver_l2: Optional[UserInfo] = None
     approved_l2_at: Optional[datetime] = None
+    l2_approval_comment: Optional[str] = None # <--- NEW
+    
+    model_config = ConfigDict(from_attributes=True)
+     # --- NEW: Inject permissions for the UI ---
+    user_permissions: List[str] =[]
+    next_approvers: List[dict] =[] # NEW
+
     model_config = ConfigDict(from_attributes=True)
 
 class SiteAssignByCodeRequest(BaseModel):
@@ -581,7 +593,8 @@ class ValidationPayload(BaseModel):
     action: str # "APPROVE" or "REJECT"
     comment: Optional[str] = None
 
-class GenerateACTPayload(BaseModel):
+class ACTGenerationRequest(BaseModel):
+    bc_id: int
     item_ids: List[int]
 
 
@@ -604,13 +617,14 @@ class ServiceAcceptance(BaseModel):
     id: int
     act_number: str
     created_at: datetime
-    bc: BCResponse
+    bc_id: int # Explicit ID for convenience
     creator: UserInfo
     items: List[BCItemResponse] = []
     total_amount_ht: float
     total_tax_amount: float
     total_amount_ttc: float
-    bc: Optional[BCResponse] = None # Nested BC object
+    bc: Optional[BCResponse] = None 
+    user_permissions: List[str] = [] # <--- NEW
 
     model_config = ConfigDict(from_attributes=True)
 class ServiceAcceptanceList(BaseModel):
@@ -990,3 +1004,19 @@ class AdminItemReview(BaseModel):
 class AdminReviewAction(BaseModel):
     items: List[AdminItemReview]
     comment: Optional[str] = None
+
+class WorkflowConfigBase(BaseModel):
+    action_type: str
+    primary_user_ids: List[int] = [] # Changed from Optional[int] to List[int]
+    support_user_ids: List[int] =[]
+
+class ProjectMatrixUpdate(BaseModel):
+    configs: List[WorkflowConfigBase]
+
+    
+class WorkflowConfigOut(WorkflowConfigBase):
+    id: int
+    primary_user_name: Optional[str] = None
+    
+    class Config:
+        from_attributes = True

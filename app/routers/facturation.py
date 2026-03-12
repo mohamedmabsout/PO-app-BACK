@@ -9,6 +9,8 @@ from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import datetime
 
+from app.routers.expenses import require_roles
+
 from .. import crud, models, schemas, auth
 from ..dependencies import get_db
 from ..utils.invoice_packer import create_invoice_zip # Our ZIP utility
@@ -155,27 +157,34 @@ def get_invoice_details(id: int, db: Session = Depends(get_db)):
 def verify_invoice(
     id: int, 
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user)
+    current_user: models.User = Depends(auth.get_current_user),
+    background_tasks: BackgroundTasks = BackgroundTasks()
+    
 ):
     """RAF confirms physical folder received."""
-    return crud.verify_invoice_physical(db, id, current_user.id)
-
+    return crud.verify_invoice_physical(db, id, current_user.id, background_tasks)
 @router.post("/{id}/pay")
 async def pay_invoice(
     id: int, 
-    file: UploadFile = File(...), 
+    background_tasks: BackgroundTasks, # Add this for email notifications
+    file: Optional[UploadFile] = File(None), # <--- Make this optional
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
-    """RAF uploads bank receipt and closes the file."""
-    # Save file logic
-    upload_dir = "uploads/payments"
-    os.makedirs(upload_dir, exist_ok=True)
-    filename = f"PAY_{id}_{file.filename}"
-    with open(os.path.join(upload_dir, filename), "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+    """RAF confirms payment. File upload is optional initially."""
+    require_roles(current_user, ["RAF", "ADMIN"])
+
+    filename = None
+    if file:
+        upload_dir = "uploads/payments"
+        os.makedirs(upload_dir, exist_ok=True)
+        filename = f"PAY_{id}_{file.filename}"
+        with open(os.path.join(upload_dir, filename), "wb") as buffer:
+            import shutil
+            shutil.copyfileobj(file.file, buffer)
         
-    return crud.mark_invoice_paid(db, id, filename)
+    return crud.mark_invoice_paid(db, id, filename, background_tasks)
+
 
 @router.post("/{id}/reject")
 def reject_invoice(

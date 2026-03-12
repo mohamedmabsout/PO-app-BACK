@@ -66,7 +66,7 @@ LOGOS = {
 
 IMAGE_DIR = os.path.abspath("uploads/emails") 
 
-def send_notification_email(
+def send_notification_email_detailled(
     background_tasks: BackgroundTasks,
     recipients: List[str],
     subject: str,
@@ -84,7 +84,7 @@ def send_notification_email(
         "BC": "iPo.png",
         "ACCEPTANCE": "iAcceptance.png",
         "CAISSE": "iExpense.png",
-        "LOGISTIC": "iLogistic  .png",
+        "LOGISTIC": "iLogistic.png",
         "SYSTEM": "sib_logo.png"
     }
     
@@ -96,12 +96,31 @@ def send_notification_email(
 
     # Table Row Helper (Internal to the function)
     def row(label, value):
+        if value is None or value == "":
+            return ""
         return f"""
         <tr>
             <td style="padding: 6px 10px; border: 1px solid #333; background-color: #d9e1f2; font-weight: bold; width: 30%; font-size: 13px;">{label}</td>
-            <td style="padding: 6px 10px; border: 1px solid #333; font-size: 13px;">{str(value or "")}</td>
+            <td style="padding: 6px 10px; border: 1px solid #333; font-size: 13px;">{str(value)}</td>
         </tr>
         """
+
+    # Labels mapping based on module
+    is_expense = module == "EXP"
+    is_caisse = module == "CAISSE"
+    
+    if is_expense:
+        id_label = "ID Expense:"
+        beneficiary_label = "The Beneficiary:"
+        status_prefix = "Expense"
+    elif is_caisse:
+        id_label = "Request ID:"
+        beneficiary_label = "Requester/PM:"
+        status_prefix = "Fund Request"
+    else:
+        id_label = "Reference ID:"
+        beneficiary_label = "Subcontractor/Entity:"
+        status_prefix = "Document"
 
     # 3. HTML Content using "cid:" references
     # cid:siblogo and cid:modulelogo match the headers we set below
@@ -123,21 +142,21 @@ def send_notification_email(
                     </tr>
                     <tr>
                         <td colspan="3" style="background-color: #f7caac; border: 1px solid #333; padding: 5px; font-weight: bold; font-size: 14px;">
-                            Status { "Expense" if module == "EXP" or module == "CAISSE" else "Document" } "{status_text}"
+                            Status {status_prefix} "{status_text}"
                         </td>
                     </tr>
                 </table>
 
                 <table width="100%" style="border-collapse: collapse; border: 1px solid #333; margin-top: -1px;">
-                    {row("ID Expense:", details.get("id"))}
+                    {row(id_label, details.get("id"))}
                     {row("Project:", details.get("project"))}
                     {row("Project Manager:", details.get("pm"))}
                     {row("The creator:", details.get("creator"))}
                     {row("Date Creation:", details.get("date"))}
-                    {row("The Beneficiary:", details.get("beneficiary"))}
+                    {row(beneficiary_label, details.get("beneficiary"))}
                     {row("Cost category:", details.get("category"))}
                     {row("Total:", details.get("total"))}
-                    {row("Expense Description:", details.get("remark", details.get("description", "")))}
+                    {row("Description:", details.get("remark", details.get("description", "")))}
                 </table>
 
                 <div style="border: 1px solid #333; border-top: none; padding: 10px; font-size: 12px;">
@@ -149,7 +168,7 @@ def send_notification_email(
                 </div>
 
                 <div style="text-align: center; margin-top: 20px;">
-                    <a href="{os.getenv('FRONTEND_URL', 'http://localhost:3000')}{link}" 
+                    <a href="{os.getenv('FRONTEND_URL', 'https://po.sib.co.ma')}{link}" 
                        style="background-color: #2e75b6; color: white; padding: 10px 25px; text-decoration: none; font-weight: bold; border-radius: 4px; display: inline-block;">
                        ACCESS THE PORTAL
                     </a>
