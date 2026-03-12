@@ -8459,3 +8459,41 @@ def upsert_workflow(db: Session, proj_id: int, action: str, user_id: int):
 
 
         
+def clone_project_workflow(db: Session, source_project_id: int, target_project_id: int):
+    # 1. Fetch all workflow configs from source with the user relationships loaded
+    source_configs = db.query(models.ProjectWorkflow).options(
+        joinedload(models.ProjectWorkflow.primary_users),
+        joinedload(models.ProjectWorkflow.support_users)
+    ).filter(
+        models.ProjectWorkflow.project_id == source_project_id
+    ).all()
+    
+    if not source_configs:
+        raise ValueError("Source project has no workflow configuration to copy.")
+
+    # 2. Clear existing target config
+    db.query(models.ProjectWorkflow).filter(
+        models.ProjectWorkflow.project_id == target_project_id
+    ).delete()
+    db.flush() 
+
+    # 3. Clone each row
+    for cfg in source_configs:
+        # Create new config object WITHOUT the ID (it will be auto-generated)
+        new_cfg = models.ProjectWorkflow(
+            project_id=target_project_id,
+            action_type=cfg.action_type
+        )
+        db.add(new_cfg)
+        db.flush() # Now new_cfg has an ID
+
+        # Copy primary users (Many-to-Many relationship)
+        # SQLAlchemy handles the association table automatically
+        new_cfg.primary_users = cfg.primary_users
+        
+        # Copy support users (Many-to-Many relationship)
+        new_cfg.support_users = cfg.support_users
+        
+    db.commit()
+    return True
+

@@ -125,3 +125,22 @@ def export_workflow_matrix(
         media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         headers={'Content-Disposition': 'attachment; filename="Full_Workflow_Matrix.xlsx"'}
     )
+
+
+# In backend/app/routers/internal_projects.py
+
+@router.post("/{target_id}/workflow/clone/{source_id}")
+def clone_workflow(
+    target_id: int, 
+    source_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    if current_user.role != models.UserRole.ADMIN:
+        raise HTTPException(403, "Admin only")
+        
+    try:
+        crud.clone_project_workflow(db, source_id, target_id)
+        return {"message": "Workflow matrix cloned successfully"}
+    except ValueError as e:
+        raise HTTPException(400, detail=str(e))
