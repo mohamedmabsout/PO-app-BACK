@@ -14,8 +14,13 @@ services:
       db: # <-- MODIFIED SECTION
         condition: service_healthy
     volumes:
-      # ADD THIS LINE: Maps local 'uploads' folder to container's 'uploads' folder
+      # --- THIS IS THE FIX ---
+      # This maps your local code to the app folder in the container
+      - ./app:/app/app
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
       - ./uploads:/app/uploads
+      # -----------------------
 
   db:
     image: mysql:8.0
