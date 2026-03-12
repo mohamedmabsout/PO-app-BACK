@@ -3542,7 +3542,7 @@ def get_bc_by_id(db: Session, bc_id: int, current_user: models.User):
         return None
 
     # 2. Check Rejections (Your existing notification logic)
-    check_rejections_and_notify(db, bc_id)
+    check_rejections_and_notify(db, background_tasks=None)
 
     # 3. Calculate Permissions for this specific project
     is_admin = current_user.role == models.UserRole.ADMIN

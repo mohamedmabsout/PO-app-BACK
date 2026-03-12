@@ -124,7 +124,7 @@ def impersonate_user(
         data={
             "sub": target_user.username, 
             "role": target_user.role.value, # Ensure it's the string value
-            "user_id": target_user.id 
+            "id": target_user.id 
         }, 
         expires_delta=access_token_expires
     )
@@ -136,6 +136,8 @@ def impersonate_user(
         "user": {
             "username": target_user.username,
             "role": target_user.role.value,
+            "first_name": target_user.first_name,
+            "last_name": target_user.last_name,
             "name": f"{target_user.first_name} {target_user.last_name}",
             "id": target_user.id
         }
