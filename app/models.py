@@ -500,13 +500,15 @@ class BonDeCommande(Base):
 
     submitted_at = Column(DateTime, nullable=True)
     
-    # L1 Approval (Project Director)
+    # L1 Approval
     approver_l1_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     approved_l1_at = Column(DateTime, nullable=True)
-    
-    # L2 Approval (Admin)
+    l1_approval_comment = Column(Text, nullable=True) # <--- NEW
+
+    # L2 Approval
     approver_l2_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     approved_l2_at = Column(DateTime, nullable=True)
+    l2_approval_comment = Column(Text, nullable=True) # <--- NEW
 
     # Relationships for the approvers
     approver_l1 = relationship("User", foreign_keys=[approver_l1_id])
@@ -705,14 +707,15 @@ class Transaction(Base):
     status= Column(String(50), default=TransactionStatus.COMPLETED) # PENDING, COMPLETED, FAILED
     # Optional links for traceability
     related_request_id = Column(Integer, ForeignKey("fund_requests.id"), nullable=True)
-    
+    expense_id = Column(Integer, ForeignKey("expenses.id"), nullable=True)
+
     created_at = Column(DateTime, server_default=func.now())
     created_by_id = Column(Integer, ForeignKey("users.id")) # Who performed the action
     proof_file = Column(String(255), nullable=True)
     # Relationships
     caisse = relationship("Caisse", back_populates="transactions")
     created_by = relationship("User", foreign_keys=[created_by_id])
-
+    expense = relationship("Expense", foreign_keys=[expense_id])
 class Expense(Base):
     __tablename__ = "expenses"
     

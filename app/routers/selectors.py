@@ -1,6 +1,6 @@
 # in backend/app/routers/selectors.py
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import distinct
+from sqlalchemy import distinct, func
 from sqlalchemy.orm import Session
 from typing import List
 
@@ -42,10 +42,13 @@ def get_project_manager_selector(
     """
     query = db.query(models.User).filter(models.User.role.in_(['PM', 'ADMIN', 'PD']))
     if search:
-        # Search by first name or last name
+        # Search by first name, last name, or combined full name
+        term = f"%{search}%"
+        full_name = func.concat(models.User.first_name, " ", models.User.last_name)
         query = query.filter(
-            models.User.first_name.ilike(f"%{search}%") | \
-            models.User.last_name.ilike(f"%{search}%")
+            models.User.first_name.ilike(term) | \
+            models.User.last_name.ilike(term) | \
+            full_name.ilike(term)
         )
     return query.limit(20).all()
 

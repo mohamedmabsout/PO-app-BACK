@@ -106,9 +106,21 @@ def send_notification_email_detailled(
         """
 
     # Labels mapping based on module
-    is_expense = module in ["EXP", "CAISSE"]
-    id_label = "ID Expense:" if is_expense else "Reference ID:"
-    beneficiary_label = "The Beneficiary:" if is_expense else "Subcontractor/Entity:"
+    is_expense = module == "EXP"
+    is_caisse = module == "CAISSE"
+    
+    if is_expense:
+        id_label = "ID Expense:"
+        beneficiary_label = "The Beneficiary:"
+        status_prefix = "Expense"
+    elif is_caisse:
+        id_label = "Request ID:"
+        beneficiary_label = "Requester/PM:"
+        status_prefix = "Fund Request"
+    else:
+        id_label = "Reference ID:"
+        beneficiary_label = "Subcontractor/Entity:"
+        status_prefix = "Document"
 
     # 3. HTML Content using "cid:" references
     # cid:siblogo and cid:modulelogo match the headers we set below
@@ -130,7 +142,7 @@ def send_notification_email_detailled(
                     </tr>
                     <tr>
                         <td colspan="3" style="background-color: #f7caac; border: 1px solid #333; padding: 5px; font-weight: bold; font-size: 14px;">
-                            Status { "Expense" if is_expense else "Document" } "{status_text}"
+                            Status {status_prefix} "{status_text}"
                         </td>
                     </tr>
                 </table>

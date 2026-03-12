@@ -482,6 +482,9 @@ class BCItemResponse(BCItemCreate):
 
     model_config = ConfigDict(from_attributes=True)
 
+# 1. Add this new payload schema for approvals
+class BCApprovalRequest(BaseModel):
+    comment: Optional[str] = None
 
 class BCResponse(BaseModel):
     id: int
@@ -499,11 +502,16 @@ class BCResponse(BaseModel):
     items: List[BCItemResponse]
     approver_l1: Optional[UserInfo] = None
     approved_l1_at: Optional[datetime] = None
+    l1_approval_comment: Optional[str] = None # <--- NEW
+    
     approver_l2: Optional[UserInfo] = None
     approved_l2_at: Optional[datetime] = None
+    l2_approval_comment: Optional[str] = None # <--- NEW
+    
     model_config = ConfigDict(from_attributes=True)
      # --- NEW: Inject permissions for the UI ---
     user_permissions: List[str] =[]
+    next_approvers: List[dict] =[] # NEW
 
     model_config = ConfigDict(from_attributes=True)
 

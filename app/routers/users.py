@@ -38,18 +38,19 @@ def read_users(
 ):
     users = crud.get_users(db, skip=skip, limit=limit)
     return users
-@router.post("/system/migrate-stakeholders")
-def trigger_stakeholder_migration(
+@router.post("/system/smart-seed-matrix")
+def trigger_smart_seed(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
-    # Only Admin can run this
+    """
+    Deployment Tool: Auto-generates the Workflow Matrix for all projects.
+    """
     if current_user.role != models.UserRole.ADMIN:
-        raise HTTPException(status_code=403, detail="Not authorized")
-    
-    results = crud.migrate_legacy_data_to_unified_workflow(db)
-    return {"message": "Migration completed successfully", "results": results}
-
+        raise HTTPException(status_code=403, detail="Admins only.")
+        
+    results = crud.smart_seed_project_workflows(db)
+    return {"message": "Matrix Seed Complete", "details": results}
 # --- NOUVEAU : Endpoint pour lire UN SEUL utilisateur par ID ---
 # C'est cette route qui manquait et causait l'erreur 404 sur votre page d'édition.
 @router.get("/{user_id}", response_model=schemas.User)

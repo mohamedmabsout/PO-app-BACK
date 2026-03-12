@@ -28,7 +28,8 @@ def list_all_acceptances(
 def validate_items(
     payload: schemas.BulkValidationPayload, 
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user)
+    current_user: models.User = Depends(auth.get_current_user),
+    background_tasks: BackgroundTasks = BackgroundTasks()
 ):
     """
     Bulk Validates BC items (QC, PM, or PD approval/rejection).
@@ -41,7 +42,8 @@ def validate_items(
             payload.item_ids, 
             current_user, 
             payload.action, 
-            payload.comment
+            payload.comment,
+            background_tasks
         )
     except ValueError as e:
         raise HTTPException(status_code=403, detail=str(e))
@@ -51,7 +53,8 @@ def generate_act_endpoint(
     bc_id: int,
     payload: schemas.ACTGenerationRequest, 
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user)
+    current_user: models.User = Depends(auth.get_current_user),
+    background_tasks: BackgroundTasks = BackgroundTasks()
 ):
     """
     Creates a Service Acceptance (ACT) record for selected BC items.
@@ -59,7 +62,7 @@ def generate_act_endpoint(
     """
     try:
         # Pass creator_id for permission check
-        act = crud.generate_act_record(db, bc_id, current_user.id, payload.item_ids)
+        act = crud.generate_act_record(db, bc_id, current_user.id, payload.item_ids, background_tasks)
         # Note: Frontend might expect a file blob if it calls directly, 
         # but the snippet shows it handling blobs if it gets one.
         # If the frontend expects the PDF immediately:
@@ -126,13 +129,14 @@ def validate_item(
     item_id: int, 
     payload: schemas.ValidationPayload, 
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user)
+    current_user: models.User = Depends(auth.get_current_user),
+    background_tasks: BackgroundTasks = BackgroundTasks()
 ):
     """
     Validates a single BC item (Legacy/Individual check).
     """
     try:
-        return crud.validate_bc_item(db, item_id, current_user, payload.action, payload.comment)
+        return crud.validate_bc_item(db, item_id, current_user, payload.action, payload.comment, background_tasks)
     except ValueError as e:
         raise HTTPException(status_code=403, detail=str(e))
 

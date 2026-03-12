@@ -106,6 +106,7 @@ def search_expenses_endpoint(
     page: int = 1,
     limit: int = 20,
     project_id: Optional[int] = None,
+    requester_id: Optional[int] = None,
     exp_type: Optional[str] = None,
     beneficiary: Optional[str] = None,
     start_date: Optional[str] = None,
@@ -125,6 +126,7 @@ def search_expenses_endpoint(
 
     filters = {
         "project_id": project_id,
+        "requester_id": requester_id,
         "exp_type": exp_type,
         "beneficiary": beneficiary,
         "start_date": start_date,
@@ -171,8 +173,10 @@ def run_daily_checks(
 ):
     """Admin trigger for 24h reminders."""
     require_roles(current_user, [models.UserRole.ADMIN])
-    count = crud.check_missing_expense_uploads(db, background_tasks)
-    return {"message": f"Sent {count} reminders."}
+    count1 = crud.check_missing_expense_uploads(db, background_tasks)
+    count2 = crud.check_missing_invoice_receipts(db, background_tasks)
+
+    return {"message": f"Sent {count1} EXP reminders and {count2} INV reminders."}
 
 # backend/app/routers/expenses.py
 
