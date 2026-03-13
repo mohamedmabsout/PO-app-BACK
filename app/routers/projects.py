@@ -376,3 +376,39 @@ def update_internal_control(
     return {"message": f"Updated {count} records successfully."}
 
 
+# In your router file
+
+@router.get("/assigned-pos", response_model=schemas.PaginatedMergedPO)
+def list_assigned_pos(
+    page: int = 1,
+    size: int = 50,
+    search: Optional[str] = None,
+    project_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    # Security: Admins & Directors only
+    if current_user.role not in[models.UserRole.ADMIN, models.UserRole.CEO]:
+        raise HTTPException(status_code=403, detail="Only Admins can access the Reassignment tool.")
+        
+    return crud.get_assigned_pos_paginated(db, page, size, search, project_id)
+
+
+@router.post("/reassign-pos")
+def reassign_specific_pos(
+    payload: schemas.PoReassignPayload,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    if current_user.role not in [models.UserRole.ADMIN, models.UserRole.CEO]:
+        raise HTTPException(status_code=403, detail="Not authorized.")
+        
+    if not payload.merged_po_ids:
+        raise HTTPException(status_code=400, detail="No POs selected.")
+
+    try:
+        count = crud.bulk_reassign_pos(db, payload.merged_po_ids, payload.target_project_id, current_user, background_tasks)
+        return {"message": f"Successfully reassigned {count} PO lines."}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))

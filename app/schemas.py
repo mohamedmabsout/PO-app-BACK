@@ -184,6 +184,14 @@ class CustomerProject(BaseModel):
     name: str
     
     model_config = ConfigDict(from_attributes=True)
+
+
+# In backend/app/schemas.py
+
+class PoReassignPayload(BaseModel):
+    merged_po_ids: List[int]
+    target_project_id: int
+
 class SiteAssignmentRuleCreate(BaseModel):
     # All criteria are optional, but at least one should ideally be provided
     starts_with: Optional[str] = None
@@ -247,6 +255,7 @@ class PageMergedPO(BaseModel):
     page: int
     per_page: int
     total_pages: int
+    
 class RemainingPO(MergedPO):
     remaining_amount: float
     remaining_stage: str # "AC" or "PAC"

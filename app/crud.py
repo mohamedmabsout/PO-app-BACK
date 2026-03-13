@@ -3637,7 +3637,92 @@ def assign_site_to_internal_project_by_code(
 
     db.commit()
     return updated_rows
+# In backend/app/crud.py
 
+def get_assigned_pos_paginated(
+    db: Session, 
+    page: int = 1, 
+    size: int = 50, 
+    search: str = None, 
+    project_id: int = None
+):
+    """
+    Fetches POs that are already assigned to a real project (Not TBD).
+    """
+    # 1. Identify TBD Project to exclude it
+    tbd_project = db.query(models.InternalProject).filter_by(name="To Be Determined").first()
+    tbd_id = tbd_project.id if tbd_project else -1
+
+    # 2. Base Query (Exclude TBD and Unassigned)
+    query = db.query(models.MergedPO).options(
+        joinedload(models.MergedPO.internal_project),
+        joinedload(models.MergedPO.customer_project)
+    ).filter(
+        models.MergedPO.internal_project_id.isnot(None),
+        models.MergedPO.internal_project_id != tbd_id
+    )
+
+    # 3. Filters
+    if project_id:
+        query = query.filter(models.MergedPO.internal_project_id == project_id)
+
+    if search:
+        term = f"%{search}%"
+        query = query.filter(
+            or_(
+                models.MergedPO.po_id.ilike(term),
+                models.MergedPO.site_code.ilike(term),
+                models.MergedPO.item_description.ilike(term)
+            )
+        )
+
+    # 4. Pagination
+    total = query.count()
+    items = query.order_by(models.MergedPO.publish_date.desc()).offset((page - 1) * size).limit(size).all()
+
+    return {
+        "items": items,
+        "total_items": total,
+        "page": page,
+        "per_page": size,
+        "total_pages": (total + size - 1) // size if size > 0 else 1
+    }
+
+
+def bulk_reassign_pos(db: Session, po_ids: List[int], target_project_id: int, admin_user: models.User, background_tasks: BackgroundTasks):
+    """
+    Surgically re-assigns specific PO lines to a new project.
+    """
+    target_project = db.query(models.InternalProject).get(target_project_id)
+    if not target_project:
+        raise ValueError("Target project not found")
+
+    # 1. Update the POs directly
+    # Since this is a manual correction by a Director/Admin, we force status to APPROVED
+    updated_count = db.query(models.MergedPO).filter(
+        models.MergedPO.id.in_(po_ids)
+    ).update({
+        "internal_project_id": target_project_id,
+        "assignment_status": models.AssignmentStatus.APPROVED,
+        "assignment_date": datetime.now()
+    }, synchronize_session=False)
+
+    db.commit()
+
+    # 2. Notify the target Project Team (e.g., the PM)
+    pm_targets = get_action_notification_targets(db, target_project_id, models.ProjectActionType.ROLE_PM)
+    
+    for pm in pm_targets:
+        create_notification(
+            db, recipient_id=pm.id, type=models.NotificationType.APP,
+            module=models.NotificationModule.DISPATCH,
+            title="PO Lines Reassigned",
+            message=f"Admin {admin_user.first_name} manually reassigned {updated_count} PO lines to your project '{target_project.name}'.",
+            link="/projects/list" # Link to wherever PMs view their POs
+        )
+        
+    db.commit()
+    return updated_count
 def bulk_assign_sites(db: Session, site_ids: List[int], target_project_id: int, admin_user: models.User, background_tasks: BackgroundTasks):
     # 1. Get Target Project Details
     target_project = db.query(models.InternalProject).get(target_project_id)
