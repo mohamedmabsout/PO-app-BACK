@@ -3723,6 +3723,8 @@ def bulk_reassign_pos(db: Session, po_ids: List[int], target_project_id: int, ad
         
     db.commit()
     return updated_count
+
+    
 def bulk_assign_sites(db: Session, site_ids: List[int], target_project_id: int, admin_user: models.User, background_tasks: BackgroundTasks):
     # 1. Get Target Project Details
     target_project = db.query(models.InternalProject).get(target_project_id)
@@ -4018,6 +4020,25 @@ def search_merged_pos_by_site_codes(
         query = query.filter(func.date(models.MergedPO.publish_date) <= end_date)
 
     return query.all()
+
+def search_pos_by_batch(db: Session, identifiers: List[str]):
+    """Finds POs that match EITHER the PO ID or the Site Code."""
+    clean_ids =[s.strip() for s in identifiers if s.strip()]
+    if not clean_ids: 
+        return[]
+    
+    return db.query(models.MergedPO).options(
+        joinedload(models.MergedPO.internal_project),
+        joinedload(models.MergedPO.customer_project)
+    ).filter(
+        sa.or_(
+            models.MergedPO.po_id.in_(clean_ids),
+            models.MergedPO.site_code.in_(clean_ids)
+        )
+    ).limit(1000).all()
+
+
+
 def bulk_assign_projects_only(db: Session, file_contents: bytes):
     """
     Simplified Migration:

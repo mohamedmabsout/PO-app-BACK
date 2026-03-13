@@ -412,3 +412,28 @@ def reassign_specific_pos(
         return {"message": f"Successfully reassigned {count} PO lines."}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    
+@router.post("/pos/batch-search", response_model=List[schemas.MergedPO])
+def batch_search_pos(
+    payload: schemas.BatchSearchPayload,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    # Only Admins/PDs should be doing bulk reassignments
+    if current_user.role not in[models.UserRole.ADMIN, models.UserRole.PD]:
+        raise HTTPException(status_code=403, detail="Unauthorized to perform batch search")
+        
+    return crud.search_pos_by_batch(db, payload.identifiers)
+
+@router.post("/pos/bulk-reassign")
+def execute_bulk_reassign(
+    payload: schemas.BulkReassignPayload,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user),
+    background_tasks: BackgroundTasks = BackgroundTasks()
+):
+    if current_user.role not in[models.UserRole.ADMIN, models.UserRole.PD]:
+        raise HTTPException(status_code=403, detail="Unauthorized to reassign POs")
+        
+    count = crud.bulk_reassign_pos(db, payload.po_ids, payload.target_project_id, current_user,background_tasks=background_tasks)
+    return {"message": f"Successfully reassigned {count} POs."}

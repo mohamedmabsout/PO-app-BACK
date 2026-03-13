@@ -536,6 +536,12 @@ class BatchSearchRequest(BaseModel):
     site_codes: List[str]
     start_date: Optional[date] = None # New
     end_date: Optional[date] = None
+class BatchSearchPayload(BaseModel):
+    identifiers: List[str]
+
+class BulkReassignPayload(BaseModel):
+    po_ids: List[int]       # The Database IDs of the MergedPOs
+    target_project_id: int  # The new internal_project_id
 class BulkSiteAssignByCodeRequest(BaseModel):
     """
     Assigner plusieurs sites à un projet interne
