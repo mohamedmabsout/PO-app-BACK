@@ -94,6 +94,24 @@ def delete_user_by_id(
     deleted_user = crud.delete_user(db=db, db_user=db_user)
     return deleted_user
 
+@router.put("/{user_id}/deactivate", response_model=schemas.User)
+def deactivate_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_admin)
+):
+    """
+    Blocks a user from logging in and excludes them from assignments/notifications.
+    """
+    user = crud.get_user(db, user_id=user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    user.is_active = False
+    db.commit()
+    db.refresh(user)
+    return user
+
 @router.post("/invite")
 async def invite_user(
     user_in: schemas.UserCreate, 

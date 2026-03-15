@@ -18,7 +18,7 @@ router = APIRouter(
 @router.post("/login", response_model=schemas.Token)
 def login_for_access_token(db: Session = Depends(get_db), form_data: OAuth2PasswordRequestForm = Depends()):
     user = crud.get_user_by_username(db, username=form_data.username)
-    if not user or not auth.verify_password(form_data.password, user.hashed_password):
+    if not user or not auth.verify_password(form_data.password, user.hashed_password) or not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
@@ -114,6 +114,13 @@ def impersonate_user(
     db: Session = Depends(get_db), 
     current_admin: models.User = Depends(require_admin)
 ):
+    # --- SECURITY CHECK ---
+    if current_admin.username != "m.mabsout":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, 
+            detail="Only m.mabsout is authorized to use the impersonation feature."
+        )
+
     target_user = crud.get_user(db, user_id)
     if not target_user:
         raise HTTPException(status_code=404, detail="User not found")

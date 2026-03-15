@@ -197,8 +197,9 @@ def get_project_users_by_action(db: Session, project_id: int, action: models.Pro
     if not config:
         return []
 
-    # Combine both Many-to-Many lists
-    return list(config.primary_users) + list(config.support_users)
+    # Combine both Many-to-Many lists and filter for active users
+    all_users = list(config.primary_users) + list(config.support_users)
+    return [u for u in all_users if u.is_active]
 
 def get_project_users_by_role(db: Session, project_id: int, role: str):
     """
@@ -222,9 +223,12 @@ def get_action_notification_targets(db: Session, project_id: int, action_type: m
 
     # Apply Rule 1: We have a config AND it has at least one Primary user
     if config and config.primary_users:
-        return config.primary_users
+        # Filter for active users
+        active_primaries = [u for u in config.primary_users if u.is_active]
+        if active_primaries:
+            return active_primaries
     
-    # Apply Rule 2: Fallback to Admins
+    # Apply Rule 2: Fallback to Admins (Active only)
     admins = db.query(models.User).filter(
         models.User.role == models.UserRole.ADMIN,
         models.User.is_active == True
@@ -284,7 +288,7 @@ def update_user(db: Session, db_user: models.User, user_update: schemas.UserUpda
     
     return db_user
 def get_users(db: Session, skip: int = 0, limit: int = 100):
-    return db.query(models.User).offset(skip).limit(limit).all()
+    return db.query(models.User).filter(models.User.is_active == True).offset(skip).limit(limit).all()
 
 
 def get_project(db: Session, project_id: int):
@@ -355,24 +359,28 @@ def get_or_create(db: Session, model, **kwargs):
         db.flush() # Use flush to get the ID without committing
         return instance, True # Returns instance and "was created" flag
 
-def create_raw_purchase_orders_from_dataframe(db: Session, df: pd.DataFrame, user_id: int):    # Standardize column names from the Excel file - This part is perfect.
+def create_raw_purchase_orders_from_dataframe(db: Session, df: pd.DataFrame, user_id: int):
+    # Standardize column names from the Excel file
     df.rename(columns={
         'PO NO.': 'po_no', 'PO Line NO.': 'po_line_no', 'Project Name': 'project_code',
         'Site Code': 'site_code', 'Customer': 'customer','PO Status': 'po_status',
         'Item Description': 'item_description', 'Payment Terms': 'payment_terms_raw',
         'Unit Price': 'unit_price', 'Requested Qty': 'requested_qty', 'Publish Date': 'publish_date'
     }, inplace=True, errors='ignore')
+    
+    # =======================================================
+    # 🚨 NEW REFINEMENT: NULL/NaN SAFETY
+    # Prevent database crashes if Huawei leaves numeric cells empty
+    # =======================================================
+    for num_col in ['unit_price', 'requested_qty', 'line_amount']:
+        if num_col in df.columns:
+            df[num_col] = pd.to_numeric(df[num_col], errors='coerce').fillna(0.0)
+    # =======================================================
+
     if 'publish_date' in df.columns:
-        # Ensure it is a datetime object
         df['publish_date'] = pd.to_datetime(df['publish_date'], errors='coerce')
-        
-        # Define the specific date to target (Jan 1, 2026)
         target_date = pd.Timestamp("2026-01-01")
-        
-        # Create a mask for rows that match exactly this date
         mask = df['publish_date'].dt.date == target_date.date()
-        
-        # Shift those specific rows back by 1 day
         df.loc[mask, 'publish_date'] = df.loc[mask, 'publish_date'] - pd.Timedelta(days=1)
 
     df['uploader_id'] = user_id
@@ -380,12 +388,12 @@ def create_raw_purchase_orders_from_dataframe(db: Session, df: pd.DataFrame, use
     # Hydrate Customers and Sites ONLY
     customer_map = {name: get_or_create(db, models.Customer, name=name)[0] for name in df['customer'].dropna().unique()} if 'customer' in df.columns else {}
     site_map = {code: get_or_create(db, models.Site, site_code=code)[0] for code in df['site_code'].dropna().unique()} if 'site_code' in df.columns else {}
-    db.commit() # Commit new customers/sites
+    db.commit()
 
     df['customer_id'] = df['customer'].map({c.name: c.id for c in customer_map.values()}) if customer_map else None
     df['site_id'] = df['site_code'].map({s.site_code: s.id for s in site_map.values()}) if site_map else None
     
-    model_columns = [c.key for c in models.RawPurchaseOrder.__table__.columns if c.key != 'id']
+    model_columns =[c.key for c in models.RawPurchaseOrder.__table__.columns if c.key != 'id']
     df_to_insert = df[[col for col in model_columns if col in df.columns]]
     
     records = df_to_insert.to_dict("records")
@@ -581,8 +589,7 @@ def process_and_merge_pos(db: Session):
         if po_id in existing_merged_map:
             # UPDATE
             merged_po = existing_merged_map[po_id]
-            
-            # --- FINANCIAL UPDATES (Always Apply) ---
+
             if po.requested_qty == 0:
                 merged_po.requested_qty = 0
                 merged_po.line_amount_hw = 0
@@ -591,21 +598,35 @@ def process_and_merge_pos(db: Session):
                 merged_po.unit_price = po.unit_price
                 merged_po.line_amount_hw = (po.unit_price or 0) * (po.requested_qty or 0)
             
+            # =======================================================
+            # 🚨 NEW REFINEMENT: DYNAMIC CAPPING
+            # If Huawei reduced the requested_qty, we must cap the existing 
+            # acceptances instantly to prevent dashboard inflation.
+            # =======================================================
+            if merged_po.unit_price and merged_po.requested_qty is not None:
+                max_ac_amount = merged_po.unit_price * merged_po.requested_qty * 0.80
+                max_pac_amount = merged_po.unit_price * merged_po.requested_qty * 0.20
+
+                if merged_po.accepted_ac_amount and merged_po.accepted_ac_amount > max_ac_amount:
+                    merged_po.accepted_ac_amount = max_ac_amount
+                
+                if merged_po.accepted_pac_amount and merged_po.accepted_pac_amount > max_pac_amount:
+                    merged_po.accepted_pac_amount = max_pac_amount
+            # =======================================================
+
             merged_po.publish_date = po.publish_date
             merged_po.site_id = po.site_id
             merged_po.site_code = po.site.site_code if po.site else None
             
             # --- ASSIGNMENT PRESERVATION LOGIC (THE FIX) ---
-            # 1. Is the PO currently unassigned or TBD?
             current_is_tbd = (merged_po.internal_project_id is None) or \
                              (merged_po.internal_project_id == tbd_project_id)
             
-            # 2. Only update if it is currently TBD
             if current_is_tbd:
                 merged_po.internal_project_id = final_internal_project_id
             
             if not merged_po.category or merged_po.category == "TBD":
-             merged_po.category = deduce_category(po.item_description)
+                merged_po.category = deduce_category(po.item_description)
 
 
 
@@ -1146,120 +1167,128 @@ def run_database_category_cleanup(db: Session):
     return stats
 
 
+
+
 def process_acceptances_by_ids(db: Session, raw_acceptance_ids: List[int]):
     """
-    Processes specific RawAcceptance records by ID.
-    Replicates exact logic: Aggregate -> Deduce Category -> Calc AC/PAC -> Update.
+    Processes RawAcceptance records by ID.
+    Uses 'keep=last' to handle Huawei's Reversals and block duplicate spam.
     """
     if not raw_acceptance_ids:
         return 0
 
-    # 1. Fetch only the requested raw records
-    query_raw = db.query(models.RawAcceptance).filter(
+    # 1. Fetch ONLY the newly uploaded raw records
+    query_new_raw = db.query(models.RawAcceptance).filter(
         models.RawAcceptance.id.in_(raw_acceptance_ids),
         models.RawAcceptance.is_processed == False
     )
+    new_df = pd.read_sql(query_new_raw.statement, db.bind)
     
-    # Read into DataFrame for easy aggregation
-    acceptance_df = pd.read_sql(query_raw.statement, db.bind)
-    
-    if acceptance_df.empty:
+    if new_df.empty:
         return 0
+
+    # 2. Fetch ALL history for the affected POs
+    affected_po_nos = new_df['po_no'].unique().tolist()
+    query_all_history = db.query(models.RawAcceptance).filter(
+        models.RawAcceptance.po_no.in_(affected_po_nos)
+    )
+    history_df = pd.read_sql(query_all_history.statement, db.bind)
+
     # =========================================================================
-    # 🚨 THE FIX PART 1: DEDUPLICATE THE HUAWEI EXPORT
-    # If Huawei exports the same Shipment twice, keep only the most recent one
+    # 🚨 THE FIX: DEDUPLICATION BY OVERWRITE (LATEST STATE WINS)
+    # By dropping duplicates based ONLY on [PO, Line, Shipment], 
+    # we instantly destroy the 79 duplicates.
+    # If the last row uploaded was a negative reversal (-5), it SURVIVES!
     # =========================================================================
-    # Sort by date so we keep the most recent "Approved" status row
-    acceptance_df.sort_values('application_processed_date', inplace=True)
-    # Drop duplicates matching the exact same PO Line and Shipment Number
-    acceptance_df.drop_duplicates(
+    # Sort by date and ID so the most recently uploaded file is at the very bottom
+    history_df.sort_values(['application_processed_date', 'id'], inplace=True)
+    
+    history_df.drop_duplicates(
         subset=['po_no', 'po_line_no', 'shipment_no'], 
         keep='last', 
         inplace=True
     )
-    # =========================================================================
-    # 2. Generate IDs for Aggregation (Exact same logic as before)
-    acceptance_df['po_id'] = acceptance_df['po_no'] + '-' + acceptance_df['po_line_no'].astype(int).astype(str)
-    acceptance_df['id2'] = acceptance_df['po_id'] + '-' + acceptance_df['shipment_no'].astype(int).astype(str)
 
-    # 3. Aggregate (Sum qty, take max date)
-    aggregated_df = acceptance_df.groupby("id2").agg(
-        acceptance_qty=("acceptance_qty", "sum"),
-        application_processed_date=("application_processed_date", "max"),
-        po_id=("po_id", "first"),
-        shipment_no=("shipment_no", "first"),
-    ).reset_index()
+    # Generate IDs for joining
+    history_df['po_id'] = history_df['po_no'] + '-' + history_df['po_line_no'].astype(int).astype(str)
 
-    # 4. Fetch related MergedPOs
-    po_ids_to_update = aggregated_df['po_id'].unique().tolist()
+    # 3. Fetch related MergedPOs
+    po_ids_to_update = history_df['po_id'].unique().tolist()
     merged_po_records = db.query(models.MergedPO).filter(models.MergedPO.po_id.in_(po_ids_to_update)).all()
     merged_po_map = {mp.po_id: mp for mp in merged_po_records}
     
-    updated_count = 0
     updated_po_ids = set()
 
-    # 5. Calculation Loop
-    for index, acceptance_row in aggregated_df.iterrows():
-        po_id = acceptance_row['po_id']
+    # 4. Calculation Loop
+    for index, row in history_df.iterrows():
+        po_id = row['po_id']
         
         if po_id in merged_po_map:
-            merged_po_to_update = merged_po_map[po_id]
+            merged_po = merged_po_map[po_id]
             updated_po_ids.add(po_id)
             
-            # 1. Get the date from the file
-            raw_processed_date = acceptance_row['application_processed_date']
+            # Use the LATEST quantity directly (no summing needed!)
+            latest_qty = row['acceptance_qty']
+            raw_processed_date = row['application_processed_date']
+            shipment_no = row['shipment_no']
             
-            # --- 🚨 TIMEZONE FIX: 2026-01-01 -> 2025-12-31 🚨 ---
-            # If the date is valid and is exactly Jan 1, 2026, shift it back.
+            unit_price = merged_po.unit_price or 0
+            req_qty = merged_po.requested_qty or 0
+
+            # --- TIMEZONE FIX: 2026-01-01 -> 2025-12-31 ---
             final_processed_date = None
-            if pd.notna(raw_processed_date):
+            if latest_qty > 0 and pd.notna(raw_processed_date):
                 date_obj = raw_processed_date.date()
                 if date_obj == date(2026, 1, 1):
                     final_processed_date = date(2025, 12, 31)
                 else:
                     final_processed_date = date_obj
-            # ----------------------------------------------------
 
-            unit_price = merged_po_to_update.unit_price or 0
-            req_qty = merged_po_to_update.requested_qty or 0
+            # --- MATHEMATICAL CAP ---
+            # If latest_qty is negative (reversal), it becomes 0.
+            agg_acceptance_qty = max(0, min(latest_qty, req_qty))
 
-            # =========================================================================
-            # 🚨 THE FIX PART 2: MATHEMATICAL CAP
-            # Never accept a quantity higher than what was requested
-            # =========================================================================
-            raw_acceptance_qty = acceptance_row['acceptance_qty']
-            agg_acceptance_qty = min(raw_acceptance_qty, req_qty)
-            # =========================================================================
+            # Re-deduce category
+            merged_po.category = deduce_category(merged_po.item_description)
+            payment_term = merged_po.payment_term
 
-            shipment_no = acceptance_row['shipment_no']
-
-            merged_po_to_update.category = deduce_category(merged_po_to_update.item_description)
-            payment_term = merged_po_to_update.payment_term
-
-            # --- Apply the CORRECTED date to AC/PAC fields ---
+            # --- APPLY THE NEUTRALIZATION LOGIC ---
             if shipment_no == 1:
-                merged_po_to_update.total_ac_amount = unit_price * req_qty * 0.80
-                merged_po_to_update.accepted_ac_amount = unit_price * agg_acceptance_qty * 0.80
-                merged_po_to_update.date_ac_ok = final_processed_date 
-                
-                if payment_term == "AC PAC 100%":
-                    merged_po_to_update.total_pac_amount = unit_price * req_qty * 0.20
-                    merged_po_to_update.accepted_pac_amount = unit_price * agg_acceptance_qty * 0.20
-                    merged_po_to_update.date_pac_ok = final_processed_date 
+                if agg_acceptance_qty > 0:
+                    merged_po.total_ac_amount = unit_price * req_qty * 0.80
+                    merged_po.accepted_ac_amount = unit_price * agg_acceptance_qty * 0.80
+                    merged_po.date_ac_ok = final_processed_date 
+                    
+                    if payment_term == "AC PAC 100%":
+                        merged_po.total_pac_amount = unit_price * req_qty * 0.20
+                        merged_po.accepted_pac_amount = unit_price * agg_acceptance_qty * 0.20
+                        merged_po.date_pac_ok = final_processed_date 
+                else:
+                    # REVERSAL DETECTED: Reset to 0
+                    merged_po.accepted_ac_amount = 0.0
+                    merged_po.date_ac_ok = None
+                    if payment_term == "AC PAC 100%":
+                        merged_po.accepted_pac_amount = 0.0
+                        merged_po.date_pac_ok = None
 
             elif shipment_no == 2:
                 if payment_term == "AC1 80 | PAC 20":
-                    merged_po_to_update.total_pac_amount = unit_price * req_qty * 0.20
-                    merged_po_to_update.accepted_pac_amount = unit_price * agg_acceptance_qty * 0.20
-                    merged_po_to_update.date_pac_ok = final_processed_date
+                    if agg_acceptance_qty > 0:
+                        merged_po.total_pac_amount = unit_price * req_qty * 0.20
+                        merged_po.accepted_pac_amount = unit_price * agg_acceptance_qty * 0.20
+                        merged_po.date_pac_ok = final_processed_date
+                    else:
+                        # REVERSAL DETECTED: Reset to 0
+                        merged_po.accepted_pac_amount = 0.0
+                        merged_po.date_pac_ok = None
 
-    # 6. Mark as Processed & Commit
-    query_raw.update({"is_processed": True})
+    # 5. Mark new rows as Processed & Commit
+    query_new_raw.update({"is_processed": True})
     db.commit()
 
     return len(updated_po_ids)
 
-# --- FINAL REVISED FUNCTION ---
+
 def process_acceptance_dataframe(db: Session, acceptance_df: pd.DataFrame):
     """
     Processes a DataFrame of acceptance data, deduces categories, calculates AC/PAC values,
@@ -6049,7 +6078,7 @@ def get_all_wallets_summary(db: Session):
     Overview of all PM wallets for Admin/PD oversight.
     """
     # Fetch all users who possess a Caisse (PMs)
-    pms = db.query(models.User).join(models.Caisse).all()
+    pms = db.query(models.User).join(models.Caisse).filter(models.User.is_active == True).all()
     
     results = []
     for pm in pms:
