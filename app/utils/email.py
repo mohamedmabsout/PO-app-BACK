@@ -14,12 +14,14 @@ async def send_bc_status_email(bc, recipient_email, status, background_tasks):
     subject = f"SIB Portal - BC {bc.bc_number} Update: {status}"
     
     html = f"""
-    <h3>Bon de Commande Update</h3>
-    <p>The BC <strong>{bc.bc_number}</strong> has moved to status: <strong>{status}</strong>.</p>
-    <p>Project: {bc.internal_project.name}</p>
-    <p>Amount: {bc.total_amount_ht:,.2f} MAD</p>
-    <br>
-    <p>Please log in to the portal to view details.</p>
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; border: 1px solid #ddd; padding: 15px; border-radius: 8px;">
+        <h3 style="color: #2e75b6; margin-top: 0; font-size: 18px;">Bon de Commande Update</h3>
+        <p style="font-size: 14px;">The BC <strong>{bc.bc_number}</strong> has moved to status: <strong>{status}</strong>.</p>
+        <p style="font-size: 14px;">Project: {bc.internal_project.name}</p>
+        <p style="font-size: 14px;">Amount: <strong>{bc.total_amount_ht:,.2f} MAD</strong></p>
+        <br>
+        <p style="font-size: 12px; color: #666;">Please log in to the portal to view details.</p>
+    </div>
     """
 
     message = MessageSchema(
@@ -100,8 +102,8 @@ def send_notification_email_detailled(
             return ""
         return f"""
         <tr>
-            <td style="padding: 6px 10px; border: 1px solid #333; background-color: #d9e1f2; font-weight: bold; width: 30%; font-size: 13px;">{label}</td>
-            <td style="padding: 6px 10px; border: 1px solid #333; font-size: 13px;">{str(value)}</td>
+            <td style="padding: 5px 8px; border: 1px solid #333; background-color: #d9e1f2; font-weight: bold; width: 35%; font-size: 11px;">{label}</td>
+            <td style="padding: 5px 8px; border: 1px solid #333; font-size: 11px; word-break: break-all;">{str(value)}</td>
         </tr>
         """
 
@@ -126,28 +128,28 @@ def send_notification_email_detailled(
     # cid:siblogo and cid:modulelogo match the headers we set below
     html_content = f"""
     <html>
-        <body style="font-family: Arial, sans-serif; color: #000; margin: 0; padding: 20px;">
-            <div style="max-width: 800px; margin: auto;">
+        <body style="font-family: Arial, sans-serif; color: #000; margin: 0; padding: 10px;">
+            <div style="max-width: 600px; margin: auto; width: 100%;">
                 <table width="100%" style="border-collapse: collapse; border: 1px solid #333; text-align: center;">
                     <tr>
-                        <td width="25%" style="border: 1px solid #333; padding: 10px;">
-                            <img src="cid:siblogo" alt="SIB" style="max-height: 50px;">
+                        <td width="20%" style="border: 1px solid #333; padding: 5px;">
+                            <img src="cid:siblogo" alt="SIB" style="max-height: 40px; max-width: 100%;">
                         </td>
-                        <td width="50%" style="border: 1px solid #333; padding: 10px; font-size: 22px; color: #e46c0a; font-weight: bold;">
+                        <td width="60%" style="border: 1px solid #333; padding: 5px; font-size: 16px; color: #e46c0a; font-weight: bold;">
                             SIB Portal Notification
                         </td>
-                        <td width="25%" style="border: 1px solid #333; padding: 10px;">
-                            <img src="cid:modulelogo" alt="Module" style="max-height: 50px;">
+                        <td width="20%" style="border: 1px solid #333; padding: 5px;">
+                            <img src="cid:modulelogo" alt="Module" style="max-height: 40px; max-width: 100%;">
                         </td>
                     </tr>
                     <tr>
-                        <td colspan="3" style="background-color: #f7caac; border: 1px solid #333; padding: 5px; font-weight: bold; font-size: 14px;">
+                        <td colspan="3" style="background-color: #f7caac; border: 1px solid #333; padding: 5px; font-weight: bold; font-size: 12px;">
                             Status {status_prefix} "{status_text}"
                         </td>
                     </tr>
                 </table>
 
-                <table width="100%" style="border-collapse: collapse; border: 1px solid #333; margin-top: -1px;">
+                <table width="100%" style="border-collapse: collapse; border: 1px solid #333; margin-top: -1px; table-layout: fixed;">
                     {row(id_label, details.get("id"))}
                     {row("Project:", details.get("project"))}
                     {row("Project Manager:", details.get("pm"))}
@@ -159,17 +161,17 @@ def send_notification_email_detailled(
                     {row("Description:", details.get("remark", details.get("description", "")))}
                 </table>
 
-                <div style="border: 1px solid #333; border-top: none; padding: 10px; font-size: 12px;">
-                    <p style="margin: 0 0 5px 0;">Notes:</p>
-                    <ol style="margin: 0; padding-left: 20px;">
+                <div style="border: 1px solid #333; border-top: none; padding: 10px; font-size: 11px;">
+                    <p style="margin: 0 0 5px 0; font-weight: bold;">Notes:</p>
+                    <ol style="margin: 0; padding-left: 15px;">
                         <li>If payment has not been received, please check with the finance department.</li>
                         <li>Once received, please confirm it in the system to avoid blocking future requests.</li>
                     </ol>
                 </div>
 
-                <div style="text-align: center; margin-top: 20px;">
+                <div style="text-align: center; margin-top: 15px;">
                     <a href="{os.getenv('FRONTEND_URL', 'https://po.sib.co.ma')}{link}" 
-                       style="background-color: #2e75b6; color: white; padding: 10px 25px; text-decoration: none; font-weight: bold; border-radius: 4px; display: inline-block;">
+                       style="background-color: #2e75b6; color: white; padding: 8px 20px; text-decoration: none; font-weight: bold; border-radius: 4px; display: inline-block; font-size: 13px;">
                        ACCESS THE PORTAL
                     </a>
                 </div>

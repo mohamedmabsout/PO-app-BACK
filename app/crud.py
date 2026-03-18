@@ -759,11 +759,15 @@ def process_acceptance_file_background(file_path: str, history_id: int, user_id:
         
         # --- THE STATUS CHECK: ONLY TREAT 'APPROVED' LINES ---
         total_rows_received = len(acceptance_df)
+        status_skipped = 0
         if 'excel_status' in acceptance_df.columns:
             # Normalize to string, strip spaces, and lowercase for a robust comparison
             mask = acceptance_df['excel_status'].astype(str).str.strip().str.lower() == 'approved'
+            rows_before_status = len(acceptance_df)
             acceptance_df = acceptance_df[mask]
+            status_skipped = rows_before_status - len(acceptance_df)
         
+        rows_after_status = len(acceptance_df)
 
         # ========================================================
         # 🚨 THE FIX: DEDUPLICATE THE HUAWEI EXPORT
@@ -777,7 +781,8 @@ def process_acceptance_file_background(file_path: str, history_id: int, user_id:
         )
         
         rows_to_process = len(acceptance_df)
-        skipped_rows = total_rows_received - rows_to_process
+        duplicate_skipped = rows_after_status - rows_to_process
+        total_skipped = status_skipped + duplicate_skipped
         # -----------------------------------------------------
 
         # 2. Data Type Conversion & Validation (as before)
@@ -805,8 +810,11 @@ def process_acceptance_file_background(file_path: str, history_id: int, user_id:
             history_record.status = "SUCCESS"
             history_record.total_rows = rows_to_process
             # Add a clear note about filtered rows
-            if skipped_rows > 0:
-                history_record.error_message = f"Processed {rows_to_process} approved rows. Skipped {skipped_rows} rows not in 'Approved' status."
+            if total_skipped > 0:
+                history_record.error_message = (
+                    f"Processed {rows_to_process} rows. "
+                    f"Skipped {status_skipped} non-approved rows and {duplicate_skipped} duplicates."
+                )
             db.commit()
 
         create_notification(
@@ -815,7 +823,7 @@ def process_acceptance_file_background(file_path: str, history_id: int, user_id:
             type=models.NotificationType.APP,
             module=models.NotificationModule.SYSTEM,
             title="Acceptance Import Complete",
-            message=f"File processed. {updated_count} Merged POs updated. ({skipped_rows} lines skipped).",
+            message=f"File processed. {updated_count} Merged POs updated. ({total_skipped} lines skipped).",
             link="/dataimportation/DoubleImport",
                             created_at=datetime.now()
 
@@ -4910,15 +4918,17 @@ def check_rejections_and_notify(db: Session, background_tasks: BackgroundTasks =
                 # 2. Email Notification
                 if background_tasks and rejector.email:
                     html_body = f"""
-                    <h3>Action Required: Re-Inspection</h3>
-                    <p>Hello {rejector.first_name},</p>
-                    <p>The 3-week postponement period for the following item has ended:</p>
-                    <ul>
-                        <li><strong>BC:</strong> {item.bc.bc_number if item.bc else 'N/A'}</li>
-                        <li><strong>Item:</strong> {item.merged_po.item_description if item.merged_po else 'N/A'}</li>
-                        <li><strong>Previous Rejection:</strong> {last_rejection.comment}</li>
-                    </ul>
-                    <p>Please log in to the portal to re-validate this item.</p>
+                    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; border: 1px solid #ddd; padding: 15px; border-radius: 8px;">
+                        <h3 style="color: #2e75b6; margin-top: 0;">Action Required: Re-Inspection</h3>
+                        <p>Hello {rejector.first_name},</p>
+                        <p>The 3-week postponement period for the following item has ended:</p>
+                        <ul style="font-size: 13px;">
+                            <li><strong>BC:</strong> {item.bc.bc_number if item.bc else 'N/A'}</li>
+                            <li><strong>Item:</strong> {item.merged_po.item_description if item.merged_po else 'N/A'}</li>
+                            <li><strong>Previous Rejection:</strong> {last_rejection.comment}</li>
+                        </ul>
+                        <p style="font-size: 13px;">Please log in to the portal to re-validate this item.</p>
+                    </div>
                     """
                     
                     message = MessageSchema(

@@ -215,14 +215,16 @@ async def approve_sbc_endpoint(
             reset_link = f"https://po.sib.co.ma/reset-password?token={new_user.reset_token}"
             
             html = f"""
-            <h3>SBC Approval Notification</h3>
-            <p>Hello {new_user.first_name},</p>
-            <p>Your Sub-Contractor account ({sbc.short_name}) has been <strong>APPROVED</strong>.</p>
-            <p>A user account has been created for you. Please click the link below to set your password and access the portal:</p>
-            <br>
-            <a href="{reset_link}" style="padding: 10px 20px; background-color: #007bff; color: white; text-decoration: none; border-radius: 5px;">Set Password</a>
-            <br><br>
-            <p>Or copy this link: {reset_link}</p>
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; border: 1px solid #ddd; padding: 15px; border-radius: 8px;">
+                <h3 style="color: #2e75b6; margin-top: 0;">SBC Approval Notification</h3>
+                <p>Hello {new_user.first_name},</p>
+                <p>Your Sub-Contractor account (<strong>{sbc.short_name}</strong>) has been <strong>APPROVED</strong>.</p>
+                <p>A user account has been created for you. Please click the link below to set your password and access the portal:</p>
+                <div style="text-align: center; margin-top: 20px;">
+                    <a href="{reset_link}" style="background-color: #2e75b6; color: white; padding: 10px 20px; text-decoration: none; font-weight: bold; border-radius: 4px; display: inline-block;">SET PASSWORD</a>
+                </div>
+                <p style="font-size: 11px; color: #666; margin-top: 20px;">Or copy this link: {reset_link}</p>
+            </div>
             """
 
             message = MessageSchema(

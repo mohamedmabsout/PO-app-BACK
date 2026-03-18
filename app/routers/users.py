@@ -137,10 +137,15 @@ async def invite_user(
         subject="Welcome to SIB PO App - Set your Password",
         recipients=[new_user.email],
         body=f"""
-        <p>Hello {new_user.first_name},</p>
-        <p>Your account has been created.</p>
-        <p>Please click the link below to set your password and access the system:</p>
-        <a href="{reset_link}">Set Password</a>
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; border: 1px solid #ddd; padding: 15px; border-radius: 8px;">
+            <h3 style="color: #2e75b6; margin-top: 0;">Welcome to SIB PO App</h3>
+            <p>Hello {new_user.first_name},</p>
+            <p>Your account has been created.</p>
+            <p>Please click the link below to set your password and access the system:</p>
+            <div style="text-align: center; margin-top: 20px;">
+                <a href="{reset_link}" style="background-color: #2e75b6; color: white; padding: 10px 20px; text-decoration: none; font-weight: bold; border-radius: 4px; display: inline-block;">SET PASSWORD</a>
+            </div>
+        </div>
         """,
         subtype=MessageType.html
     )

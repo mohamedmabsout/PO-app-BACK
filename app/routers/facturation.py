@@ -52,7 +52,7 @@ async def generate_facture_bundle(
 
     try:
         # Create record in DB
-        new_invoice = crud.create_invoice_bundle(db, sbc_id, payload.act_ids, payload.invoice_number)
+        new_invoice = crud.create_invoice_bundle(db, sbc_id, payload.act_ids, payload.invoice_number,background_tasks)
         
         # Generate the ZIP in memory
         zip_buffer = create_invoice_zip(new_invoice)
