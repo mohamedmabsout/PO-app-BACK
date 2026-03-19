@@ -2920,7 +2920,6 @@ def create_sbc(db: Session, form_data: dict, contract_file, tax_file, creator_id
     creator_user = db.query(models.User).get(creator_id)
     creator_full_name = f"{creator_user.first_name} {creator_user.last_name}" if creator_user else "System"
     admin_emails = get_emails_by_role(db, UserRole.ADMIN)
-    
     send_notification_email_detailled(
         background_tasks,
         admin_emails,
@@ -3060,6 +3059,9 @@ def approve_sbc(db: Session, sbc_id: int, approver_id: int):
     db.commit()
     db.refresh(sbc)
     
+    # Invalidate notifications
+    invalidate_notifications_for_link(db, "/configuration/sbc/approve")
+
     # Return both the SBC and the New User (if created) so the router can send the email
     return sbc, new_user
 
@@ -3070,6 +3072,10 @@ def reject_sbc(db: Session, sbc_id: int):
         
     sbc.status = models.SBCStatus.BLACKLISTED # Or return to Draft logic if you prefer
     db.commit()
+    
+    # Invalidate notifications
+    invalidate_notifications_for_link(db, "/configuration/sbc/approve")
+
     return sbc
 def cancel_bc(db: Session, bc_id: int, user_id: int):
     """Deletes a BC if it's in DRAFT and owned by the user."""
@@ -3108,6 +3114,10 @@ def submit_bc(db: Session, bc_id: int, user_id: int, background_tasks: Backgroun
 
     bc.status = models.BCStatus.SUBMITTED
     bc.submitted_at = datetime.now()
+    
+    # Invalidate notifications
+    invalidate_notifications_for_link(db, f"/configuration/bc/detail/{bc.id}")
+
     db.commit()
 
     # --- 2. NOTIFICATIONS ---
@@ -4411,10 +4421,10 @@ def create_notification(
 def invalidate_notifications_for_link(db: Session, link_pattern: str):
     """
     Finds all unread 'TODO' notifications that match a specific link pattern
-    and marks them as read.
+    (using LIKE for pattern matching) and marks them as read.
     """
     db.query(models.Notification).filter(
-        models.Notification.link == link_pattern,
+        models.Notification.link.like(f"{link_pattern}%"),
         models.Notification.type == models.NotificationType.TODO,
         models.Notification.is_read == False
     ).update({"is_read": True}, synchronize_session=False)
@@ -4591,6 +4601,9 @@ def validate_bc_item(db: Session, item_id: int, user: models.User, action: str, 
 
     # 2. Apply Decision
     if action == "APPROVE":
+        # Invalidate notifications
+        invalidate_notifications_for_link(db, f"/configuration/acceptance/workflow/{item.bc_id}")
+
         if is_qc: item.qc_validation_status = models.ValidationState.APPROVED
         if is_pm: item.pm_validation_status = models.ValidationState.APPROVED
         if item.global_status == models.ItemGlobalStatus.POSTPONED:
@@ -4806,6 +4819,9 @@ def generate_act_record(db: Session, bc_id: int, creator_id: int, item_ids: List
     # 4. Link Items & Calculate Total HT
     total_ht = 0.0
     
+    # Invalidate notifications
+    invalidate_notifications_for_link(db, f"/configuration/acceptance/workflow/{bc_id}")
+
     for item in items:
         item.act_id = act.id
         item.global_status = models.ItemGlobalStatus.ACCEPTED
@@ -5152,10 +5168,10 @@ def create_pm_fund_request(db: Session, pm_id: int, payload: schemas.FundRequest
 
     # --- 2. NOTIFICATIONS ---
     # Global Admins (No matrix)
-    admins = db.query(models.User).filter(models.User.role == models.UserRole.ADMIN, models.User.is_active == True).all()
-    admin_emails = [u.email for u in admins if u.email]
+    pds = db.query(models.User).filter(models.User.role == models.UserRole.PD, models.User.is_active == True).all()
+    admin_emails = [u.email for u in pds if u.email]
 
-    for admin in admins:
+    for admin in pds:
         create_notification(
             db, recipient_id=admin.id, 
             type=models.NotificationType.TODO,
@@ -5197,6 +5213,9 @@ def pd_validate_request(db: Session, req_id: int, pd_id: int, payload: schemas.P
         req.status = models.FundRequestStatus.REJECTED
         req.admin_comment = payload.comment
         
+        # Invalidate notifications
+        invalidate_notifications_for_link(db, "/caisse")
+
         # --- NOTIFICATIONS (Notify Requester) ---
         requester = req.requester
         if requester:
@@ -5252,6 +5271,9 @@ def pd_validate_request(db: Session, req_id: int, pd_id: int, payload: schemas.P
         # Update parent total
         req.pd_validated_amount = sum(i.pd_approved_amount for i in req.items)
 
+        # Invalidate notifications
+        invalidate_notifications_for_link(db, "/caisse")
+
         # --- NOTIFICATIONS (Notify Admins) ---
         admins = db.query(models.User).filter(models.User.role == models.UserRole.ADMIN, models.User.is_active == True).all()
         admin_emails = [u.email for u in admins if u.email]
@@ -5297,6 +5319,9 @@ def admin_authorize_request(db: Session, req_id: int, admin_id: int, payload: sc
     req.admin_approved_at = datetime.now()
     if payload.comment:
         req.admin_comment = payload.comment
+
+    # Invalidate notifications
+    invalidate_notifications_for_link(db, "/caisse")
 
     total_released_this_session = 0.0
 
@@ -5483,6 +5508,9 @@ def raf_confirm_reception(db: Session, req_id: int, raf_id: int, item_confirmati
 
     db.commit()
     db.refresh(req)
+
+    # Invalidate notifications
+    invalidate_notifications_for_link(db, "/caisse")
 
     # --- NOTIFICATIONS ---
     requester = req.requester
@@ -5728,6 +5756,10 @@ def confirm_fund_reception(db: Session, req_id: int, item_confirmations: dict, f
 
     db.commit()
     db.refresh(req)
+
+    # Invalidate notifications
+    invalidate_notifications_for_link(db, "/caisse")
+
     return req
 
 
@@ -5764,6 +5796,7 @@ def acknowledge_variance(db: Session, req_id: int, note: str):
     
     db.commit()
     db.refresh(req)
+
     return req
 
 def get_caisse_stats(db: Session, user: models.User):
@@ -6438,7 +6471,7 @@ def create_expense(db: Session, payload: schemas.ExpenseCreate, user_id: int, ba
                 module=models.NotificationModule.EXP,
                 title="Expense Approval Required",
                 message=f"PM {user.first_name} submitted an expense for {net_amount:,.2f} MAD.",
-                link="/expenses?tab=l1"
+                link=f"/expenses/details/{db_expense.id}"
             )
         
         # 2. Send Detailed Email
@@ -7627,6 +7660,9 @@ def pay_invoice_bulk(db: Session, invoice_ids: list, receipt_filename: str, raf_
         inv.status = models.InvoiceStatus.PAID
         inv.paid_at = datetime.now()
         inv.payment_receipt_filename = receipt_filename
+        
+        # Invalidate notifications
+        invalidate_notifications_for_link(db, f"/raf/facturation/verify/{inv.id}")
     db.commit()
 
 # Fix for the missing function error and the VAT calculation
@@ -7935,6 +7971,10 @@ def reject_invoice(db: Session, invoice_id: int, reason: str, background_tasks: 
     # 2. Update Status
     inv.status = models.InvoiceStatus.REJECTED
     inv.rejection_reason = reason
+    db.commit()
+
+    # Invalidate notifications
+    invalidate_notifications_for_link(db, f"/raf/facturation/verify/{invoice_id}")
     
     # 3. Notifications to SBC Users
     sbc_users = inv.sbc.users if inv.sbc else []
