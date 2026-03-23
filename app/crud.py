@@ -7081,56 +7081,56 @@ def submit_expense(db: Session, expense_id: int, background_tasks: BackgroundTas
 
 
 
-def get_payable_acts(db: Session, project_id: int, current_expense_id: int = None):
-    """
-    Returns ACTs that are available.
-    FIX: Removed strict PERSONNE_PHYSIQUE filter to allow linking 
-    advances to Entreprises as well.
-    """
-    # 1. Identify ACT IDs that are currently "Locked" by another active expense
-    locked_act_ids_subquery = db.query(models.ServiceAcceptance.id).join(
-        models.Expense, models.ServiceAcceptance.expense_id == models.Expense.id
-    ).filter(
-        models.Expense.status != models.ExpenseStatus.REJECTED
-    ).scalar_subquery()
+# def get_payable_acts(db: Session, project_id: int, current_expense_id: int = None):
+#     """
+#     Returns ACTs that are available.
+#     FIX: Removed strict PERSONNE_PHYSIQUE filter to allow linking 
+#     advances to Entreprises as well.
+#     """
+#     # 1. Identify ACT IDs that are currently "Locked" by another active expense
+#     locked_act_ids_subquery = db.query(models.ServiceAcceptance.id).join(
+#         models.Expense, models.ServiceAcceptance.expense_id == models.Expense.id
+#     ).filter(
+#         models.Expense.status != models.ExpenseStatus.REJECTED
+#     ).scalar_subquery()
 
-    # 2. Main Query
-    query = db.query(models.ServiceAcceptance).join(
-        models.BonDeCommande, models.ServiceAcceptance.bc_id == models.BonDeCommande.id
-    ).filter(
-        models.BonDeCommande.project_id == project_id,
-        models.BonDeCommande.status == models.BCStatus.APPROVED
-        # REMOVED: bc_type == PERSONNE_PHYSIQUE
-    )
+#     # 2. Main Query
+#     query = db.query(models.ServiceAcceptance).join(
+#         models.BonDeCommande, models.ServiceAcceptance.bc_id == models.BonDeCommande.id
+#     ).filter(
+#         models.BonDeCommande.project_id == project_id,
+#         models.BonDeCommande.status == models.BCStatus.APPROVED
+#         # REMOVED: bc_type == PERSONNE_PHYSIQUE
+#     )
 
-    # 3. Filter: Available OR current edit OR rejected
-    query = query.filter(
-        or_(
-            models.ServiceAcceptance.expense_id.is_(None),
-            models.ServiceAcceptance.expense_id == current_expense_id,
-            models.ServiceAcceptance.id.notin_(locked_act_ids_subquery)
-        )
-    )
+#     # 3. Filter: Available OR current edit OR rejected
+#     query = query.filter(
+#         or_(
+#             models.ServiceAcceptance.expense_id.is_(None),
+#             models.ServiceAcceptance.expense_id == current_expense_id,
+#             models.ServiceAcceptance.id.notin_(locked_act_ids_subquery)
+#         )
+#     )
 
-    results = query.all()
+#     results = query.all()
     
-    payable_acts = []
-    for act in results:
-        # Category deduction
-        category = act.items[0].merged_po.category if act.items else "Service"
+#     payable_acts = []
+#     for act in results:
+#         # Category deduction
+#         category = act.items[0].merged_po.category if act.items else "Service"
         
-        payable_acts.append({
-            "id": act.id,
-            "act_number": act.act_number,
-            "total_amount_ht": act.total_amount_ht,
-            "total_amount_ttc": act.total_amount_ttc or (act.total_amount_ht * 1.2),
-            "category": category,
-            "sbc_name": act.bc.sbc.name if act.bc.sbc else "Unknown",
-            "sbc_id": act.bc.sbc_id,
-            "created_at": act.created_at
-        })
+#         payable_acts.append({
+#             "id": act.id,
+#             "act_number": act.act_number,
+#             "total_amount_ht": act.total_amount_ht,
+#             "total_amount_ttc": act.total_amount_ttc or (act.total_amount_ht * 1.2),
+#             "category": category,
+#             "sbc_name": act.bc.sbc.name if act.bc.sbc else "Unknown",
+#             "sbc_id": act.bc.sbc_id,
+#             "created_at": act.created_at
+#         })
 
-    return payable_acts
+#     return payable_acts
 
 def deduct_from_caisse(db: Session, user_id: int, amount: float, description: str):
     """Débite la caisse d'un utilisateur"""
@@ -8011,23 +8011,77 @@ def reject_invoice(db: Session, invoice_id: int, reason: str, background_tasks: 
 
     db.commit()
     return inv
+def get_payable_acts(db: Session, project_id: int, current_expense_id: int = None):
+    """
+    Returns ACTs that are available for a PM/Admin to attach to an expense.
+    """
+    # 1. Identify ACT IDs that are currently "Locked" by another active expense
+    locked_act_ids_subquery = db.query(models.ServiceAcceptance.id).join(
+        models.Expense, models.ServiceAcceptance.expense_id == models.Expense.id
+    ).filter(
+        models.Expense.status != models.ExpenseStatus.REJECTED
+    ).scalar_subquery()
+
+    # 2. Main Query for the Project
+    query = db.query(models.ServiceAcceptance).join(
+        models.BonDeCommande, models.ServiceAcceptance.bc_id == models.BonDeCommande.id
+    ).filter(
+        # --- FIX: Changed back to project_id ---
+        models.BonDeCommande.project_id == project_id, 
+        models.BonDeCommande.status == models.BCStatus.APPROVED
+    )
+
+    # 3. Filter: Available OR attached to the current edit OR not in locked list
+    query = query.filter(
+        or_(
+            models.ServiceAcceptance.expense_id.is_(None),
+            models.ServiceAcceptance.expense_id == current_expense_id,
+            models.ServiceAcceptance.id.notin_(locked_act_ids_subquery)
+        )
+    )
+
+    results = query.all()
+    
+    payable_acts =[]
+    for act in results:
+        # Safe Category deduction to prevent crashes
+        category = "Service"
+        if act.items and len(act.items) > 0 and act.items[0].merged_po:
+            category = act.items[0].merged_po.category or "Service"
+        
+        payable_acts.append({
+            "id": act.id,
+            "act_number": act.act_number,
+            "total_amount_ht": act.total_amount_ht,
+            "total_amount_ttc": act.total_amount_ttc or (act.total_amount_ht * 1.2),
+            "category": category,
+            "sbc_name": act.bc.sbc.name if act.bc and act.bc.sbc else "Unknown",
+            "sbc_id": act.bc.sbc_id,
+            "created_at": act.created_at
+        })
+
+    return payable_acts
 
 def get_payable_acts_for_sbc_invoicing(db: Session, sbc_id: int):
-    # 1. Subqueries (Keep existing logic for locking)
+    """
+    Returns ACTs that are available for an SBC to generate an invoice.
+    """
+    # 1. Locked by Invoice
     locked_by_invoice = db.query(models.ServiceAcceptance.id).join(
         models.Invoice, models.ServiceAcceptance.invoice_id == models.Invoice.id
     ).filter(models.Invoice.status != models.InvoiceStatus.REJECTED).scalar_subquery()
 
+    # 2. Locked by Expense (Petty Cash)
     locked_by_expense = db.query(models.ServiceAcceptance.id).join(
         models.Expense, models.ServiceAcceptance.expense_id == models.Expense.id
     ).filter(models.Expense.status != models.ExpenseStatus.REJECTED).scalar_subquery()
 
-    # 2. Main Query
+    # 3. Main Query
     results = db.query(models.ServiceAcceptance).join(
         models.BonDeCommande
     ).options(
         joinedload(models.ServiceAcceptance.items).joinedload(models.BCItem.merged_po),
-        joinedload(models.ServiceAcceptance.bc).joinedload(models.BonDeCommande.sbc) # Ensure SBC is loaded
+        joinedload(models.ServiceAcceptance.bc).joinedload(models.BonDeCommande.sbc)
     ).filter(
         models.BonDeCommande.sbc_id == sbc_id,
         models.BonDeCommande.status == models.BCStatus.APPROVED,
@@ -8036,16 +8090,12 @@ def get_payable_acts_for_sbc_invoicing(db: Session, sbc_id: int):
         models.ServiceAcceptance.id.notin_(locked_by_expense)
     ).all()
 
-    payable_acts = []
+    payable_acts =[]
     for act in results:
-        # Robust category extraction
         category = "Service"
-        if act.items and len(act.items) > 0:
-            first_item_po = act.items[0].merged_po
-            if first_item_po and first_item_po.category:
-                category = first_item_po.category
+        if act.items and len(act.items) > 0 and act.items[0].merged_po:
+            category = act.items[0].merged_po.category or "Service"
         
-        # --- THE FIX: ADD sbc_name HERE ---
         payable_acts.append({
             "id": act.id,
             "act_number": act.act_number,
@@ -8053,8 +8103,8 @@ def get_payable_acts_for_sbc_invoicing(db: Session, sbc_id: int):
             "total_amount_ttc": act.total_amount_ttc or (act.total_amount_ht * 1.2),
             "category": category,
             "sbc_id": sbc_id,
-            "sbc_name": act.bc.sbc.name if act.bc and act.bc.sbc else "Unknown SBC", # <--- ADDED
-            "project_name": act.bc.internal_project.name if act.bc.internal_project else "N/A",
+            "sbc_name": act.bc.sbc.name if act.bc and act.bc.sbc else "Unknown SBC",
+            "project_name": act.bc.internal_project.name if act.bc and act.bc.internal_project else "N/A",
             "created_at": act.created_at
         })
     return payable_acts
