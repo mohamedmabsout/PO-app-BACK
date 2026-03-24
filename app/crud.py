@@ -8014,8 +8014,11 @@ def reject_invoice(db: Session, invoice_id: int, reason: str, background_tasks: 
 def get_payable_acts(db: Session, project_id: int, current_expense_id: int = None):
     """
     Returns ACTs that are available for a PM/Admin to attach to an expense.
+    Strictly restricted to PERSONNE_PHYSIQUE to avoid paying standard companies via Petty Cash.
     """
-    # 1. Identify ACT IDs that are currently "Locked" by another active expense
+    # 1. Identify ACT IDs that are currently "Locked" by another active/paid expense
+    # Since PAID, APPROVED, and SUBMITTED are all != REJECTED, 
+    # this subquery guarantees we prevent DOUBLE PAYMENTS.
     locked_act_ids_subquery = db.query(models.ServiceAcceptance.id).join(
         models.Expense, models.ServiceAcceptance.expense_id == models.Expense.id
     ).filter(
@@ -8026,16 +8029,23 @@ def get_payable_acts(db: Session, project_id: int, current_expense_id: int = Non
     query = db.query(models.ServiceAcceptance).join(
         models.BonDeCommande, models.ServiceAcceptance.bc_id == models.BonDeCommande.id
     ).filter(
-        # --- FIX: Changed back to project_id ---
         models.BonDeCommande.project_id == project_id, 
-        models.BonDeCommande.status == models.BCStatus.APPROVED
+        models.BonDeCommande.status == models.BCStatus.APPROVED,
+        
+        # --- FIX 1: Restrict to Personne Physique ONLY ---
+        models.BonDeCommande.bc_type == models.BCType.PERSONNE_PHYSIQUE
     )
 
-    # 3. Filter: Available OR attached to the current edit OR not in locked list
+    # 3. Filter: Strictly prevent double payment
+    # An ACT is only payable if it has NO expense attached, 
+    # OR it belongs to the draft we are currently editing.
     query = query.filter(
         or_(
             models.ServiceAcceptance.expense_id.is_(None),
             models.ServiceAcceptance.expense_id == current_expense_id,
+            
+            # Safety net: If an expense was rejected but the DB failed to unlink it, 
+            # allow it to be used again.
             models.ServiceAcceptance.id.notin_(locked_act_ids_subquery)
         )
     )
@@ -8061,7 +8071,6 @@ def get_payable_acts(db: Session, project_id: int, current_expense_id: int = Non
         })
 
     return payable_acts
-
 def get_payable_acts_for_sbc_invoicing(db: Session, sbc_id: int):
     """
     Returns ACTs that are available for an SBC to generate an invoice.

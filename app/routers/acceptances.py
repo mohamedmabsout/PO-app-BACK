@@ -188,11 +188,11 @@ def get_payable_acts_endpoint(
         # Optional: Add role security check here if needed
         return crud.get_payable_acts(db, project_id=project_id, current_expense_id=current_expense_id)
     
-    # 2. SCENARIO B: SBC fetching acts to invoice
-    if current_user.role == models.UserRole.SBC:
-        if not current_user.sbc_id:
-            raise HTTPException(status_code=400, detail="User not linked to an SBC profile.")
-        return crud.get_payable_acts_for_sbc_invoicing(db, sbc_id=current_user.sbc_id)
+    # # 2. SCENARIO B: SBC fetching acts to invoice
+    # if current_user.role == models.UserRole.SBC:
+    #     if not current_user.sbc_id:
+    #         raise HTTPException(status_code=400, detail="User not linked to an SBC profile.")
+    #     return crud.get_payable_acts_for_sbc_invoicing(db, sbc_id=current_user.sbc_id)
         
     # If neither condition is met
     raise HTTPException(status_code=400, detail="You must provide a project_id or be an SBC user.")
