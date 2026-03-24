@@ -170,7 +170,7 @@ def export_acts_to_excel(
         media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         headers=headers
     )
-@router.get("/payable-acts") # Ensure this is ABOVE @router.get("/{act_id}")
+@router.get("/payable_act") # Ensure this is ABOVE @router.get("/{act_id}")
 def get_payable_acts_endpoint(
     project_id: Optional[int] = Query(None, description="Filter by project (for PMs creating expenses)"),
     current_expense_id: Optional[int] = Query(None, description="Include acts from current draft"),
@@ -180,22 +180,13 @@ def get_payable_acts_endpoint(
     """
     Unified endpoint for fetching Payable Acts.
     - PM/Admin/PD use this by passing ?project_id=X to create expenses.
-    - SBCs use this without a project_id to generate invoices.
     """
     
-    # 1. SCENARIO A: PM/Admin fetching acts for a specific project expense
+    # SCENARIO: PM/Admin fetching acts for a specific project expense
     if project_id is not None:
-        # Optional: Add role security check here if needed
         return crud.get_payable_acts(db, project_id=project_id, current_expense_id=current_expense_id)
-    
-    # # 2. SCENARIO B: SBC fetching acts to invoice
-    # if current_user.role == models.UserRole.SBC:
-    #     if not current_user.sbc_id:
-    #         raise HTTPException(status_code=400, detail="User not linked to an SBC profile.")
-    #     return crud.get_payable_acts_for_sbc_invoicing(db, sbc_id=current_user.sbc_id)
         
-    # If neither condition is met
-    raise HTTPException(status_code=400, detail="You must provide a project_id or be an SBC user.")
+    raise HTTPException(status_code=400, detail="You must provide a project_id.")
 
 @router.get("/{act_id}", response_model=schemas.ServiceAcceptance)
 def get_act_details(

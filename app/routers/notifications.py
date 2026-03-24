@@ -1,6 +1,7 @@
 # backend/app/routers/notifications.py
+import re
 from datetime import datetime
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Response,HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from typing import List, Optional
@@ -14,6 +15,117 @@ router = APIRouter(
 )
 
 
+@router.post("/maintenance/clean-stale")
+def clean_stale_notifications_endpoint(
+    db: Session = Depends(get_db),
+    # Security: Ensure only an Admin can run this cleanup
+    current_user: models.User = Depends(auth.get_current_user) 
+):
+    """
+    One-time script to find 'Ghost' or 'Stale' notifications and mark them as read.
+    It extracts the ID from the notification text/link and verifies the actual DB state.
+    """
+    try:
+        # 1. Fetch all unread notifications
+        unread_notifs = db.query(models.Notification).filter(
+            models.Notification.is_read == False
+        ).all()
+        
+        cleared_count = 0
+
+        for notif in unread_notifs:
+            extracted_id = None
+            
+            # Try to find #123 in message (e.g. "Expense #123")
+            match_msg = re.search(r"#(\d+)", notif.message or "")
+            # Try to find a number at the very end of the link (e.g. "/expenses/details/123")
+            match_link = re.search(r"/(\d+)$", notif.link or "")
+            
+            if match_msg:
+                extracted_id = int(match_msg.group(1))
+            elif match_link:
+                extracted_id = int(match_link.group(1))
+                
+            if not extracted_id:
+                continue # Cannot determine what this notification is about
+
+            # ==========================================
+            # MODULE: EXPENSES
+            # ==========================================
+            # Compare enum by value or direct enum depending on your setup. 
+            # Using str() is safest if comparing Enum to string.
+            if str(notif.module) == "EXP" or notif.module == models.NotificationModule.EXP:
+                exp = db.query(models.Expense).get(extracted_id)
+                
+                if not exp:
+                    notif.is_read = True
+                    cleared_count += 1
+                    continue
+                
+                title = notif.title or ""
+                
+                # Rule 1: "L1" but expense is past SUBMITTED
+                if "L1" in title and exp.status != models.ExpenseStatus.SUBMITTED:
+                    notif.is_read = True
+                    cleared_count += 1
+                
+                # Rule 2: "L2" but expense is past PENDING_L2
+                elif "L2" in title and exp.status != models.ExpenseStatus.PENDING_L2:
+                    notif.is_read = True
+                    cleared_count += 1
+                
+                # Rule 3: "Payment" but expense is already PAID or ACKNOWLEDGED
+                elif "Payment" in title and exp.status in [models.ExpenseStatus.PAID, models.ExpenseStatus.ACKNOWLEDGED]:
+                    notif.is_read = True
+                    cleared_count += 1
+                
+                # Rule 4: "Receipt" but expense is already ACKNOWLEDGED
+                elif "Receipt" in title and exp.status == models.ExpenseStatus.ACKNOWLEDGED:
+                    notif.is_read = True
+                    cleared_count += 1
+
+                # Rule 5: If expense is REJECTED, all old TODOs should be cleared
+                elif exp.status == models.ExpenseStatus.REJECTED and str(notif.type) == "TODO":
+                    notif.is_read = True
+                    cleared_count += 1
+
+            # ==========================================
+            # MODULE: CAISSE / FUND REQUESTS
+            # ==========================================
+            elif str(notif.module) in ["CAISSE", "FUND", "SYSTEM"]:
+                req = db.query(models.FundRequest).get(extracted_id)
+                if not req:
+                    notif.is_read = True
+                    cleared_count += 1
+                    continue
+
+                title = notif.title or ""
+
+                # Rule 1: "Validate" but request is past SUBMITTED
+                if "Validate" in title and req.status not in[models.FundRequestStatus.SUBMITTED, models.FundRequestStatus.PARTIALLY_PAID]:
+                    notif.is_read = True
+                    cleared_count += 1
+                
+                # Rule 2: "Authorize" but request is past VALIDATED_PD
+                elif "Authorize" in title and req.status not in[models.FundRequestStatus.VALIDATED_PD, models.FundRequestStatus.PARTIALLY_PAID]:
+                    notif.is_read = True
+                    cleared_count += 1
+
+                # Rule 3: If Request is COMPLETED or REJECTED, kill all old TODOs
+                elif req.status in [models.FundRequestStatus.COMPLETED, models.FundRequestStatus.REJECTED] and str(notif.type) == "TODO":
+                    notif.is_read = True
+                    cleared_count += 1
+
+        db.commit()
+        return {
+            "status": "success",
+            "message": f"Successfully cleared {cleared_count} stale notifications.",
+            "cleared_count": cleared_count
+        }
+
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
 @router.get("/")
 def get_notifications(
     module: Optional[str] = Query(None),

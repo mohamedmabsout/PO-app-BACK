@@ -7081,56 +7081,56 @@ def submit_expense(db: Session, expense_id: int, background_tasks: BackgroundTas
 
 
 
-# def get_payable_acts(db: Session, project_id: int, current_expense_id: int = None):
-#     """
-#     Returns ACTs that are available.
-#     FIX: Removed strict PERSONNE_PHYSIQUE filter to allow linking 
-#     advances to Entreprises as well.
-#     """
-#     # 1. Identify ACT IDs that are currently "Locked" by another active expense
-#     locked_act_ids_subquery = db.query(models.ServiceAcceptance.id).join(
-#         models.Expense, models.ServiceAcceptance.expense_id == models.Expense.id
-#     ).filter(
-#         models.Expense.status != models.ExpenseStatus.REJECTED
-#     ).scalar_subquery()
+def get_payable_acts(db: Session, project_id: int, current_expense_id: int = None):
+    """
+    Returns ACTs that are available.
+    FIX: Removed strict PERSONNE_PHYSIQUE filter to allow linking 
+    advances to Entreprises as well.
+    """
+    # 1. Identify ACT IDs that are currently "Locked" by another active expense
+    locked_act_ids_subquery = db.query(models.ServiceAcceptance.id).join(
+        models.Expense, models.ServiceAcceptance.expense_id == models.Expense.id
+    ).filter(
+        models.Expense.status != models.ExpenseStatus.REJECTED
+    ).scalar_subquery()
 
-#     # 2. Main Query
-#     query = db.query(models.ServiceAcceptance).join(
-#         models.BonDeCommande, models.ServiceAcceptance.bc_id == models.BonDeCommande.id
-#     ).filter(
-#         models.BonDeCommande.project_id == project_id,
-#         models.BonDeCommande.status == models.BCStatus.APPROVED
-#         # REMOVED: bc_type == PERSONNE_PHYSIQUE
-#     )
+    # 2. Main Query
+    query = db.query(models.ServiceAcceptance).join(
+        models.BonDeCommande, models.ServiceAcceptance.bc_id == models.BonDeCommande.id
+    ).filter(
+        models.BonDeCommande.project_id == project_id,
+        models.BonDeCommande.status == models.BCStatus.APPROVED
+        # REMOVED: bc_type == PERSONNE_PHYSIQUE
+    )
 
-#     # 3. Filter: Available OR current edit OR rejected
-#     query = query.filter(
-#         or_(
-#             models.ServiceAcceptance.expense_id.is_(None),
-#             models.ServiceAcceptance.expense_id == current_expense_id,
-#             models.ServiceAcceptance.id.notin_(locked_act_ids_subquery)
-#         )
-#     )
+    # 3. Filter: Available OR current edit OR rejected
+    query = query.filter(
+        or_(
+            models.ServiceAcceptance.expense_id.is_(None),
+            models.ServiceAcceptance.expense_id == current_expense_id,
+            models.ServiceAcceptance.id.notin_(locked_act_ids_subquery)
+        )
+    )
 
-#     results = query.all()
+    results = query.all()
     
-#     payable_acts = []
-#     for act in results:
-#         # Category deduction
-#         category = act.items[0].merged_po.category if act.items else "Service"
+    payable_acts = []
+    for act in results:
+        # Category deduction
+        category = act.items[0].merged_po.category if act.items else "Service"
         
-#         payable_acts.append({
-#             "id": act.id,
-#             "act_number": act.act_number,
-#             "total_amount_ht": act.total_amount_ht,
-#             "total_amount_ttc": act.total_amount_ttc or (act.total_amount_ht * 1.2),
-#             "category": category,
-#             "sbc_name": act.bc.sbc.name if act.bc.sbc else "Unknown",
-#             "sbc_id": act.bc.sbc_id,
-#             "created_at": act.created_at
-#         })
+        payable_acts.append({
+            "id": act.id,
+            "act_number": act.act_number,
+            "total_amount_ht": act.total_amount_ht,
+            "total_amount_ttc": act.total_amount_ttc or (act.total_amount_ht * 1.2),
+            "category": category,
+            "sbc_name": act.bc.sbc.name if act.bc and act.bc.sbc else "Unknown",
+            "sbc_id": act.bc.sbc_id,
+            "created_at": act.created_at
+        })
 
-#     return payable_acts
+    return payable_acts
 
 def deduct_from_caisse(db: Session, user_id: int, amount: float, description: str):
     """Débite la caisse d'un utilisateur"""
