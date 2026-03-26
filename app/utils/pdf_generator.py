@@ -551,13 +551,15 @@ def generate_invoice_pdf(invoice):
 
     elements.append(t_items)
     adv_balance = crud.get_sbc_unconsumed_balance(db, invoice.sbc_id)
+    
+    if invoice.total_amount_ht > 0:
+        tva_percentage = round((invoice.total_tax_amount / invoice.total_amount_ht) * 100)
+    else:
+        tva_percentage = 20
 
-    # --- 4. TOTALS ---
-    totals = [
-        ["", "Invoice Amount (Excl. Tax):", f"{invoice.total_amount_ht:,.2f}"],
-        ["", f"TVA {int((invoice.total_tax_amount/invoice.total_amount_ht)*100) if invoice.total_amount_ht > 0 else 20}%:", f"{invoice.total_tax_amount:,.2f}"],
-        ["", "Total Amount (Incl. Tax):", f"{invoice.total_amount_ttc:,.2f} MAD"]
+    totals = [["", "Invoice Amount (Excl. Tax):", f"{invoice.total_amount_ht:,.2f}"],["", f"TVA {tva_percentage}%:", f"{invoice.total_tax_amount:,.2f}"],["", "Total Amount (Incl. Tax):", f"{invoice.total_amount_ttc:,.2f} MAD"]
     ]
+    
     if adv_balance > 0:
         net_to_pay = max(0, invoice.total_amount_ttc - adv_balance)
         totals.append(["Less Advances Received:", f"- {adv_balance:,.2f} MAD"])

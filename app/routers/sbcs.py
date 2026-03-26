@@ -375,10 +375,12 @@ def get_pm_advances_for_sbc(
     query = db.query(models.SBCAdvance).join(
         models.Expense, models.SBCAdvance.expense_id == models.Expense.id
     ).filter(
+        
         models.SBCAdvance.sbc_id == id,
         models.SBCAdvance.is_consumed == False,
         models.Expense.requester_id == current_user.id
     )
+
 
     if exclude_expense_id:
         # If editing, don't count advances already tagged for consumption in this draft
