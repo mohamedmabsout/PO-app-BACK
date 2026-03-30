@@ -12,6 +12,8 @@ from datetime import datetime
 
 router = APIRouter(prefix="/api/acceptances", tags=["Acceptance Management"])
 
+
+
 @router.get("/all", response_model=List[schemas.ServiceAcceptance])
 def list_all_acceptances(
     search: Optional[str] = Query(None),
@@ -47,7 +49,6 @@ def validate_items(
         )
     except ValueError as e:
         raise HTTPException(status_code=403, detail=str(e))
-
 @router.post("/bc/{bc_id}/generate-act")
 def generate_act_endpoint(
     bc_id: int,
@@ -76,6 +77,7 @@ def generate_act_endpoint(
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
 
 @router.get("/bc/{bc_id}/acts", response_model=List[schemas.ServiceAcceptance])
 def get_acts_for_bc(

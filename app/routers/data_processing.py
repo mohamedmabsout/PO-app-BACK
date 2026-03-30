@@ -779,7 +779,7 @@ def get_bc_pdf(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
 ):
-    bc = crud.get_bc_by_id(db, bc_id)
+    bc = crud.get_bc_by_id(db, bc_id, current_user)  # Reuse the same visibility logic
     if not bc:
         raise HTTPException(status_code=404, detail="Bon de Commande not found")
 
