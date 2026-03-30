@@ -167,3 +167,9 @@ class InvoiceStatus(str, enum.Enum):
     PAID = "PAID"             # Payment confirmation uploaded
     ACKNOWLEDGED = "ACKNOWLEDGED" # SBC confirmed receipt
     REJECTED = "REJECTED"
+
+class PnLStatus(str, enum.Enum):
+    DRAFT = "DRAFT"                   # PM is allocating labor
+    PENDING_APPROVAL = "PENDING_APPROVAL" # PM finished, waiting for PD
+    PUBLISHED = "PUBLISHED"           # PD approved, numbers are frozen
+    REJECTED = "REJECTED"             # PD rejected, PM needs to fix
