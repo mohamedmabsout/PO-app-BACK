@@ -609,7 +609,7 @@ class ValidationPayload(BaseModel):
     comment: Optional[str] = None
 
 class ACTGenerationRequest(BaseModel):
-    bc_id: int
+    # bc_id: int
     item_ids: List[int]
 
 
