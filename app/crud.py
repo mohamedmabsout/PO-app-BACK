@@ -5005,9 +5005,11 @@ def get_all_acts(db: Session, current_user: models.User, search: Optional[str] =
     """
     # 1. Start query from ServiceAcceptance
     query = db.query(models.ServiceAcceptance).options(
-        joinedload(models.ServiceAcceptance.bc),
+        joinedload(models.ServiceAcceptance.bc).joinedload(models.BonDeCommande.sbc),
         joinedload(models.ServiceAcceptance.creator),
-        joinedload(models.ServiceAcceptance.items)
+        joinedload(models.ServiceAcceptance.items),
+        joinedload(models.ServiceAcceptance.expense), # Important for Petty Cash link
+        joinedload(models.ServiceAcceptance.invoice)  # Important for Invoice link
     )
 
     # 2. ROLE-BASED FILTERING
@@ -5101,15 +5103,32 @@ def get_all_acts(db: Session, current_user: models.User, search: Optional[str] =
                 user_permissions_by_project[w.project_id].append(action_val)
 
     for act in acts:
-        if is_admin:
-            act.user_permissions = [e.value for e in models.ProjectActionType]
-        elif is_sbc:
-            act.user_permissions = [] # SBCs don't have special ACT actions in matrix yet
-        else:
-            # act.bc is loaded via joinedload
-            project_id = act.bc.project_id if act.bc else None
-            perms = user_permissions_by_project.get(project_id, [])
-            act.user_permissions = perms
+        act.payment_info = {
+            "status": "UNPAID",
+            "method": None,
+            "ref": None,
+            "link": None
+        }
+
+        if act.expense_id:
+            act.payment_info["method"] = "PETTY_CASH"
+            act.payment_info["ref"] = f"EXP-{act.expense.id}"
+            act.payment_info["link"] = f"/expenses/details/{act.expense_id}"
+            # finalized statuses for expenses
+            if act.expense.status in ["PAID", "ACKNOWLEDGED"]:
+                act.payment_info["status"] = "PAID"
+            else:
+                act.payment_info["status"] = "PENDING"
+
+        elif act.invoice_id:
+            act.payment_info["method"] = "INVOICE"
+            act.payment_info["ref"] = act.invoice.invoice_number
+            act.payment_info["link"] = f"/raf/facturation/details/{act.invoice_id}"
+            # finalized status for invoices
+            if act.invoice.status == "PAID":
+                act.payment_info["status"] = "PAID"
+            else:
+                act.payment_info["status"] = "PENDING"
 
     return acts
 

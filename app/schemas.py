@@ -627,7 +627,12 @@ class BCInfo(BaseModel):
     id: int
     bc_number: str
     model_config = ConfigDict(from_attributes=True)
-
+class PaymentTraceability(BaseModel):
+    status: str
+    method: Optional[str] = None
+    ref: Optional[str] = None
+    link: Optional[str] = None
+    
 class ServiceAcceptance(BaseModel):
     id: int
     act_number: str
@@ -640,8 +645,10 @@ class ServiceAcceptance(BaseModel):
     total_amount_ttc: float
     bc: Optional[BCResponse] = None 
     user_permissions: List[str] = [] # <--- NEW
+    payment_info: Optional[PaymentTraceability] = None 
 
-    model_config = ConfigDict(from_attributes=True)
+    class Config:
+        from_attributes = True
 class ServiceAcceptanceList(BaseModel):
     id: int
     act_number: str
