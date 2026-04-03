@@ -632,6 +632,8 @@ class PaymentTraceability(BaseModel):
     method: Optional[str] = None
     ref: Optional[str] = None
     link: Optional[str] = None
+    cash_paid: Optional[float] = None
+    advance_deducted: Optional[float] = None
     
 class ServiceAcceptance(BaseModel):
     id: int

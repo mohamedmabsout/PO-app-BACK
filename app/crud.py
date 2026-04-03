@@ -5101,32 +5101,46 @@ def get_all_acts(db: Session, current_user: models.User, search: Optional[str] =
             for w in workflows:
                 action_val = w.action_type.value if hasattr(w.action_type, 'value') else w.action_type
                 user_permissions_by_project[w.project_id].append(action_val)
+    sbc_ids = list(set(act.bc.sbc_id for act in acts if act.bc))
 
     for act in acts:
         act.payment_info = {
             "status": "UNPAID",
-            "method": None,
+            "cash_paid": 0.0,
+            "advance_deducted": 0.0,
+            "total_paid": 0.0,
             "ref": None,
             "link": None
         }
 
         if act.expense_id:
-            act.payment_info["method"] = "PETTY_CASH"
-            act.payment_info["ref"] = f"EXP-{act.expense.id}"
-            act.payment_info["link"] = f"/expenses/details/{act.expense_id}"
-            # finalized statuses for expenses
-            if act.expense.status in ["PAID", "ACKNOWLEDGED"]:
+            exp = act.expense
+            act.payment_info["link"] = f"/expenses/details/{exp.id}"
+            act.payment_info["ref"] = f"EXP-{exp.id}"
+            
+            # Logic: If it's an Acceptance Payment, the 'amount' is the CASH part.
+            # The difference between ACT Total and Expense Amount is the ADVANCE part.
+            if exp.status in ["PAID", "ACKNOWLEDGED"]:
                 act.payment_info["status"] = "PAID"
+                act.payment_info["cash_paid"] = exp.amount # Net cash sent
+                
+                # Calculate if an advance was applied (Gross - Net)
+                gross_act_ht = act.total_amount_ht
+                # Note: We use HT to keep stats consistent
+                diff = gross_act_ht - exp.amount 
+                act.payment_info["advance_deducted"] = max(0, diff) if diff > 1.0 else 0.0
+                act.payment_info["total_paid"] = gross_act_ht
             else:
                 act.payment_info["status"] = "PENDING"
 
         elif act.invoice_id:
-            act.payment_info["method"] = "INVOICE"
-            act.payment_info["ref"] = act.invoice.invoice_number
-            act.payment_info["link"] = f"/raf/facturation/details/{act.invoice_id}"
-            # finalized status for invoices
-            if act.invoice.status == "PAID":
+            # Invoices are usually 100% cash
+            if act.invoice.status in ["PAID", "ACKNOWLEDGED"]:
+                act.payment_info["link"] = f"/raf/facturation/details/{act.invoice.id}"
+                act.payment_info["ref"] = f"INV-{act.invoice.id}"
                 act.payment_info["status"] = "PAID"
+                act.payment_info["cash_paid"] = act.total_amount_ht
+                act.payment_info["total_paid"] = act.total_amount_ht
             else:
                 act.payment_info["status"] = "PENDING"
 
