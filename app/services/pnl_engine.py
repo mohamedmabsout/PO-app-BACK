@@ -3,7 +3,7 @@ from datetime import datetime
 import calendar
 from .. import models
 from .java_client import JavaApiClient
-from sqlalchemy import extract, func
+from sqlalchemy import and_, case, extract, func, or_
 from datetime import date
 import re
 from sqlalchemy import extract, func
@@ -134,19 +134,47 @@ def generate_draft_pnl_for_month(db: Session, year: int, month: int, generated_b
 
     # --- 4. CALCULATE REVENUES & OTHER COSTS ---
     
-    # A. REVENUE (From MergedPO Acceptances)
+            # A. REVENUE (From MergedPO Acceptances)
     active_pos = db.query(
         models.MergedPO.internal_project_id,
-        func.sum(models.MergedPO.accepted_ac_amount).label("rev_ac"),
-        func.sum(models.MergedPO.accepted_pac_amount).label("rev_pac")
-    ).filter(
+        func.sum(case(
+            (
+                and_(
+                    extract('year', models.MergedPO.date_ac_ok) == year,
+                    extract('month', models.MergedPO.date_ac_ok) == month
+                ),
+                models.MergedPO.accepted_ac_amount
+            ),
+            else_=0
+        )).label("rev_ac"),
+        func.sum(case(
+            (
+                and_(
+                    extract('year', models.MergedPO.date_pac_ok) == year,
+                    extract('month', models.MergedPO.date_pac_ok) == month
+                ),
+                models.MergedPO.accepted_pac_amount
+            ),
+            else_=0
+        )).label("rev_pac")
+    ).join(
+        models.InternalProject,
+        models.MergedPO.internal_project_id == models.InternalProject.id
+    ).filter(   
         models.MergedPO.internal_project_id.isnot(None),
-        (
-            (extract('year', models.MergedPO.date_ac_ok) == year) & (extract('month', models.MergedPO.date_ac_ok) == month) |
-            (extract('year', models.MergedPO.date_pac_ok) == year) & (extract('month', models.MergedPO.date_pac_ok) == month)
+        models.MergedPO.internal_control == 1,
+        or_(
+            and_(
+                extract('year', models.MergedPO.date_ac_ok) == year,
+                extract('month', models.MergedPO.date_ac_ok) == month
+            ),
+            and_(
+                extract('year', models.MergedPO.date_pac_ok) == year,
+                extract('month', models.MergedPO.date_pac_ok) == month
+            )
         )
     ).group_by(models.MergedPO.internal_project_id).all()
-
+    
     for po_data in active_pos:
         pnl = get_or_create_pnl(po_data.internal_project_id)
         pnl.service_revenue = (pnl.service_revenue or 0.0) + (po_data.rev_ac or 0.0) + (po_data.rev_pac or 0.0)
@@ -214,24 +242,31 @@ def generate_draft_pnl_for_month(db: Session, year: int, month: int, generated_b
     # D. JAVA TRAVEL EXPENSES (From Java 'Notes de Frais')
     for exp in expense_list:
         duid = exp.get("duid", "").strip()
-        exp_type = exp.get("expenseTypeName")
+        exp_type = exp.get("expenseTypeName", "").strip()
         amount = float(exp.get("totalAmount", 0.0))
         
         if amount <= 0: continue
 
-        internal_project_id = strict_match_duid(duid) # Reuse the matcher we built earlier
+        internal_project_id = strict_match_duid(duid)
 
         if internal_project_id:
             pnl = get_or_create_pnl(internal_project_id)
-            if pnl:
-                if exp_type == "Hébergement":
-                    pnl.hosting_cost = (pnl.hosting_cost or 0.0) + amount
-                elif exp_type in ["Frais journée", "Divers"]:
-                    pnl.working_trip_cost = (pnl.working_trip_cost or 0.0) + amount
+            if not pnl: continue
+
+            if exp_type == "Hébergement":
+                pnl.hosting_cost = (pnl.hosting_cost or 0.0) + amount
+            elif exp_type == "Frais journée":
+                pnl.working_trip_cost = (pnl.working_trip_cost or 0.0) + amount
+            elif exp_type == "Frais Gazouil":
+                pnl.other_traveling_cost = (pnl.other_traveling_cost or 0.0) + amount
+            elif exp_type == "Frais divers":
+                pnl.other_service_cost = (pnl.other_service_cost or 0.0) + amount
+            else:
+                # Unrecognized expense type from Java, log it for future analysis
+                print(f"Unrecognized Java expense type: '{exp_type}' for DUID '{duid}' with amount {amount}")
 
     db.commit()
-    return {"message": "Draft P&L Generated", "labor_records": count_added, "projects_affected": len(pnl_map)}
-
+    return {"pnls_created": len(pnl_map), "labor_rows_added": count_added}
 
 
 def recalculate_fleet_pro_rata(db: Session, period_str: str):

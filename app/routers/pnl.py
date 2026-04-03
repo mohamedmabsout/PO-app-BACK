@@ -1,5 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
+
 from typing import List , Optional
 from pydantic import BaseModel
 from datetime import datetime
@@ -228,20 +229,35 @@ from sqlalchemy import func
 def get_pnl_dashboard(
     year: str, 
     month: str, 
+    project_id: Optional[int] = Query(None), # NEW FILTER
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
     """
-    Fetches the P&L snapshot for all projects.
-    If year == 'OVERALL', it aggregates all history.
-    Otherwise, fetches for a specific YYYY-MM period.
+    Fetches P&L snapshot with dynamic pivoting:
+    1. OVERALL + No Project = Group by Project (All time)
+    2. OVERALL + Project = Group by Month (Project timeline)
+    3. Specific Month + No Project = Group by Project (For that month)
+    4. Specific Month + Project = Single Project Snapshot
     """
-    results =[]
+    
+    # --- 1. CALCULATE UNASSIGNED LABOR COSTS (The Red Alert) ---
+    unassigned_query = db.query(
+        func.sum(models.LaborAllocation.allocated_days * models.LaborAllocation.tjm * 1.32)
+    ).filter(
+        models.LaborAllocation.internal_project_id.is_(None),
+        models.LaborAllocation.role_type != "DEPOT" # Depot is already accounted for
+    )
+    
+    if year != "OVERALL":
+        period_str = f"{year}-{int(month):02d}"
+        unassigned_query = unassigned_query.filter(models.LaborAllocation.period == period_str)
+        
+    unassigned_labor_cost = unassigned_query.scalar() or 0.0
 
-    if year == "OVERALL":
-        # Aggregate ALL historical P&L records grouped by Project
-        aggregated_pnls = db.query(
-            models.ProjectPnL.internal_project_id,
+    # Helper function for aggregated sums
+    def get_sums():
+        return[
             func.sum(models.ProjectPnL.service_revenue).label("service_revenue"),
             func.sum(models.ProjectPnL.equipment_revenue).label("equipment_revenue"),
             func.sum(models.ProjectPnL.labor_cost_field).label("labor_cost_field"),
@@ -250,8 +266,8 @@ def get_pnl_dashboard(
             func.sum(models.ProjectPnL.coop_cost_pp).label("coop_cost_pp"),
             func.sum(models.ProjectPnL.working_trip_cost).label("working_trip_cost"),
             func.sum(models.ProjectPnL.hosting_cost).label("hosting_cost"),
-            func.sum(models.ProjectPnL.other_traveling_cost).label("other_traveling_cost"), # Add if you added this column
-            func.sum(models.ProjectPnL.other_service_cost).label("other_service_cost"), # Add if you added this column
+            func.sum(models.ProjectPnL.other_traveling_cost).label("other_traveling_cost"), 
+            func.sum(models.ProjectPnL.other_service_cost).label("other_service_cost"), 
             func.sum(models.ProjectPnL.equipment_cost).label("equipment_cost"),
             func.sum(models.ProjectPnL.car_allocation_cost).label("car_allocation_cost"),
             func.sum(models.ProjectPnL.fuel_cost).label("fuel_cost"),
@@ -259,63 +275,103 @@ def get_pnl_dashboard(
             func.sum(models.ProjectPnL.ehs_cost).label("ehs_cost"),
             func.sum(models.ProjectPnL.period_costs).label("period_costs"),
             func.sum(models.ProjectPnL.risk_reserve).label("risk_reserve")
+        ]
+
+    results =[]
+
+    # --- SCENARIO A: OVERALL Timeline for a Single Project ---
+    if year == "OVERALL" and project_id:
+        aggregated_pnls = db.query(
+            models.ProjectPnL.period.label("group_key"),
+            *get_sums()
         ).filter(
-            models.ProjectPnL.internal_project_id.isnot(None)
-        ).group_by(models.ProjectPnL.internal_project_id).all()
+            models.ProjectPnL.internal_project_id == project_id
+        ).group_by(models.ProjectPnL.period).order_by(models.ProjectPnL.period).all()
+
+        project = db.query(models.InternalProject).get(project_id)
+        pm_name = f"{project.project_manager.first_name} {project.project_manager.last_name}" if project and project.project_manager else "Unassigned"
 
         for pnl in aggregated_pnls:
-            project = db.query(models.InternalProject).get(pnl.internal_project_id)
-            pm_name = "Unassigned"
-            if project and project.project_manager:
-                pm = project.project_manager
-                pm_name = f"{pm.first_name} {pm.last_name}"
-
             results.append({
-                "id": f"overall_{pnl.internal_project_id}", 
-                "project_id": pnl.internal_project_id,
-                "project_name": project.name if project else "Unknown Project",
+                "id": f"period_{pnl.group_key}",
+                "project_id": project_id,
+                "project_name": pnl.group_key, # REPURPOSED: Sending the Month (e.g., '2026-03') to display in the column header
                 "pm_name": pm_name,
-                "status": "AGGREGATED",
-                
+                "status": "TIMELINE",
                 "service_revenue": pnl.service_revenue or 0.0,
                 "equipment_revenue": pnl.equipment_revenue or 0.0,
-                
-                # Labor Details
                 "labor_cost": (pnl.labor_cost_field or 0.0) + (pnl.labor_cost_mgmt or 0.0),
                 "labor_cost_field": pnl.labor_cost_field or 0.0,
                 "labor_cost_mgmt": pnl.labor_cost_mgmt or 0.0,
-
-                # Coop Details
                 "coop_cost": (pnl.coop_cost_entreprise or 0.0) + (pnl.coop_cost_pp or 0.0),
                 "coop_cost_entreprise": pnl.coop_cost_entreprise or 0.0,
                 "coop_cost_pp": pnl.coop_cost_pp or 0.0,
-
-                # Travel Details
-                "travel_cost": (pnl.working_trip_cost or 0.0) + (pnl.hosting_cost or 0.0),
+                "travel_cost": (pnl.working_trip_cost or 0.0) + (pnl.hosting_cost or 0.0) + (pnl.other_traveling_cost or 0.0),
                 "working_trip_cost": pnl.working_trip_cost or 0.0,
                 "hosting_cost": pnl.hosting_cost or 0.0,
-
-                # Other
+                "other_travel_cost": pnl.other_traveling_cost or 0.0,
                 "other_service_cost": pnl.other_service_cost or 0.0,
                 "equipment_cost": pnl.equipment_cost or 0.0,
-
-                # Fleet Details
                 "fleet_ops_cost": (pnl.car_allocation_cost or 0.0) + (pnl.fuel_cost or 0.0) + (pnl.jawaz_cost or 0.0) + (pnl.ehs_cost or 0.0),
                 "car_allocation_cost": pnl.car_allocation_cost or 0.0,
                 "fuel_cost": pnl.fuel_cost or 0.0,
                 "jawaz_cost": pnl.jawaz_cost or 0.0,
                 "ehs_cost": pnl.ehs_cost or 0.0,
-
                 "period_costs": pnl.period_costs or 0.0,
                 "risk_reserve": pnl.risk_reserve or 0.0
             })
 
+    # --- SCENARIO B: OVERALL for All Projects ---
+    elif year == "OVERALL" and not project_id:
+        aggregated_pnls = db.query(
+            models.ProjectPnL.internal_project_id.label("group_key"),
+            *get_sums()
+        ).filter(
+            models.ProjectPnL.internal_project_id.isnot(None)
+        ).group_by(models.ProjectPnL.internal_project_id).all()
+
+        for pnl in aggregated_pnls:
+            project = db.query(models.InternalProject).get(pnl.group_key)
+            pm_name = f"{project.project_manager.first_name} {project.project_manager.last_name}" if project and project.project_manager else "Unassigned"
+
+            results.append({
+                "id": f"overall_{pnl.group_key}", 
+                "project_id": pnl.group_key,
+                "project_name": project.name if project else "Unknown Project",
+                "pm_name": pm_name,
+                "status": "AGGREGATED",
+                "service_revenue": pnl.service_revenue or 0.0,
+                "equipment_revenue": pnl.equipment_revenue or 0.0,
+                "labor_cost": (pnl.labor_cost_field or 0.0) + (pnl.labor_cost_mgmt or 0.0),
+                "labor_cost_field": pnl.labor_cost_field or 0.0,
+                "labor_cost_mgmt": pnl.labor_cost_mgmt or 0.0,
+                "coop_cost": (pnl.coop_cost_entreprise or 0.0) + (pnl.coop_cost_pp or 0.0),
+                "coop_cost_entreprise": pnl.coop_cost_entreprise or 0.0,
+                "coop_cost_pp": pnl.coop_cost_pp or 0.0,
+                "travel_cost": (pnl.working_trip_cost or 0.0) + (pnl.hosting_cost or 0.0) + (pnl.other_traveling_cost or 0.0),
+                "working_trip_cost": pnl.working_trip_cost or 0.0,
+                "hosting_cost": pnl.hosting_cost or 0.0,
+                "other_travel_cost": pnl.other_traveling_cost or 0.0,
+                "other_service_cost": pnl.other_service_cost or 0.0,
+                "equipment_cost": pnl.equipment_cost or 0.0,
+                "fleet_ops_cost": (pnl.car_allocation_cost or 0.0) + (pnl.fuel_cost or 0.0) + (pnl.jawaz_cost or 0.0) + (pnl.ehs_cost or 0.0),
+                "car_allocation_cost": pnl.car_allocation_cost or 0.0,
+                "fuel_cost": pnl.fuel_cost or 0.0,
+                "jawaz_cost": pnl.jawaz_cost or 0.0,
+                "ehs_cost": pnl.ehs_cost or 0.0,
+                "period_costs": pnl.period_costs or 0.0,
+                "risk_reserve": pnl.risk_reserve or 0.0
+            })
+
+    # --- SCENARIO C & D: Specific Month ---
     else:
-        # Standard Month Fetching
         period_str = f"{year}-{int(month):02d}"
-        pnls = db.query(models.ProjectPnL).filter(
-            models.ProjectPnL.period == period_str
-        ).all()
+        query = db.query(models.ProjectPnL).filter(models.ProjectPnL.period == period_str)
+        
+        if project_id:
+            query = query.filter(models.ProjectPnL.internal_project_id == project_id)
+            
+        pnls = query.all()
         
         for pnl in pnls:
             pm_name = "Unassigned"
@@ -337,22 +393,26 @@ def get_pnl_dashboard(
                 "coop_cost": (pnl.coop_cost_entreprise or 0.0) + (pnl.coop_cost_pp or 0.0),
                 "coop_cost_entreprise": pnl.coop_cost_entreprise or 0.0,
                 "coop_cost_pp": pnl.coop_cost_pp or 0.0,
-                "travel_cost": (pnl.working_trip_cost or 0.0) + (pnl.hosting_cost or 0.0),
+                "travel_cost": (pnl.working_trip_cost or 0.0) + (pnl.hosting_cost or 0.0) + (pnl.other_traveling_cost or 0.0),
                 "working_trip_cost": pnl.working_trip_cost or 0.0,
                 "hosting_cost": pnl.hosting_cost or 0.0,
-                "other_service_cost": 0.0,
+                "other_travel_cost": pnl.other_traveling_cost or 0.0,
+                "other_service_cost": pnl.other_service_cost or 0.0,
                 "equipment_cost": pnl.equipment_cost or 0.0,
                 "fleet_ops_cost": (pnl.car_allocation_cost or 0.0) + (pnl.fuel_cost or 0.0) + (pnl.jawaz_cost or 0.0) + (pnl.ehs_cost or 0.0),
                 "car_allocation_cost": pnl.car_allocation_cost or 0.0,
                 "fuel_cost": pnl.fuel_cost or 0.0,
                 "jawaz_cost": pnl.jawaz_cost or 0.0,
                 "ehs_cost": pnl.ehs_cost or 0.0,
-
                 "period_costs": pnl.period_costs or 0.0,
                 "risk_reserve": pnl.risk_reserve or 0.0
             })
             
-    return results
+    # Return wrapper containing the data array AND the unassigned cost
+    return {
+        "unassigned_labor_cost": unassigned_labor_cost,
+        "data": results
+    }
 
 
 class BackofficeExpenseInput(BaseModel):

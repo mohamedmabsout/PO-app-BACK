@@ -24,6 +24,7 @@ git push origin site/internal
 git pull origin mohamed-clean-version
 # On the server, in your project directory
 
+
 # Step 1: Stop the running containers
 docker compose down
 
