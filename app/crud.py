@@ -5118,20 +5118,26 @@ def get_all_acts(db: Session, current_user: models.User, search: Optional[str] =
             act.payment_info["link"] = f"/expenses/details/{exp.id}"
             act.payment_info["ref"] = f"EXP-{exp.id}"
             
-            # Logic: If it's an Acceptance Payment, the 'amount' is the CASH part.
-            # The difference between ACT Total and Expense Amount is the ADVANCE part.
             if exp.status in ["PAID", "ACKNOWLEDGED"]:
                 act.payment_info["status"] = "PAID"
-                act.payment_info["cash_paid"] = exp.amount # Net cash sent
                 
-                # Calculate if an advance was applied (Gross - Net)
-                gross_act_ht = act.total_amount_ht
-                # Note: We use HT to keep stats consistent
-                diff = gross_act_ht - exp.amount 
-                act.payment_info["advance_deducted"] = max(0, diff) if diff > 1.0 else 0.0
-                act.payment_info["total_paid"] = gross_act_ht
+                # --- THE FIX: PREVENT DOUBLE COUNTING BATCHES ---
+                # 1. Calculate the total gross value of the entire batch
+                total_gross_in_exp = sum(a.total_amount_ht for a in exp.acts) if exp.acts else act.total_amount_ht
+                
+                # 2. Calculate this specific ACT's share of the batch (e.g. 50%)
+                share = act.total_amount_ht / total_gross_in_exp if total_gross_in_exp > 0 else 1.0
+                
+                # 3. Apply the share to the Cash and the Advance
+                act.payment_info["cash_paid"] = exp.amount * share
+                
+                total_advance_deducted = total_gross_in_exp - exp.amount
+                act.payment_info["advance_deducted"] = max(0, total_advance_deducted * share)
+                
+                act.payment_info["total_paid"] = act.total_amount_ht
             else:
                 act.payment_info["status"] = "PENDING"
+
 
         elif act.invoice_id:
             # Invoices are usually 100% cash
