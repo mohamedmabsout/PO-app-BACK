@@ -550,32 +550,42 @@ def reject_expense(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
 ):
-    """Reject at any stage. Money returns to Balance."""
+    """Reject at any stage. Money returns to Balance. Locked advances are released."""
     require_roles(current_user, [models.UserRole.PD, models.UserRole.ADMIN])
-    
+
     exp = db.query(models.Expense).get(id)
     if not exp:
         raise HTTPException(status_code=404, detail="Expense not found")
-    
+
     # 1. REFUND LOGIC (With Safety Checks for None)
     caisse = db.query(models.Caisse).filter(models.Caisse.user_id == exp.requester_id).first()
-    
+
     if caisse:
         # Treat None as 0.0 to prevent TypeError
         current_reserved = caisse.reserved_balance if caisse.reserved_balance is not None else 0.0
         current_balance = caisse.balance if caisse.balance is not None else 0.0
-        
+
         # Apply Refund
         caisse.reserved_balance = current_reserved - exp.amount
         caisse.balance = current_balance + exp.amount
-        
-    # 2. Update Status
+
+    # 2. RESTORE CONSUMED ADVANCES (if this was ACCEPTANCE_PP with applied advances)
+    if exp.exp_type == "ACCEPTANCE_PP":
+        # Calculate the deduction that was applied at creation time
+        acts_total = sum(a.total_amount_ht for a in exp.acts)
+        deduction_applied = acts_total - exp.amount
+
+        if deduction_applied > 0:
+            # Restore the advances to the pool
+            crud.restore_sbc_advances(db, exp.sbc_id, deduction_applied)
+
+    # 3. Update Status
     exp.status = models.ExpenseStatus.REJECTED
     exp.rejection_reason = payload.reason
-    
+
     db.commit()
     db.refresh(exp) # Refresh to get updated data
-    
+
     return exp # <--- CRITICAL: MUST RETURN THE OBJECT
 
 
