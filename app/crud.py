@@ -5002,9 +5002,11 @@ def get_all_acts(db: Session, current_user: models.User, search: Optional[str] =
     """
     # 1. Start query from ServiceAcceptance
     query = db.query(models.ServiceAcceptance).options(
-        joinedload(models.ServiceAcceptance.bc),
+        joinedload(models.ServiceAcceptance.bc).joinedload(models.BonDeCommande.sbc),
         joinedload(models.ServiceAcceptance.creator),
-        joinedload(models.ServiceAcceptance.items)
+        joinedload(models.ServiceAcceptance.items),
+        joinedload(models.ServiceAcceptance.expense), # Important for Petty Cash link
+        joinedload(models.ServiceAcceptance.invoice)  # Important for Invoice link
     )
 
     # 2. ROLE-BASED FILTERING
@@ -5096,17 +5098,54 @@ def get_all_acts(db: Session, current_user: models.User, search: Optional[str] =
             for w in workflows:
                 action_val = w.action_type.value if hasattr(w.action_type, 'value') else w.action_type
                 user_permissions_by_project[w.project_id].append(action_val)
+    sbc_ids = list(set(act.bc.sbc_id for act in acts if act.bc))
 
     for act in acts:
-        if is_admin:
-            act.user_permissions = [e.value for e in models.ProjectActionType]
-        elif is_sbc:
-            act.user_permissions = [] # SBCs don't have special ACT actions in matrix yet
-        else:
-            # act.bc is loaded via joinedload
-            project_id = act.bc.project_id if act.bc else None
-            perms = user_permissions_by_project.get(project_id, [])
-            act.user_permissions = perms
+        act.payment_info = {
+            "status": "UNPAID",
+            "cash_paid": 0.0,
+            "advance_deducted": 0.0,
+            "total_paid": 0.0,
+            "ref": None,
+            "link": None
+        }
+
+        if act.expense_id:
+            exp = act.expense
+            act.payment_info["link"] = f"/expenses/details/{exp.id}"
+            act.payment_info["ref"] = f"EXP-{exp.id}"
+            
+            if exp.status in ["PAID", "ACKNOWLEDGED"]:
+                act.payment_info["status"] = "PAID"
+                
+                # --- THE FIX: PREVENT DOUBLE COUNTING BATCHES ---
+                # 1. Calculate the total gross value of the entire batch
+                total_gross_in_exp = sum(a.total_amount_ht for a in exp.acts) if exp.acts else act.total_amount_ht
+                
+                # 2. Calculate this specific ACT's share of the batch (e.g. 50%)
+                share = act.total_amount_ht / total_gross_in_exp if total_gross_in_exp > 0 else 1.0
+                
+                # 3. Apply the share to the Cash and the Advance
+                act.payment_info["cash_paid"] = exp.amount * share
+                
+                total_advance_deducted = total_gross_in_exp - exp.amount
+                act.payment_info["advance_deducted"] = max(0, total_advance_deducted * share)
+                
+                act.payment_info["total_paid"] = act.total_amount_ht
+            else:
+                act.payment_info["status"] = "PENDING"
+
+
+        elif act.invoice_id:
+            # Invoices are usually 100% cash
+            if act.invoice.status in ["PAID", "ACKNOWLEDGED"]:
+                act.payment_info["link"] = f"/raf/facturation/details/{act.invoice.id}"
+                act.payment_info["ref"] = f"INV-{act.invoice.id}"
+                act.payment_info["status"] = "PAID"
+                act.payment_info["cash_paid"] = act.total_amount_ht
+                act.payment_info["total_paid"] = act.total_amount_ht
+            else:
+                act.payment_info["status"] = "PENDING"
 
     return acts
 
@@ -6436,6 +6475,11 @@ def create_expense(db: Session, payload: schemas.ExpenseCreate, user_id: int, ba
             models.ServiceAcceptance.id.in_(payload.act_ids)
         ).update({"expense_id": db_expense.id}, synchronize_session=False)
 
+        # CONSUME ADVANCES AT CREATION TIME (not at payment)
+        # This locks the advance pool immediately, preventing double-application
+        if payload.apply_advance and advance_deduction > 0:
+            consume_sbc_advances(db, sbc_id, advance_deduction)
+
     # RESERVE MONEY IN CAISSE
     caisse.balance = current_balance - net_amount
     caisse.reserved_balance = (caisse.reserved_balance or 0.0) + net_amount
@@ -6650,22 +6694,17 @@ def confirm_expense_payment(db: Session, expense_id: int, filename: str, pd_id: 
     if not expense or expense.status in [models.ExpenseStatus.ACKNOWLEDGED]:
         return expense
 
-    # 1. SETTLEMENT: Consume the Pool
-    if expense.exp_type == "ACCEPTANCE_PP":
-        acts_total = sum(a.total_amount_ht for a in expense.acts)
-        deduction_to_consume = acts_total - expense.amount
-        
-        if deduction_to_consume > 0:
-            # This function loops through sbc_advances and subtracts from remaining_amount
-            consume_sbc_advances(db, expense.sbc_id, deduction_to_consume)
+    # NOTE: Advance consumption moved to create_expense() to prevent double-application.
+    # Advances are now consumed at CREATION time, not at PAYMENT time.
 
-    # 2. ADVANCE: Create the Pool Entry
+    # 1. ADVANCE: Create the Pool Entry
     if expense.exp_type == "AVANCE_SBC":
         new_adv = models.SBCAdvance(
             sbc_id=expense.sbc_id,
             amount=expense.amount,
             remaining_amount=expense.amount,
-            expense_id=expense.id
+            expense_id=expense.id,
+            created_at=datetime.now()
         )
         db.add(new_adv)
 
@@ -8304,11 +8343,12 @@ def get_sbc_unconsumed_balance(db: Session, sbc_id: int, pm_id: int = None, excl
 def consume_sbc_advances(db: Session, sbc_id: int, amount_to_settle: float):
     """
     Deducts the settled amount from the SBC's advance pool.
+    Marks advances as is_consumed=True and updates remaining_amount.
     """
     if amount_to_settle <= 0:
         return
 
-    # Find all unconsumed advances for this SBC, oldest first
+    # Find all unconsumed advances for this SBC, oldest first (FIFO)
     advances = db.query(models.SBCAdvance).filter(
         models.SBCAdvance.sbc_id == sbc_id,
         models.SBCAdvance.is_consumed == False
@@ -8319,7 +8359,7 @@ def consume_sbc_advances(db: Session, sbc_id: int, amount_to_settle: float):
     for adv in advances:
         if remaining_needed <= 0:
             break
-        
+
         if adv.remaining_amount <= remaining_needed:
             # This advance is fully consumed
             remaining_needed -= adv.remaining_amount
@@ -8329,7 +8369,54 @@ def consume_sbc_advances(db: Session, sbc_id: int, amount_to_settle: float):
             # This advance is partially consumed
             adv.remaining_amount -= remaining_needed
             remaining_needed = 0
-    
+
+    # Ensure changes are persisted to the database
+    db.flush()
+
+
+def restore_sbc_advances(db: Session, sbc_id: int, amount_to_restore: float):
+    """
+    Restores (un-consumes) advances when an expense is rejected.
+    Reverses consumption in LIFO order (most recently consumed first).
+
+    Args:
+        db: Database session
+        sbc_id: SBC ID
+        amount_to_restore: Amount that was previously deducted from the pool
+    """
+    if amount_to_restore <= 0:
+        return
+
+    # Find all consumed advances for this SBC, NEWEST first (LIFO - reverse of consumption)
+    consumed_advances = db.query(models.SBCAdvance).filter(
+        models.SBCAdvance.sbc_id == sbc_id,
+        models.SBCAdvance.is_consumed == True,
+        models.SBCAdvance.remaining_amount == 0  # Fully consumed
+    ).order_by(models.SBCAdvance.created_at.desc()).all()
+
+    remaining_to_restore = amount_to_restore
+
+    for adv in consumed_advances:
+        if remaining_to_restore <= 0:
+            break
+
+        # Restore this advance from its original amount
+        original_amount = adv.amount
+
+        if original_amount <= remaining_to_restore:
+            # Fully restore this advance
+            remaining_to_restore -= original_amount
+            adv.remaining_amount = original_amount
+            adv.is_consumed = False
+        else:
+            # Partially restore this advance
+            adv.remaining_amount = original_amount - remaining_to_restore
+            remaining_to_restore = 0
+
+    # Ensure changes are persisted to the database
+    db.flush()
+
+
 def get_sbc_ledger(db: Session, sbc_id: int):
     """
     Generates a consolidated financial ledger for a subcontractor.
