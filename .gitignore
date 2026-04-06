@@ -1,12 +1,17 @@
 # Environments
 venv/
-env/
 
 uploads/
 
 # Python Cache
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.venv/
+env/
+
+*.zip
 
 # Secrets / Passwords (CRITICAL!)
 .env
@@ -14,3 +19,4 @@ __pycache__/
 # IDEs
 .vscode/
 .idea/
+

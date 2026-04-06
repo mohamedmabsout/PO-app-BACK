@@ -971,9 +971,7 @@ def get_eligible_pos_for_bc(
     Fetches POs for the project that have REMAINING Quantity > 0.
     IGNORES usage from Rejected BCs.
     """
-    
-    # --- FIX STARTS HERE ---
-    
+
     # Subquery: Sum of quantities used in VALID (non-rejected, non-draft) BCs per PO
     used_subquery = db.query(
         models.BCItem.merged_po_id,
@@ -997,19 +995,18 @@ def get_eligible_pos_for_bc(
         # We use a small epsilon (0.0001) for float safety
         models.MergedPO.requested_qty > (func.coalesce(used_subquery.c.used_qty, 0) + 0.0001)
     )
-
     # Standard Filters
     if site_codes and len(site_codes) > 0:
         clean_codes = [c.strip() for c in site_codes if c.strip()]
         if clean_codes:
             query = query.filter(models.MergedPO.site_code.in_(clean_codes))
-
     if start_date:
         query = query.filter(func.date(models.MergedPO.publish_date) >= start_date)
     if end_date:
         query = query.filter(func.date(models.MergedPO.publish_date) <= end_date)
         
     return query.all()
+
 def get_raw_po_data_as_dataframe(
     db: Session,
     status: Optional[str] = None,

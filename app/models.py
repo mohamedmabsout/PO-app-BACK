@@ -9,7 +9,7 @@ from sqlalchemy.orm import backref # Ensure this is imported
 from .enum import (
     ProjectType, UserRole, SBCStatus, BCStatus, NotificationType, BCType,
     AssignmentStatus, ValidationState, ItemGlobalStatus, SBCType,
-    FundRequestStatus, TransactionType, TransactionStatus, ExpenseStatus, NotificationModule, InvoiceStatus,ProjectRoleType,ProjectActionType
+    FundRequestStatus, TransactionType, TransactionStatus, ExpenseStatus, NotificationModule, InvoiceStatus,ProjectRoleType,ProjectActionType,PnLStatus
 )
 from .database import Base
  # <--- AJOUTER CET IMPORT
@@ -836,3 +836,153 @@ class SBCAdvance(Base):
     # Relationships
     sbc = relationship("SBC", backref="advances")
     origin_expense = relationship("Expense", foreign_keys=[expense_id])
+
+
+
+
+
+
+
+
+class FieldOperationsCost(Base):
+    """
+    Stores the monthly vehicle/fleet costs for a Team Leader (TL).
+    These will be distributed pro-rata across projects based on the TL's labor allocation.
+    """
+    __tablename__ = "pnl_field_ops_costs"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    period = Column(String(7), index=True, nullable=False) # e.g., "2026-03"
+    tl_name = Column(String(255), nullable=False) # Name of the Team Leader from Java
+    
+    # Fixed & Variable Costs
+    car_allocation = Column(Float, default=0.0) # E.g., 5500 MAD (Fixed)
+    fuel_cost = Column(Float, default=0.0)      # Input by Gasoil Agent (Variable)
+    jawaz_cost = Column(Float, default=0.0)     # E.g., 500 MAD (Fixed)
+    ehs_tools = Column(Float, default=0.0)      # Static allocation (Fixed)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class LaborAllocation(Base):
+    __tablename__ = "pnl_labor_allocations"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    period = Column(String(7), index=True, nullable=False) # "2026-03"
+    # --- NEW COLUMNS FOR EXACT DATES ---
+    start_date = Column(Date, nullable=True)
+    end_date = Column(Date, nullable=True)
+    # --- Data Source: JAVA WEBAPP ---
+    employee_name = Column(String(255), nullable=False)
+    
+    # 🚨 ADD THIS MISSING LINE:
+    java_project_name = Column(String(255), nullable=True) 
+    
+    role_type = Column(String(50))
+    tjm = Column(Float, default=0.0)
+    java_validated_days = Column(Float, default=0.0) 
+    
+    # --- Data Destination: PYTHON ERP ---
+    allocated_days = Column(Float, default=0.0) 
+    internal_project_id = Column(Integer, ForeignKey("internal_projects.id", ondelete="CASCADE"), index=True)
+    allocated_by_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    internal_project = relationship("InternalProject")
+    allocated_by = relationship("User", foreign_keys=[allocated_by_id])
+
+
+
+class BackofficeExpense(Base):
+    """
+    Global corporate costs (Rent, Admin Salaries, Internet) entered by the RAF.
+    Distributed pro-rata across active projects based on revenue %.
+    """
+    __tablename__ = "pnl_backoffice_expenses"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    period = Column(String(7), index=True, nullable=False) # "2026-03"
+    category = Column(String(255), nullable=False) # e.g., "Office Rent", "Internet", "Admin Salaries"
+    amount = Column(Float, default=0.0)
+    
+    entered_by_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    entered_by = relationship("User", foreign_keys=[entered_by_id])
+
+
+class DistributionConfig(Base):
+    """
+    Per-period, per-project percentage for distributing backoffice overhead.
+    If rows exist for a period → manual mode. No rows → auto (revenue pro-rata).
+    """
+    __tablename__ = "pnl_distribution_config"
+
+    id = Column(Integer, primary_key=True, index=True)
+    period = Column(String(7), index=True, nullable=False)  # "2026-04"
+    internal_project_id = Column(Integer, ForeignKey("internal_projects.id", ondelete="CASCADE"), nullable=False)
+    percentage = Column(Float, nullable=False)  # e.g. 25.0 = 25%
+
+    created_by_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    internal_project = relationship("InternalProject")
+    created_by = relationship("User", foreign_keys=[created_by_id])
+
+    __table_args__ = (
+        sa.UniqueConstraint('period', 'internal_project_id', name='uix_dist_period_project'),
+    )
+
+
+class ProjectPnL(Base):
+    """
+    The Huawei DR2 P&L Template. 
+    Stores the frozen financial snapshot of a project for a specific month.
+    """
+    __tablename__ = "project_pnl"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    internal_project_id = Column(Integer, ForeignKey("internal_projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    period = Column(String(7), index=True, nullable=False) # "2026-03"
+    status = Column(Enum(PnLStatus), default=PnLStatus.DRAFT)
+    
+    # === REVENUES (收入) ===
+    service_revenue = Column(Float, default=0.0)    # Auto: From Acceptances (ACTs signed in this period)
+    equipment_revenue = Column(Float, default=0.0)  # Manual
+    
+    # === COST OF GOODS SOLD (销售成本) ===
+    equipment_cost = Column(Float, default=0.0)     # Manual / Hardware Purchases
+    
+    # 1. Service Costs
+    labor_cost_field = Column(Float, default=0.0)     # Auto: Sum(LaborAlloc for Techs/TLs * TJM * 1.32)
+    labor_cost_mgmt = Column(Float, default=0.0)      # Auto: Sum(LaborAlloc for PM/QC * TJM * 1.32)
+    coop_cost_entreprise = Column(Float, default=0.0) # Auto: Validated SBC Invoices
+    coop_cost_pp = Column(Float, default=0.0)         # Auto: Internal ACTs (Caisse SBCs)
+    working_trip_cost = Column(Float, default=0.0)  # "Frais journée"
+    hosting_cost = Column(Float, default=0.0)       # "Hébergement"    other_service_cost = Column(Float, default=0.0)   # Auto: Python Caisse (Achat/Other)
+    other_service_cost = Column(Float, default=0.0)   # Auto: Python Caisse (Achat/Other)
+    other_traveling_cost = Column(Float, default=0.0) # "Autres frais de déplacement"
+    # 2. Field Operations Costs (Assets)
+    car_allocation_cost = Column(Float, default=0.0)  # Auto: Pro-rata from FieldOperationsCost
+    fuel_cost = Column(Float, default=0.0)            # Auto: Pro-rata from FieldOperationsCost
+    jawaz_cost = Column(Float, default=0.0)           # Auto: Pro-rata from FieldOperationsCost
+    ehs_cost = Column(Float, default=0.0)             # Auto: Pro-rata from FieldOperationsCost
+    
+    # === OVERHEAD / ADVANCED COSTS ===
+    period_costs = Column(Float, default=0.0)       # Auto: Revenue % share of BackofficeExpense
+    risk_reserve = Column(Float, default=0.0)       # Auto: Setting % of Service Revenue
+    
+    # === AUDIT ===
+    created_by_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    approved_by_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    rejection_reason = Column(String(500), nullable=True)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    internal_project = relationship("InternalProject")
+    created_by = relationship("User", foreign_keys=[created_by_id])
+    approved_by = relationship("User", foreign_keys=[approved_by_id])

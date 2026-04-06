@@ -5,6 +5,10 @@ class Settings(BaseSettings):
     SECRET_KEY: str
     ALGORITHM: str
     ACCESS_TOKEN_EXPIRE_DAYS: int
+    java_api_base_url: str
+    java_api_username: str
+    java_api_password: str
+
 
     # This tells pydantic to load the variables from a .env file
     model_config = SettingsConfigDict(env_file=".env")
