@@ -913,6 +913,30 @@ class BackofficeExpense(Base):
     entered_by = relationship("User", foreign_keys=[entered_by_id])
 
 
+class DistributionConfig(Base):
+    """
+    Per-period, per-project percentage for distributing backoffice overhead.
+    If rows exist for a period → manual mode. No rows → auto (revenue pro-rata).
+    """
+    __tablename__ = "pnl_distribution_config"
+
+    id = Column(Integer, primary_key=True, index=True)
+    period = Column(String(7), index=True, nullable=False)  # "2026-04"
+    internal_project_id = Column(Integer, ForeignKey("internal_projects.id", ondelete="CASCADE"), nullable=False)
+    percentage = Column(Float, nullable=False)  # e.g. 25.0 = 25%
+
+    created_by_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    internal_project = relationship("InternalProject")
+    created_by = relationship("User", foreign_keys=[created_by_id])
+
+    __table_args__ = (
+        sa.UniqueConstraint('period', 'internal_project_id', name='uix_dist_period_project'),
+    )
+
+
 class ProjectPnL(Base):
     """
     The Huawei DR2 P&L Template. 

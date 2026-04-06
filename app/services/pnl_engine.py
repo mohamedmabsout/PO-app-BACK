@@ -240,30 +240,70 @@ def generate_draft_pnl_for_month(db: Session, year: int, month: int, generated_b
 
 
     # D. JAVA TRAVEL EXPENSES (From Java 'Notes de Frais')
+    depot_traveling_costs = {}  # Track by category for backoffice
+
     for exp in expense_list:
         duid = exp.get("duid", "").strip()
         exp_type = exp.get("expenseTypeName", "").strip()
         amount = float(exp.get("totalAmount", 0.0))
-        
+
         if amount <= 0: continue
 
-        internal_project_id = strict_match_duid(duid)
+        # Check if this expense belongs to DEPOT
+        is_depot = "depot" in duid.lower() or "dépôt" in duid.lower()
 
-        if internal_project_id:
-            pnl = get_or_create_pnl(internal_project_id)
-            if not pnl: continue
+        if is_depot:
+            # Accumulate DEPOT traveling costs by category
+            category_map = {
+                "Hébergement": "Hosting Costs (Backoffice)",
+                "Frais journée": "Working trip Costs (Backoffice)",
+                "Frais Gazouil": "other travelling Costs (Backoffice)",
+                "Frais divers": "other travelling Costs (Backoffice)"
+            }
+            category = category_map.get(exp_type, "other travelling Costs (Backoffice)")
+            depot_traveling_costs[category] = depot_traveling_costs.get(category, 0.0) + amount
+        else:
+            # Regular project expenses
+            internal_project_id = strict_match_duid(duid)
 
-            if exp_type == "Hébergement":
-                pnl.hosting_cost = (pnl.hosting_cost or 0.0) + amount
-            elif exp_type == "Frais journée":
-                pnl.working_trip_cost = (pnl.working_trip_cost or 0.0) + amount
-            elif exp_type == "Frais Gazouil":
-                pnl.other_traveling_cost = (pnl.other_traveling_cost or 0.0) + amount
-            elif exp_type == "Frais divers":
-                pnl.other_service_cost = (pnl.other_service_cost or 0.0) + amount
-            else:
-                # Unrecognized expense type from Java, log it for future analysis
-                print(f"Unrecognized Java expense type: '{exp_type}' for DUID '{duid}' with amount {amount}")
+            if internal_project_id:
+                pnl = get_or_create_pnl(internal_project_id)
+                if not pnl: continue
+
+                if exp_type == "Hébergement":
+                    pnl.hosting_cost = (pnl.hosting_cost or 0.0) + amount
+                elif exp_type == "Frais journée":
+                    pnl.working_trip_cost = (pnl.working_trip_cost or 0.0) + amount
+                elif exp_type == "Frais Gazouil":
+                    pnl.other_traveling_cost = (pnl.other_traveling_cost or 0.0) + amount
+                elif exp_type == "Frais divers":
+                    pnl.other_service_cost = (pnl.other_service_cost or 0.0) + amount
+                else:
+                    # Unrecognized expense type from Java, log it for future analysis
+                    print(f"Unrecognized Java expense type: '{exp_type}' for DUID '{duid}' with amount {amount}")
+
+    # Store DEPOT traveling costs in BackofficeExpense table as system-generated
+    if depot_traveling_costs:
+        for category, amount in depot_traveling_costs.items():
+            if amount > 0:
+                # Check if this category already exists for this period
+                existing = db.query(models.BackofficeExpense).filter(
+                    models.BackofficeExpense.period == period_str,
+                    models.BackofficeExpense.category == category
+                ).first()
+
+                if existing:
+                    # Update with Java data (system-generated takes precedence)
+                    existing.amount = amount
+                else:
+                    # Create new
+                    new_exp = models.BackofficeExpense(
+                        period=period_str,
+                        category=category,
+                        amount=amount,
+                        entered_by_id=generated_by_id  # Mark as system-generated
+                    )
+                    db.add(new_exp)
 
     db.commit()
     return {"pnls_created": len(pnl_map), "labor_rows_added": count_added}
