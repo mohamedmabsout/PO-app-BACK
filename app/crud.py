@@ -7839,8 +7839,6 @@ def create_invoice_bundle(db: Session, sbc_id: int, act_ids: List[int], inv_numb
                 if existing_parent.invoice_number != inv_number:
                     raise ValueError(f"ACT {a.act_number} is already locked in Invoice {existing_parent.invoice_number}")
 
-
-
     # 5. Financial Summing (Fixes the 0% VAT bug)
     total_ht = round(sum(a.total_amount_ht for a in acts), 2)
     total_tax = round(sum(a.total_tax_amount for a in acts), 2)
@@ -7848,15 +7846,26 @@ def create_invoice_bundle(db: Session, sbc_id: int, act_ids: List[int], inv_numb
 
     # 6. Database Object (Upsert Logic - Fixes Duplicate Entry Crash)
     invoice_obj = db.query(models.Invoice).filter(models.Invoice.invoice_number == inv_number).first()
-# 
+
     if invoice_obj:
-        # Check if we are allowed to modify this existing record
-        if invoice_obj.status not in [models.InvoiceStatus.SUBMITTED, models.InvoiceStatus.REJECTED]:
-             raise ValueError(f"Invoice {inv_number} is already in process ({invoice_obj.status}) and cannot be modified.")
-        
+        # SECURITY: Ensure the existing invoice belongs to the same SBC — cross-SBC takeover must be blocked
+        if invoice_obj.sbc_id != sbc_id:
+            raise ValueError(
+                f"Invoice number '{inv_number}' already exists and belongs to a different subcontractor. "
+                f"Please use a unique invoice number."
+            )
+
+        # Only REJECTED invoices can be resubmitted — SUBMITTED invoices are locked
+        # Allowing SUBMITTED to be re-edited lets an SBC detach already-submitted ACTs,
+        # freeing them to be double-invoiced in a new bundle.
+        if invoice_obj.status != models.InvoiceStatus.REJECTED:
+            raise ValueError(
+                f"Invoice '{inv_number}' already exists with status '{invoice_obj.status.value}'. "
+                f"Duplicate invoice numbers are not allowed. Only rejected invoices can be resubmitted."
+            )
+
         # Reset old links from this invoice before re-applying (Clean State)
         db.query(models.ServiceAcceptance).filter(models.ServiceAcceptance.invoice_id == invoice_obj.id).update({"invoice_id": None})
-        
         # Update existing record
         invoice_obj.sbc_id = sbc_id
         invoice_obj.category = final_category

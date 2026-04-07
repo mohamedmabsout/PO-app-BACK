@@ -10,13 +10,10 @@ __pycache__/
 *.pyd
 .venv/
 env/
-
 *.zip
-
 # Secrets / Passwords (CRITICAL!)
 .env
 
 # IDEs
 .vscode/
 .idea/
-

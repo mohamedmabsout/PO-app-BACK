@@ -1,6 +1,6 @@
 """EXP column in transaction
 
-Revision ID: 83fc8c952f7a
+Revision ID: w
 Revises: a9c7a324dfb5
 Create Date: 2026-03-11 11:41:17.437289
 
