@@ -116,6 +116,7 @@ class ItemGlobalStatus(str, enum.Enum):
     READY_FOR_ACT = "READY_FOR_ACT" # QC & PM both Approved
     ACCEPTED = "ACCEPTED"       # Included in an ACT
     PERMANENTLY_REJECTED = "PERMANENTLY_REJECTED" # > 5 rejections
+    CANCELLED = "CANCELLED"       # Manually cancelled by authorized user
 # class FundRequestStatus(str, enum.Enum):
 #     PENDING_APPROVAL = "PENDING_APPROVAL"
 #     APPROVED_WAITING_FUNDS = "APPROVED_WAITING_FUNDS"

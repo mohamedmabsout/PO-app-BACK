@@ -487,9 +487,11 @@ class BCItemResponse(BCItemCreate):
 
     postponed_until: Optional[datetime] = None
     act_id: Optional[int] = None
-    
 
     model_config = ConfigDict(from_attributes=True)
+
+class BCLineCancelRequest(BaseModel):
+    reason: str
 
 # 1. Add this new payload schema for approvals
 class BCApprovalRequest(BaseModel):

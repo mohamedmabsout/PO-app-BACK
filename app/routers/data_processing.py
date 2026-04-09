@@ -744,6 +744,32 @@ def update_bc(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+@router.post("/bc/{bc_id}/items/{item_id}/cancel", status_code=status.HTTP_200_OK)
+def cancel_bc_line_endpoint(
+    bc_id: int,
+    item_id: int,
+    payload: schemas.BCLineCancelRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user),
+):
+    """
+    Cancels a single line on an APPROVED BC.
+
+    Guards:
+    - BC must be APPROVED
+    - Line must not be QC-approved or PM-approved
+    - Line must not be linked to an ACT
+    - Line must not already be cancelled
+
+    Permissions: BC creator, ADMIN, RAF.
+    """
+    try:
+        log = crud.cancel_bc_line(db, bc_id, item_id, current_user.id, payload.reason)
+        return {"message": "Line cancelled successfully.", "log_id": log.id}
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
 @router.post("/bc/{bc_id}/cancel", status_code=status.HTTP_200_OK)
 def cancel_bc_endpoint(
     bc_id: int,

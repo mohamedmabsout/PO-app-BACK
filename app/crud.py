@@ -3093,6 +3093,76 @@ def cancel_bc(db: Session, bc_id: int, user_id: int):
     db.delete(bc)
     db.commit()
 
+
+def cancel_bc_line(db: Session, bc_id: int, item_id: int, user_id: int, reason: str):
+    """
+    Permanently removes a BCItem from an APPROVED BC after writing an audit log.
+
+    Guards:
+      - BC must be APPROVED
+      - Item must not have been QC-approved OR PM-approved
+      - Item must not be linked to an ACT
+
+    Permissions:
+      - BC creator, ADMIN, or RAF.
+    """
+    user = db.query(models.User).get(user_id)
+    if not user:
+        raise ValueError("User not found.")
+
+    bc = db.query(models.BonDeCommande).get(bc_id)
+    if not bc:
+        raise ValueError("BC not found.")
+
+    if bc.status != models.BCStatus.APPROVED:
+        raise ValueError("Only lines on an APPROVED BC can be cancelled.")
+
+    is_privileged = user.role in (models.UserRole.ADMIN, models.UserRole.RAF)
+    if bc.creator_id != user_id and not is_privileged:
+        raise ValueError("Forbidden: You do not have permission to cancel lines on this BC.")
+
+    item = db.query(models.BCItem).filter(
+        models.BCItem.id == item_id,
+        models.BCItem.bc_id == bc_id
+    ).first()
+    if not item:
+        raise ValueError("BC line not found on this BC.")
+
+    if item.qc_validation_status == models.ValidationState.APPROVED:
+        raise ValueError("Cannot cancel: this line has already been approved by QC.")
+    if item.pm_validation_status == models.ValidationState.APPROVED:
+        raise ValueError("Cannot cancel: this line has already been approved by the PM.")
+    if item.act_id is not None:
+        raise ValueError("Cannot cancel: this line is already included in an ACT.")
+
+    # 1. Write audit log before deletion
+    log = models.BCLineCancellationLog(
+        bc_id=bc.id,
+        bc_number=bc.bc_number,
+        merged_po_id=item.merged_po_id,
+        po_reference=item.merged_po.po_id if item.merged_po else None,
+        item_description=item.merged_po.item_description if item.merged_po else None,
+        quantity_sbc=item.quantity_sbc,
+        line_amount_sbc=item.line_amount_sbc,
+        cancel_reason=reason,
+        cancelled_by_id=user_id,
+    )
+    db.add(log)
+
+    # 2. Hard delete the item (fully disassociates from BC)
+    db.delete(item)
+    db.flush()
+
+    # 3. Recalculate BC totals from the remaining items
+    remaining = db.query(models.BCItem).filter(models.BCItem.bc_id == bc_id).all()
+    bc.total_amount_ht = round(sum(i.line_amount_sbc for i in remaining), 2)
+    bc.total_tax_amount = round(sum(i.line_amount_sbc * i.applied_tax_rate for i in remaining), 2)
+    bc.total_amount_ttc = round(bc.total_amount_ht + bc.total_tax_amount, 2)
+
+    db.commit()
+    return log
+
+
 def submit_bc(db: Session, bc_id: int, user_id: int, background_tasks: BackgroundTasks = None):
     """Moves BC from DRAFT to SUBMITTED (Ready for L1)"""
     bc = db.query(models.BonDeCommande).get(bc_id)

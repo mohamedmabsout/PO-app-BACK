@@ -614,6 +614,34 @@ class ItemRejectionHistory(Base):
     rejected_at = Column(DateTime, server_default=func.now())
     item = relationship("BCItem", back_populates="rejection_history")
     rejected_by = relationship("User")
+
+
+class BCLineCancellationLog(Base):
+    """Audit log written just before a BCItem is hard-deleted via cancellation."""
+    __tablename__ = "bc_line_cancellation_log"
+
+    id = Column(Integer, primary_key=True)
+
+    # BC reference (FK kept; if BC is ever deleted, log rows are also deleted)
+    bc_id = Column(Integer, ForeignKey("bon_de_commandes.id", ondelete="CASCADE"), nullable=False)
+    bc_number = Column(String(50), nullable=False)          # snapshot
+
+    # Line snapshot (FK nullable: merged_po may outlive the log)
+    merged_po_id = Column(Integer, ForeignKey("merged_pos.id", ondelete="SET NULL"), nullable=True)
+    po_reference = Column(String(100), nullable=True)       # merged_po.po_id snapshot
+    item_description = Column(Text, nullable=True)
+    quantity_sbc = Column(Float, nullable=True)
+    line_amount_sbc = Column(Float, nullable=True)
+
+    # Audit
+    cancel_reason = Column(Text, nullable=False)
+    cancelled_at = Column(DateTime, server_default=func.now())
+    cancelled_by_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+
+    bc = relationship("BonDeCommande")
+    cancelled_by = relationship("User")
+
+
 # 1. The Wallet (One per User)
 class Caisse(Base):
     __tablename__ = "caisses"
