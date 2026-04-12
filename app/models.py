@@ -551,7 +551,7 @@ class BCItem(Base):
     act = relationship("ServiceAcceptance", back_populates="items")
 
     # Relationship for history
-    rejection_history = relationship("ItemRejectionHistory", back_populates="item")
+    rejection_history = relationship("ItemRejectionHistory", back_populates="item", cascade="all, delete-orphan")
 
 
 class Notification(Base):
