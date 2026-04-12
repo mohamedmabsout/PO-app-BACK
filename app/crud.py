@@ -3149,6 +3149,9 @@ def cancel_bc_line(db: Session, bc_id: int, item_id: int, user_id: int, reason: 
     )
     db.add(log)
 
+    # Unlink any expenses that reference this item (bc_item_id is nullable)
+    db.query(models.Expense).filter(models.Expense.bc_item_id == item_id).update({"bc_item_id": None})
+
     # 2. Hard delete the item (fully disassociates from BC)
     db.delete(item)
     db.flush()
