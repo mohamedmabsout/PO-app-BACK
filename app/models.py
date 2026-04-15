@@ -1,6 +1,6 @@
 from datetime import datetime, timezone, date
 from sqlalchemy import Table # Make sure this is the one being used
-from sqlalchemy import Boolean, Column, Date, Enum, ForeignKey, Integer, String, Float, DateTime, Text
+from sqlalchemy import Boolean, Column, Date, Enum, ForeignKey, Integer, String, Float, DateTime, Text, JSON
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 import sqlalchemy as sa
@@ -283,6 +283,19 @@ class RawPurchaseOrder(Base):
     uploader_id = Column(Integer, ForeignKey("users.id"))
     uploader = relationship("User")
 
+    # Huawei B2B fields — NULL for Excel-imported rows
+    line_location_id = Column(String(200), nullable=True, index=True)
+    task_id = Column(String(200), nullable=True, index=True)
+    instance_id = Column(Integer, nullable=True)
+    org_id = Column(String(100), nullable=True)
+    po_line_id = Column(String(200), nullable=True)
+    vendor_code = Column(String(100), nullable=True)
+    pr_number = Column(String(200), nullable=True)
+    unit_code = Column(String(50), nullable=True)
+    shipment_status = Column(String(100), nullable=True)
+    purchase_type = Column(String(100), nullable=True)
+    huawei_source = Column(Boolean, nullable=True, default=False)
+
 
 class RawAcceptance(Base):
     __tablename__ = "raw_acceptances"
@@ -345,7 +358,40 @@ class MergedPO(Base):
     date_pac_ok = Column(Date, nullable=True)
     assignment_date = Column(DateTime, nullable=True)
 
-    
+    # --- PM/Coordinator editable columns ---
+    status_installation    = Column(String(100), nullable=True)
+    date_installation      = Column(Date, nullable=True)
+    need_document          = Column(String(10), nullable=True)     # "Yes" / "No"
+    date_document_ok       = Column(Date, nullable=True)
+    remark_last_remark     = Column(Text, nullable=True)
+    readiness_acceptance   = Column(String(100), nullable=True)
+    rejection_remark       = Column(Text, nullable=True)
+    remarks                = Column(Text, nullable=True)
+
+    # --- QC interface editable columns ---
+    status_report_isdp     = Column(String(50), nullable=True)
+    date_close_report_isdp = Column(Date, nullable=True)
+    remark_qc_reason       = Column(Text, nullable=True)
+
+    change_logs = relationship("MergedPOChangeLog", back_populates="merged_po", cascade="all, delete-orphan")
+
+
+class MergedPOChangeLog(Base):
+    __tablename__ = "merged_po_change_logs"
+    id                  = Column(Integer, primary_key=True, index=True)
+    merged_po_id        = Column(Integer, ForeignKey("merged_pos.id", ondelete="CASCADE"), nullable=False, index=True)
+    po_id               = Column(String(255), nullable=False, index=True)
+    site_code           = Column(String(100), nullable=True)
+    item_description    = Column(String(500), nullable=True)
+    changed_by_user_id  = Column(Integer, ForeignKey("users.id"), nullable=False)
+    changed_at          = Column(DateTime, server_default=func.now(), index=True)
+    action_type         = Column(String(50), nullable=False)   # ROLE_PM, ROLE_PC, ROLE_RQC
+    changes             = Column(JSON, nullable=False)          # {field: {old: ..., new: ...}}
+
+    merged_po           = relationship("MergedPO", back_populates="change_logs")
+    changed_by          = relationship("User", foreign_keys=[changed_by_user_id])
+
+
 class UploadHistory(Base):
     __tablename__ = "upload_history"
 

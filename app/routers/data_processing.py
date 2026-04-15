@@ -1135,3 +1135,131 @@ def run_db_heal(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/remaining-update-upload")
+async def upload_remaining_update(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user),
+):
+    """
+    Accepts an .xlsx file (the re-uploaded Remaining to Accept export).
+    Validates all rows first (no writes). If valid, updates only the columns
+    the current user's workflow roles allow, and logs every diff.
+    """
+    if not file.filename.endswith((".xlsx", ".xls")):
+        raise HTTPException(status_code=400, detail="Invalid file type. Please upload an .xlsx file.")
+
+    file_bytes = await file.read()
+
+    from ..services.merged_po_update import process_update_file
+    result = process_update_file(
+        file_bytes=file_bytes,
+        filename=file.filename,
+        current_user=current_user,
+        db=db,
+    )
+    return result
+
+
+@router.get("/merged-po-change-logs")
+def get_merged_po_change_logs(
+    po_id: Optional[str] = None,
+    site_code: Optional[str] = None,
+    description: Optional[str] = None,
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    user_id: Optional[int] = None,
+    page: int = 1,
+    size: int = 20,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user),
+):
+    """
+    Paginated change log for the dedicated log history page.
+    """
+    from sqlalchemy import desc
+    query = db.query(models.MergedPOChangeLog)
+
+    if po_id:
+        query = query.filter(models.MergedPOChangeLog.po_id.ilike(f"%{po_id}%"))
+    if site_code:
+        query = query.filter(models.MergedPOChangeLog.site_code.ilike(f"%{site_code}%"))
+    if description:
+        query = query.filter(models.MergedPOChangeLog.item_description.ilike(f"%{description}%"))
+    if date_from:
+        query = query.filter(models.MergedPOChangeLog.changed_at >= date_from)
+    if date_to:
+        from datetime import timedelta
+        query = query.filter(models.MergedPOChangeLog.changed_at < date_to + timedelta(days=1))
+    if user_id:
+        query = query.filter(models.MergedPOChangeLog.changed_by_user_id == user_id)
+
+    total = query.count()
+    logs = (
+        query.options(joinedload(models.MergedPOChangeLog.changed_by))
+        .order_by(desc(models.MergedPOChangeLog.changed_at))
+        .offset((page - 1) * size)
+        .limit(size)
+        .all()
+    )
+
+    return {
+        "data": [
+            {
+                "id": log.id,
+                "merged_po_id": log.merged_po_id,
+                "po_id": log.po_id,
+                "site_code": log.site_code,
+                "item_description": log.item_description,
+                "changed_at": log.changed_at.isoformat() if log.changed_at else None,
+                "action_type": log.action_type,
+                "changes": log.changes,
+                "changed_by": {
+                    "id": log.changed_by.id,
+                    "name": f"{log.changed_by.first_name} {log.changed_by.last_name}",
+                } if log.changed_by else None,
+            }
+            for log in logs
+        ],
+        "total": total,
+        "page": page,
+        "size": size,
+    }
+
+
+@router.get("/merged-po-change-logs/{merged_po_id}")
+def get_po_change_log_timeline(
+    merged_po_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user),
+):
+    """
+    All change log entries for a single PO line (for the drawer timeline).
+    """
+    from sqlalchemy import desc
+    logs = (
+        db.query(models.MergedPOChangeLog)
+        .options(joinedload(models.MergedPOChangeLog.changed_by))
+        .filter(models.MergedPOChangeLog.merged_po_id == merged_po_id)
+        .order_by(desc(models.MergedPOChangeLog.changed_at))
+        .all()
+    )
+    return [
+        {
+            "id": log.id,
+            "merged_po_id": log.merged_po_id,
+            "po_id": log.po_id,
+            "site_code": log.site_code,
+            "item_description": log.item_description,
+            "changed_at": log.changed_at.isoformat() if log.changed_at else None,
+            "action_type": log.action_type,
+            "changes": log.changes,
+            "changed_by": {
+                "id": log.changed_by.id,
+                "name": f"{log.changed_by.first_name} {log.changed_by.last_name}",
+            } if log.changed_by else None,
+        }
+        for log in logs
+    ]

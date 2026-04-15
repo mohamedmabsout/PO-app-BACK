@@ -174,3 +174,32 @@ class PnLStatus(str, enum.Enum):
     PENDING_APPROVAL = "PENDING_APPROVAL" # PM finished, waiting for PD
     PUBLISHED = "PUBLISHED"           # PD approved, numbers are frozen
     REJECTED = "REJECTED"             # PD rejected, PM needs to fix
+
+class StatusInstallation(str, enum.Enum):
+    DONE = "Done"
+    ONGOING = "Ongoing/Partially Done"
+    OTHER = "Other"
+    POSTPONED = "Postponed"
+    ACCESS_ISSUE = "Access issue"
+    AUTH_ISSUE = "Authorization issue"
+    MATERIAL_ISSUE = "Material issue"
+    NEED_CANCEL = "Need Cancel"
+    DONE_BY_REJECTED = "Done by Rejected"
+
+class ReadinessAcceptance(str, enum.Enum):
+    READY = "Ready for Acceptance"
+    PARTIALLY_READY = "Partially Ready for acceptance"
+    NEED_CLOSE_REPORT = "Need Close report"
+    NEED_UPDATE_PO = "Need update PO (Target PO needed)"
+    REJECTED_REVIEW = "Rejected, review rejection reason"
+    NEED_CANCEL = "Need Cancel"
+
+class StatusReportIsdp(str, enum.Enum):
+    REVIEWING = "Reviewing"
+    TO_BE_EXECUTED = "To Be Executed"
+    REJECTED = "Rejected"
+    CLOSED = "Closed"
+
+class NeedDocument(str, enum.Enum):
+    YES = "Yes"
+    NO = "No"

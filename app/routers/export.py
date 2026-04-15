@@ -7,6 +7,7 @@ from typing import Optional
 
 from .. import crud, models, auth
 from ..dependencies import get_db
+from ..services.merged_po_update import user_has_pm_or_pc_role
 
 router = APIRouter(
     prefix="/api/export",
@@ -29,13 +30,15 @@ def export_remaining_to_accept(
     Génère et renvoie un fichier Excel en se basant sur les filtres fournis.
     """
     # On passe tous les filtres à la fonction CRUD
+    strip_prices = not user_has_pm_or_pc_role(db=db, user_id=current_user.id)
     df = crud.get_remaining_to_accept_dataframe(
         db=db,
         filter_stage=filter_stage,
         search=search,
         internal_project_id=internal_project_id,
         customer_project_id=customer_project_id,
-        user=current_user
+        user=current_user,
+        strip_prices=strip_prices
     )
 
     if df.empty:

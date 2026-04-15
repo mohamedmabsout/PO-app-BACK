@@ -2551,7 +2551,8 @@ def get_remaining_to_accept_dataframe(
     search: Optional[str] = None,
     internal_project_id: Optional[int] = None,
     customer_project_id: Optional[int] = None,
-    user: models.User = None
+    user: models.User = None,
+    strip_prices: bool = False
 ) -> pd.DataFrame:
     """
     Builds a query for the "Remaining To Accept" export based on filters,
@@ -2586,7 +2587,19 @@ def get_remaining_to_accept_dataframe(
         models.MergedPO.accepted_pac_amount,
         remaining_expr.label("remaining_amount"),
         stage_expr.label("remaining_stage"),
-        models.MergedPO.publish_date
+        models.MergedPO.publish_date,
+        # Editable columns for update
+        models.MergedPO.status_installation,
+        models.MergedPO.date_installation,
+        models.MergedPO.need_document,
+        models.MergedPO.date_document_ok,
+        models.MergedPO.remark_last_remark,
+        models.MergedPO.readiness_acceptance,
+        models.MergedPO.rejection_remark,
+        models.MergedPO.remarks,
+        models.MergedPO.status_report_isdp,
+        models.MergedPO.date_close_report_isdp,
+        models.MergedPO.remark_qc_reason
     ).select_from(models.MergedPO).outerjoin(
         models.InternalProject, models.MergedPO.internal_project_id == models.InternalProject.id
     ).outerjoin(
@@ -2637,11 +2650,26 @@ def get_remaining_to_accept_dataframe(
         'accepted_pac_amount': 'Accepted PAC',
         'remaining_amount': 'Remaining to Accept',
         'remaining_stage': 'Stage',
-        'publish_date': 'Publish Date'
+        'publish_date': 'Publish Date',
+        'status_installation': 'Status Installation',
+        'date_installation': 'Date Installation',
+        'need_document': 'Need Document',
+        'date_document_ok': 'Date Document OK',
+        'remark_last_remark': 'Remark Last Remark',
+        'readiness_acceptance': 'Readiness Acceptance',
+        'rejection_remark': 'Rejection Remark',
+        'remarks': 'Remarks',
+        'status_report_isdp': 'Status Report ISDP',
+        'date_close_report_isdp': 'Date Close Report ISDP',
+        'remark_qc_reason': 'Remark QC Reason'
     }, inplace=True)
     # ------------------------------------
-    
-    return df   
+
+    if strip_prices:
+        price_cols = ['Total PO Value', 'Accepted AC', 'Accepted PAC', 'Remaining to Accept']
+        df.drop(columns=[c for c in price_cols if c in df.columns], inplace=True)
+
+    return df
 
 def generate_bc_number(db: Session):
     """

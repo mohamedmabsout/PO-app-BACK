@@ -1,5 +1,6 @@
 ssh hrexpense_user@212.95.35.168
 simo/.,
+7rhctg2t9K9sB5a3
 cd /var/www/po-app-backend
 git pull origin main
 docker compose up --build -d

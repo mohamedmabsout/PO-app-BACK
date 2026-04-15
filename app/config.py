@@ -9,9 +9,13 @@ class Settings(BaseSettings):
     java_api_username: str
     java_api_password: str
 
+    # Huawei eSupplier B2B
+    huawei_app_id: str = "APP_Z06PRE_B2BTEST"
+    huawei_app_key: str = ""
+    huawei_env: str = "test"  # "test" or "prod"
 
     # This tells pydantic to load the variables from a .env file
-    model_config = SettingsConfigDict(env_file=".env")
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 # Create a single instance that the rest of our app can import
 settings = Settings()
