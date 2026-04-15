@@ -40,11 +40,24 @@ def upgrade() -> None:
     """)
 
     # 2. Drop the soft-delete columns from bc_items
-    # cancelled_by_id has an FK constraint — must drop it first
-    op.execute("ALTER TABLE bc_items DROP FOREIGN KEY IF EXISTS bc_items_ibfk_4")
-    op.execute("ALTER TABLE bc_items DROP COLUMN IF EXISTS cancel_reason")
-    op.execute("ALTER TABLE bc_items DROP COLUMN IF EXISTS cancelled_at")
-    op.execute("ALTER TABLE bc_items DROP COLUMN IF EXISTS cancelled_by_id")
+    # cancelled_by_id has an FK constraint — find its actual name and drop it first
+    from sqlalchemy import text
+    conn = op.get_bind()
+    result = conn.execute(text("""
+        SELECT CONSTRAINT_NAME
+        FROM information_schema.KEY_COLUMN_USAGE
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'bc_items'
+          AND COLUMN_NAME = 'cancelled_by_id'
+          AND REFERENCED_TABLE_NAME = 'users'
+    """))
+    row = result.fetchone()
+    if row:
+        conn.execute(text(f"ALTER TABLE bc_items DROP FOREIGN KEY `{row[0]}`"))
+
+    op.drop_column('bc_items', 'cancel_reason')
+    op.drop_column('bc_items', 'cancelled_at')
+    op.drop_column('bc_items', 'cancelled_by_id')
 
 
 def downgrade() -> None:
