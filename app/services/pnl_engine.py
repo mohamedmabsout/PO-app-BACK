@@ -74,7 +74,7 @@ def generate_draft_pnl_for_month(db: Session, year: int, month: int, generated_b
     # --- 3. PROCESS LABOR (Java 'Green P' -> Python LaborAllocation) ---
     count_added = 0
     for lab in labor_list:
-        duid = lab.get("duid", "").strip()
+        duid = (lab.get("duid") or "").strip()
         agent_name = lab.get("agentName", "Unknown")
         days = float(lab.get("count", 0))
         tjm = float(lab.get("tjm", 0.0))
@@ -243,7 +243,7 @@ def generate_draft_pnl_for_month(db: Session, year: int, month: int, generated_b
     depot_traveling_costs = {}  # Track by category for backoffice
 
     for exp in expense_list:
-        duid = exp.get("duid", "").strip()
+        duid = (exp.get("duid") or "").strip()
         exp_type = exp.get("expenseTypeName", "").strip()
         amount = float(exp.get("totalAmount", 0.0))
 
