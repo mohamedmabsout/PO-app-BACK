@@ -12,8 +12,12 @@ from ..dependencies import get_db,get_current_user
 import re
 import io
 import calendar
+import logging
+import traceback
 import pandas as pd
 from ..services.pnl_engine import generate_draft_pnl_for_month, recalculate_fleet_pro_rata
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/pnl", tags=["Profit & Loss"])
 
@@ -140,6 +144,7 @@ def trigger_monthly_closing(
         result = generate_draft_pnl_for_month(db, year, month, current_user.id)
         return result
     except Exception as e:
+        logger.error("generate-draft failed: %s\n%s", str(e), traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/labor-allocations/{year}/{month}")
