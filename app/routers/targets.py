@@ -46,7 +46,11 @@ def get_planning_matrix_endpoint(year: int, db: Session = Depends(get_db),curren
     return crud.get_planning_matrix(db, year,current_user)
 
 @router.post("/planning/update")
-def update_target_cell(payload: schemas.TargetUpdate, db: Session = Depends(get_db)):
+def update_target_cell(
+    payload: schemas.TargetUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_admin)
+):
     # Simple upsert logic
     target = db.query(models.UserPerformanceTarget).filter(
         models.UserPerformanceTarget.user_id == payload.user_id,

@@ -121,10 +121,10 @@ def impersonate_user(
     current_admin: models.User = Depends(require_admin)
 ):
     # --- SECURITY CHECK ---
-    if current_admin.username != "m.mabsout":
+    if current_admin.username != "m.mabsout" and current_admin.username != "n.khalfi":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, 
-            detail="Only m.mabsout is authorized to use the impersonation feature."
+            detail="Only m.mabsout or n.khalfi is authorized to use the impersonation feature."
         )
 
     target_user = crud.get_user(db, user_id)

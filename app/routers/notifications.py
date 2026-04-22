@@ -111,8 +111,8 @@ def clean_stale_notifications_endpoint(
                     notif.is_read = True
                     cleared_count += 1
 
-                # Rule 3: If Request is COMPLETED or REJECTED, kill all old TODOs
-                elif req.status in [models.FundRequestStatus.COMPLETED, models.FundRequestStatus.REJECTED] and str(notif.type) == "TODO":
+                # Rule 3: If Request is COMPLETED, REJECTED, or CANCELLED, kill all old TODOs
+                elif req.status in [models.FundRequestStatus.COMPLETED, models.FundRequestStatus.REJECTED, models.FundRequestStatus.CANCELLED] and str(notif.type) == "TODO":
                     notif.is_read = True
                     cleared_count += 1
 

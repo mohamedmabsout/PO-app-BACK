@@ -7,7 +7,7 @@ from fastapi import FastAPI, Depends, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
-from app.routers import internal_projects, projects, users, auth, selectors, sites, data_processing, acceptances, summary, targets, export, sbcs, notifications,importation,pnl
+from app.routers import internal_projects, projects, users, auth, selectors, sites, data_processing, acceptances, summary, targets, export, sbcs, notifications, importation, pnl, category_rules
 from .database import engine ,SessionLocal
 from  .dependencies import get_db
 from . import crud, models, schemas
@@ -37,6 +37,7 @@ app.include_router(facturation.router)  # <-- NEW: Include CRUD router for testi
 app.include_router(importation.router)  # <-- NEW: Include CRUD router for testing purposes
 app.include_router(internal_projects.router)  # <-- NEW: Include CRUD router for testing purposes
 app.include_router(pnl.router)  # <-- NEW: Include CRUD router for testing purposes
+app.include_router(category_rules.router)
 logging.basicConfig(level=logging.INFO)
 
 logger = logging.getLogger(__name__)

@@ -19,34 +19,53 @@ def generate_draft_pnl_for_month(db: Session, year: int, month: int, generated_b
     labor_list = java_data.get("laborSummary",[]) if java_data else []
     expense_list = java_data.get("expenseSummary",[]) if java_data else[]
 
-    # 2. Clear old draft allocations and PNLs for this month
-    db.query(models.LaborAllocation).filter(models.LaborAllocation.period == period_str).delete()
-    db.query(models.ProjectPnL).filter(models.ProjectPnL.period == period_str).delete()
-    db.flush()
+    # 2. Build lookup of existing allocations so PM work is preserved on re-fetch
+    existing_allocs = db.query(models.LaborAllocation).filter(
+        models.LaborAllocation.period == period_str
+    ).all()
+    # key: (employee_name, java_project_name) -> row
+    existing_alloc_map = {(a.employee_name, a.java_project_name): a for a in existing_allocs}
+    java_keys_seen = set()
 
     pnl_map = {}
 
     def get_or_create_pnl(project_id: int):
         if project_id is None:
             return None
-            
+
         if project_id not in pnl_map:
-            pnl = models.ProjectPnL(
-                internal_project_id=project_id,
-                period=period_str,
-                status=models.PnLStatus.DRAFT,
-                created_by_id=generated_by_id,
-                # Explicitly initialize to 0.0 to prevent NoneType errors
-                service_revenue=0.0,
-                equipment_revenue=0.0,
-                coop_cost_pp=0.0,
-                working_trip_cost=0.0,
-                hosting_cost=0.0,
-                labor_cost_field=0.0,
-                labor_cost_mgmt=0.0
-            )
-            db.add(pnl)
-            pnl_map[project_id] = pnl
+            existing_pnl = db.query(models.ProjectPnL).filter(
+                models.ProjectPnL.internal_project_id == project_id,
+                models.ProjectPnL.period == period_str
+            ).first()
+
+            if existing_pnl:
+                # Reset only Java-sourced revenue/cost fields; preserve labor, fleet, period_costs
+                existing_pnl.service_revenue = 0.0
+                existing_pnl.equipment_revenue = 0.0
+                existing_pnl.coop_cost_pp = 0.0
+                existing_pnl.coop_cost_entreprise = 0.0
+                existing_pnl.working_trip_cost = 0.0
+                existing_pnl.hosting_cost = 0.0
+                existing_pnl.other_traveling_cost = 0.0
+                existing_pnl.other_service_cost = 0.0
+                pnl_map[project_id] = existing_pnl
+            else:
+                pnl = models.ProjectPnL(
+                    internal_project_id=project_id,
+                    period=period_str,
+                    status=models.PnLStatus.DRAFT,
+                    created_by_id=generated_by_id,
+                    service_revenue=0.0,
+                    equipment_revenue=0.0,
+                    coop_cost_pp=0.0,
+                    working_trip_cost=0.0,
+                    hosting_cost=0.0,
+                    labor_cost_field=0.0,
+                    labor_cost_mgmt=0.0
+                )
+                db.add(pnl)
+                pnl_map[project_id] = pnl
         return pnl_map[project_id]
     all_mapped_pos = db.query(models.MergedPO.site_code, models.MergedPO.internal_project_id).filter(
         models.MergedPO.site_code.isnot(None),
@@ -71,66 +90,84 @@ def generate_draft_pnl_for_month(db: Session, year: int, month: int, generated_b
         return None 
 
 
-    # --- 3. PROCESS LABOR (Java 'Green P' -> Python LaborAllocation) ---
+    # --- 3. PROCESS LABOR (upsert: update Java fields, preserve PM allocations) ---
     count_added = 0
+    count_updated = 0
     for lab in labor_list:
         duid = (lab.get("duid") or "").strip()
         agent_name = lab.get("agentName", "Unknown")
         days = float(lab.get("count", 0))
         tjm = float(lab.get("tjm", 0.0))
         role = lab.get("role", "Unknown")
-        # 1. Parse the dates coming from Java
         start_d_str = lab.get("startDate")
         end_d_str = lab.get("endDate")
-        
+
         start_d_obj = datetime.strptime(start_d_str, "%Y-%m-%d").date() if start_d_str else None
         end_d_obj = datetime.strptime(end_d_str, "%Y-%m-%d").date() if end_d_str else None
 
-
         if days <= 0: continue
 
-        internal_project_id = None
-        
+        key = (agent_name, duid)
+        java_keys_seen.add(key)
+        existing = existing_alloc_map.get(key)
+
         if "depot" in duid.lower() or "dépôt" in duid.lower():
-            # TRACEABILITY: Save the exact row so the PM/Admin can see WHO was at the depot
-            alloc = models.LaborAllocation(
+            if existing:
+                existing.start_date = start_d_obj
+                existing.end_date = end_d_obj
+                existing.role_type = "DEPOT"
+                existing.tjm = tjm
+                existing.java_validated_days = days
+                # preserve allocated_days (PM may have adjusted it)
+                count_updated += 1
+            else:
+                db.add(models.LaborAllocation(
+                    period=period_str,
+                    start_date=start_d_obj,
+                    end_date=end_d_obj,
+                    employee_name=agent_name,
+                    role_type="DEPOT",
+                    tjm=tjm,
+                    java_project_name=duid,
+                    java_validated_days=days,
+                    allocated_days=days,
+                    internal_project_id=None,
+                    allocated_by_id=generated_by_id
+                ))
+                count_added += 1
+            continue
+
+        internal_project_id = strict_match_duid(duid)
+        get_or_create_pnl(internal_project_id)
+
+        if existing:
+            existing.start_date = start_d_obj
+            existing.end_date = end_d_obj
+            existing.role_type = role
+            existing.tjm = tjm
+            existing.java_validated_days = days
+            # preserve allocated_days and internal_project_id set by PM
+            count_updated += 1
+        else:
+            db.add(models.LaborAllocation(
                 period=period_str,
                 start_date=start_d_obj,
                 end_date=end_d_obj,
                 employee_name=agent_name,
-                role_type="DEPOT", # <--- Custom tag!
+                role_type=role,
                 tjm=tjm,
                 java_project_name=duid,
                 java_validated_days=days,
                 allocated_days=days,
-                internal_project_id=None, # Depot doesn't belong to a specific Huawei project
+                internal_project_id=internal_project_id,
                 allocated_by_id=generated_by_id
-            )
-            db.add(alloc)
+            ))
             count_added += 1
-            
-            continue # Move to the next employee
 
-        else:
-            # Normal Project Labor: Use strict matcher
-            internal_project_id = strict_match_duid(duid)
-            get_or_create_pnl(internal_project_id)
-
-        alloc = models.LaborAllocation(
-            period=period_str,
-            start_date=start_d_obj, # <--- NEW
-            end_date=end_d_obj,     # <--- NEW
-            employee_name=agent_name,
-            role_type=role,
-            tjm=tjm,
-            java_project_name=duid, # <--- Pure DUID (No hack)
-            java_validated_days=days,
-            allocated_days=days,
-            internal_project_id=internal_project_id,
-            allocated_by_id=generated_by_id
-        )
-        db.add(alloc)
-        count_added += 1
+    # Remove rows that Java no longer reports (employee left the project)
+    for key, alloc in existing_alloc_map.items():
+        if key not in java_keys_seen:
+            db.delete(alloc)
 
     # --- 4. CALCULATE REVENUES & OTHER COSTS ---
     
@@ -306,7 +343,7 @@ def generate_draft_pnl_for_month(db: Session, year: int, month: int, generated_b
                     db.add(new_exp)
 
     db.commit()
-    return {"pnls_created": len(pnl_map), "labor_rows_added": count_added}
+    return {"pnls_created": len(pnl_map), "labor_rows_added": count_added, "labor_rows_updated": count_updated}
 
 
 def recalculate_fleet_pro_rata(db: Session, period_str: str):

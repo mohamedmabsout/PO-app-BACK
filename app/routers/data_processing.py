@@ -464,6 +464,50 @@ def get_bc_candidates(
     return crud.get_eligible_pos_for_bc(db, project_id, code_list, start_date, end_date)
 
 
+@router.post("/bc-candidates-by-po-ids", response_model=schemas.BcCandidatesByPoIdsResponse)
+def get_bc_candidates_by_po_ids(
+    payload: schemas.BcCandidatesByPoIdsRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user),
+):
+    """
+    Given a list of PO IDs, returns:
+    - candidates: those belonging to the specified project and eligible for BC
+    - mismatches: those found but belonging to a different project
+    PO IDs not found in the DB are silently ignored.
+    """
+    clean_ids = [s.strip() for s in payload.po_ids if s.strip()]
+    if not clean_ids:
+        return {"candidates": [], "mismatches": []}
+
+    # Fetch all MergedPOs matching the given po_ids, with their project loaded
+    all_matches = (
+        db.query(models.MergedPO)
+        .options(joinedload(models.MergedPO.internal_project))
+        .filter(models.MergedPO.po_id.in_(clean_ids))
+        .all()
+    )
+
+    belonging_to_project = [m for m in all_matches if m.internal_project_id == payload.project_id]
+    belonging_elsewhere = [m for m in all_matches if m.internal_project_id != payload.project_id]
+
+    # Run the project-members through the eligibility filter (remaining qty > 0, not fully consumed by active BCs)
+    eligible_ids = {
+        po.id for po in crud.get_eligible_pos_for_bc(db, payload.project_id)
+    }
+    candidates = [po for po in belonging_to_project if po.id in eligible_ids]
+
+    mismatches = [
+        schemas.PoMismatch(
+            po_id=m.po_id,
+            project_name=m.internal_project.name if m.internal_project else "Unknown"
+        )
+        for m in belonging_elsewhere
+    ]
+
+    return {"candidates": candidates, "mismatches": mismatches}
+
+
 @router.post("/create-bc", response_model=schemas.BCResponse)
 def generate_bc(
     bc_data: schemas.BCCreate,
@@ -939,6 +983,78 @@ def get_fund_request_details(
     current_user: models.User = Depends(auth.get_current_user)
 ):
     return crud.get_request_by_id(db, req_id)
+
+
+@router.delete("/request/{req_id}")
+def delete_fund_request(
+    req_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """Admin-only hard delete of a fund request."""
+    if current_user.role not in [models.UserRole.ADMIN]:
+        raise HTTPException(status_code=403, detail="Admin only.")
+
+    req = db.query(models.FundRequest).get(req_id)
+    if not req:
+        raise HTTPException(status_code=404, detail="Request not found.")
+
+    # 1. NULL out related_request_id on all linked transactions (preserve ledger history)
+    db.query(models.Transaction).filter(
+        models.Transaction.related_request_id == req_id
+    ).update({"related_request_id": None}, synchronize_session=False)
+
+    # 2. Mark linked notifications as read
+    db.query(models.Notification).filter(
+        models.Notification.link.contains(f"/caisse/request/{req_id}")
+    ).update({"is_read": True}, synchronize_session=False)
+
+    # 3. Delete all items (cascade)
+    db.query(models.FundRequestItem).filter(
+        models.FundRequestItem.request_id == req_id
+    ).delete(synchronize_session=False)
+
+    # 4. Delete the parent request
+    db.delete(req)
+    db.commit()
+
+    return {"ok": True, "deleted_id": req_id}
+
+
+@router.patch("/request/{req_id}/cancel")
+def cancel_fund_request(
+    req_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """Admin-only soft cancel of a fund request."""
+    if current_user.role not in [models.UserRole.ADMIN]:
+        raise HTTPException(status_code=403, detail="Admin only.")
+
+    req = db.query(models.FundRequest).get(req_id)
+    if not req:
+        raise HTTPException(status_code=404, detail="Request not found.")
+    if req.status == models.FundRequestStatus.COMPLETED:
+        raise HTTPException(status_code=400, detail="Cannot cancel a completed request.")
+
+    # 1. Set status to CANCELLED
+    req.status = models.FundRequestStatus.CANCELLED
+
+    # 2. Flip any PENDING transactions linked to this request to CANCELLED
+    db.query(models.Transaction).filter(
+        models.Transaction.related_request_id == req_id,
+        models.Transaction.status == models.TransactionStatus.PENDING
+    ).update({"status": "CANCELLED"}, synchronize_session=False)
+
+    # 3. Mark linked notifications as read
+    db.query(models.Notification).filter(
+        models.Notification.link.contains(f"/caisse/request/{req_id}")
+    ).update({"is_read": True}, synchronize_session=False)
+
+    db.commit()
+    db.refresh(req)
+    return {"ok": True, "request_number": req.request_number, "status": req.status}
+
 
 @router.get("/wallets-summary")
 def get_wallets_summary(

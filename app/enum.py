@@ -135,6 +135,7 @@ class FundRequestStatus(str, enum.Enum):
     REJECTED = "REJECTED"
     CLOSED_PARTIAL = "CLOSED_PARTIAL"
     PARTIALLY_PAID = "PARTIALLY_PAID"
+    CANCELLED = "CANCELLED"              # Admin soft-close
 
 class TransactionType(str, enum.Enum):
     CREDIT = "CREDIT"   # Money IN (Refill)

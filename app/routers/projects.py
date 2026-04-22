@@ -148,8 +148,10 @@ def create_site_assignment_rule(
 def assign_site_to_internal_project(
     allocation_data: schemas.SiteAllocationCreate, 
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_admin)
+    current_user: models.User = Depends(get_current_user)
 ):
+    if current_user.role not in [models.UserRole.ADMIN, models.UserRole.PD]:
+        raise HTTPException(status_code=403, detail="Not authorized.")
     """
     Manually assigns a Site to an Internal Project.
     Applies GLOBALLY to all POs with this Site ID.
@@ -227,8 +229,10 @@ def assign_sites_bulk(
     background_tasks: BackgroundTasks,
     payload: schemas.BulkSiteAssignment,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_admin)
+    current_user: models.User = Depends(get_current_user)
 ):
+    if current_user.role not in [models.UserRole.ADMIN, models.UserRole.PD]:
+        raise HTTPException(status_code=403, detail="Not authorized.")
     result = crud.bulk_assign_sites(db, payload.site_ids, payload.internal_project_id, current_user,background_tasks)
     
     if result["updated"] == 0 and result["skipped"] > 0:
@@ -388,8 +392,8 @@ def list_assigned_pos(
     current_user: models.User = Depends(auth.get_current_user)
 ):
     # Security: Admins & Directors only
-    if current_user.role not in[models.UserRole.ADMIN, models.UserRole.CEO]:
-        raise HTTPException(status_code=403, detail="Only Admins can access the Reassignment tool.")
+    if current_user.role not in[models.UserRole.ADMIN, models.UserRole.CEO, models.UserRole.PD]:
+        raise HTTPException(status_code=403, detail="Only Admins and Directors can access the Reassignment tool.")
         
     return crud.get_assigned_pos_paginated(db, page, size, search, project_id)
 
@@ -401,7 +405,7 @@ def reassign_specific_pos(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
-    if current_user.role not in [models.UserRole.ADMIN, models.UserRole.CEO]:
+    if current_user.role not in [models.UserRole.ADMIN, models.UserRole.CEO, models.UserRole.PD]:
         raise HTTPException(status_code=403, detail="Not authorized.")
         
     if not payload.merged_po_ids:

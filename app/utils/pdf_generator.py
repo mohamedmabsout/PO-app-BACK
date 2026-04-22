@@ -397,10 +397,10 @@ def generate_expense_pdf(expense):
     # Info Table
     data = [
         ["Date Request:", expense.created_at.strftime("%d/%m/%Y"), "Project:", expense.internal_project.name],
-        ["Type:", expense.exp_type, "ACT References:", Paragraph(act_numbers, styles['Normal'])],
+        ["Type:", expense.exp_type, "ACT :", Paragraph(act_numbers, styles['Normal'])],
         ["Beneficiary:", expense.beneficiary, "Total Amount:", f"{expense.amount:,.2f} MAD"]
     ]
-    t = Table(data, colWidths=[3*cm, 3.5*cm, 2.5*cm, 9.5*cm])
+    t = Table(data, colWidths=[3*cm, 5.5*cm, 2.5*cm, 7.5*cm])
     t.setStyle(TableStyle([
         ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
         ('VALIGN', (0,0), (-1,-1), 'TOP'), # Align to top so wrapped text looks good

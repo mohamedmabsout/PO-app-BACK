@@ -782,6 +782,7 @@ class Transaction(Base):
     # Optional links for traceability
     related_request_id = Column(Integer, ForeignKey("fund_requests.id"), nullable=True)
     expense_id = Column(Integer, ForeignKey("expenses.id"), nullable=True)
+    related_transaction_id = Column(Integer, ForeignKey("transactions.id"), nullable=True)
 
     created_at = Column(DateTime, server_default=func.now())
     created_by_id = Column(Integer, ForeignKey("users.id")) # Who performed the action
@@ -1060,3 +1061,11 @@ class ProjectPnL(Base):
     internal_project = relationship("InternalProject")
     created_by = relationship("User", foreign_keys=[created_by_id])
     approved_by = relationship("User", foreign_keys=[approved_by_id])
+
+
+class CategoryRule(Base):
+    __tablename__ = "category_rules"
+    id = Column(Integer, primary_key=True, index=True)
+    item_description = Column(String(500), nullable=False, unique=True, index=True)
+    category = Column(String(100), nullable=False)
+    created_at = Column(DateTime, default=datetime.now)

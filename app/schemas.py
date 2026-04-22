@@ -1043,6 +1043,40 @@ class ProjectMatrixUpdate(BaseModel):
 class WorkflowConfigOut(WorkflowConfigBase):
     id: int
     primary_user_name: Optional[str] = None
-    
+
     class Config:
         from_attributes = True
+
+
+# --- Category Rules ---
+class CategoryRuleCreate(BaseModel):
+    item_description: str
+    category: str
+
+
+class CategoryRuleOut(BaseModel):
+    id: int
+    item_description: str
+    category: str
+    created_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PaginatedCategoryRules(BaseModel):
+    items: List[CategoryRuleOut]
+    total_items: int
+    total_pages: int
+    page: int
+    per_page: int
+
+class BcCandidatesByPoIdsRequest(BaseModel):
+    project_id: int
+    po_ids: List[str]
+
+class PoMismatch(BaseModel):
+    po_id: str
+    project_name: str
+
+class BcCandidatesByPoIdsResponse(BaseModel):
+    candidates: List[MergedPO]
+    mismatches: List[PoMismatch]

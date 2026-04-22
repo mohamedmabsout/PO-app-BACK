@@ -561,22 +561,37 @@ def reject_expense(
     caisse = db.query(models.Caisse).filter(models.Caisse.user_id == exp.requester_id).first()
 
     if caisse:
-        # Treat None as 0.0 to prevent TypeError
         current_reserved = caisse.reserved_balance if caisse.reserved_balance is not None else 0.0
         current_balance = caisse.balance if caisse.balance is not None else 0.0
 
-        # Apply Refund
         caisse.reserved_balance = current_reserved - exp.amount
         caisse.balance = current_balance + exp.amount
 
+        # LEDGER: Append a CREDIT reversal so the ledger stays complete (append-only rule)
+        original_debit = db.query(models.Transaction).filter(
+            models.Transaction.expense_id == exp.id,
+            models.Transaction.type == models.TransactionType.DEBIT
+        ).first()
+
+        reversal = models.Transaction(
+            caisse_id=caisse.id,
+            expense_id=exp.id,
+            type=models.TransactionType.CREDIT,
+            amount=exp.amount,
+            status=models.TransactionStatus.COMPLETED,
+            related_transaction_id=original_debit.id if original_debit else None,
+            description=f"Reversal: Expense #{exp.id} rejected by {current_user.first_name} {current_user.last_name}",
+            created_by_id=current_user.id,
+            created_at=datetime.now()
+        )
+        db.add(reversal)
+
     # 2. RESTORE CONSUMED ADVANCES (if this was ACCEPTANCE_PP with applied advances)
     if exp.exp_type == "ACCEPTANCE_PP":
-        # Calculate the deduction that was applied at creation time
         acts_total = sum(a.total_amount_ht for a in exp.acts)
         deduction_applied = acts_total - exp.amount
 
         if deduction_applied > 0:
-            # Restore the advances to the pool
             crud.restore_sbc_advances(db, exp.sbc_id, deduction_applied)
 
     # 3. Update Status
@@ -584,7 +599,7 @@ def reject_expense(
     exp.rejection_reason = payload.reason
 
     db.commit()
-    db.refresh(exp) # Refresh to get updated data
+    db.refresh(exp)
 
     return exp # <--- CRITICAL: MUST RETURN THE OBJECT
 

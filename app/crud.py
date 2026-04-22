@@ -30,6 +30,7 @@ from sqlalchemy import func,or_
 from fastapi import UploadFile, File, Form,HTTPException
 from fastapi.responses import FileResponse
 from .utils.email import send_bc_status_email, send_email_background, LOGOS,send_notification_email_detailled
+from .utils.whatsapp import send_whatsapp_notification
 import json
 from collections import defaultdict
 
@@ -241,6 +242,11 @@ def get_action_notification_targets(db: Session, project_id: int, action_type: m
 def get_emails_by_role(db: Session, role: UserRole) -> List[str]:
     users = db.query(models.User).filter(models.User.role == role, models.User.is_active == True).all()
     return [u.email for u in users if u.email]
+
+
+def get_phones_by_role(db: Session, role: UserRole) -> List[str]:
+    users = db.query(models.User).filter(models.User.role == role, models.User.is_active == True).all()
+    return [u.phone_number for u in users if u.phone_number]
 
 
 def get_user_by_email(db: Session, email: str):
@@ -676,6 +682,7 @@ def process_po_file_background(file_path: str, history_id: int, user_id: int, ch
         # 1. Process POs
         new_record_ids = create_raw_purchase_orders_from_dataframe(db, df, user_id)
         processed_count = process_and_merge_pos(db)
+        apply_category_rules(db)  # Re-apply all rules after every import
         
         # 2. Update PO History to SUCCESS
         history = db.query(models.UploadHistory).get(history_id)
@@ -1137,9 +1144,107 @@ def bulk_update_po_categories(db: Session, po_ids: List[int], new_category: str)
     updated_count = db.query(models.MergedPO).filter(
         models.MergedPO.id.in_(po_ids)
     ).update({"category": new_category}, synchronize_session=False)
-    
+
     db.commit()
     return updated_count
+
+
+def apply_category_rules(db: Session):
+    """
+    Applies all category rules to merged_pos using a single JOIN UPDATE.
+    Overwrites any existing category value — rules are authoritative.
+    """
+    from sqlalchemy import text
+    db.execute(text(
+        "UPDATE merged_pos mp "
+        "JOIN category_rules cr ON mp.item_description = cr.item_description "
+        "SET mp.category = cr.category"
+    ))
+    db.commit()
+
+
+def get_category_rules(db: Session, page: int = 1, per_page: int = 50, search: str = None):
+    query = db.query(models.CategoryRule)
+    if search:
+        query = query.filter(models.CategoryRule.item_description.ilike(f"%{search}%"))
+    total_items = query.count()
+    items = query.order_by(models.CategoryRule.item_description).offset((page - 1) * per_page).limit(per_page).all()
+    return {
+        "items": items,
+        "total_items": total_items,
+        "total_pages": max(1, (total_items + per_page - 1) // per_page),
+        "page": page,
+        "per_page": per_page,
+    }
+
+
+def create_category_rule(db: Session, item_description: str, category: str) -> models.CategoryRule:
+    item_description = item_description.strip()
+    existing = db.query(models.CategoryRule).filter(
+        models.CategoryRule.item_description == item_description
+    ).first()
+    if existing:
+        raise ValueError(f"A rule for this description already exists (id={existing.id}).")
+    rule = models.CategoryRule(item_description=item_description, category=category)
+    db.add(rule)
+    db.commit()
+    db.refresh(rule)
+    # Use the full JOIN UPDATE so matching logic is identical to the import hook
+    apply_category_rules(db)
+    return rule
+
+
+def update_category_rule(db: Session, rule_id: int, item_description: str, category: str) -> models.CategoryRule:
+    item_description = item_description.strip()
+    rule = db.query(models.CategoryRule).get(rule_id)
+    if not rule:
+        raise ValueError("Rule not found.")
+    rule.item_description = item_description
+    rule.category = category
+    db.commit()
+    db.refresh(rule)
+    # Use the full JOIN UPDATE so matching logic is identical to the import hook
+    apply_category_rules(db)
+    db.commit()
+    db.refresh(rule)
+    return rule
+
+
+def delete_category_rule(db: Session, rule_id: int):
+    rule = db.query(models.CategoryRule).get(rule_id)
+    if not rule:
+        raise ValueError("Rule not found.")
+    db.delete(rule)
+    db.commit()
+
+
+def bulk_upsert_category_rules(db: Session, rows: list[dict]) -> dict:
+    """
+    Upsert a list of {item_description, category} dicts.
+    Returns counts of created/updated/skipped rows.
+    """
+    valid_categories = {"Service", "Transport", "Survey", "Civil Work", "Material"}
+    created = updated = skipped = 0
+    for row in rows:
+        desc = str(row.get("item_description", "")).strip()
+        cat = str(row.get("category", "")).strip()
+        if not desc or cat not in valid_categories:
+            skipped += 1
+            continue
+        existing = db.query(models.CategoryRule).filter(
+            models.CategoryRule.item_description == desc
+        ).first()
+        if existing:
+            if existing.category != cat:
+                existing.category = cat
+                updated += 1
+        else:
+            db.add(models.CategoryRule(item_description=desc, category=cat))
+            created += 1
+    db.commit()
+    apply_category_rules(db)
+    return {"created": created, "updated": updated, "skipped": skipped}
+
 
 def run_database_category_cleanup(db: Session):
     """
@@ -2599,7 +2704,11 @@ def get_remaining_to_accept_dataframe(
         models.MergedPO.remarks,
         models.MergedPO.status_report_isdp,
         models.MergedPO.date_close_report_isdp,
-        models.MergedPO.remark_qc_reason
+        models.MergedPO.remark_qc_reason,
+        models.MergedPO.internal_control,
+        models.MergedPO.date_ac_ok,
+        models.MergedPO.category,
+        models.MergedPO.requested_qty
     ).select_from(models.MergedPO).outerjoin(
         models.InternalProject, models.MergedPO.internal_project_id == models.InternalProject.id
     ).outerjoin(
@@ -2661,9 +2770,28 @@ def get_remaining_to_accept_dataframe(
         'remarks': 'Remarks',
         'status_report_isdp': 'Status Report ISDP',
         'date_close_report_isdp': 'Date Close Report ISDP',
-        'remark_qc_reason': 'Remark QC Reason'
+        'remark_qc_reason': 'Remark QC Reason',
+        'internal_control': 'Internal Check',
+        'date_ac_ok': 'Date AC OK',
+        'category': 'Category',
+        'requested_qty': 'Req Qty'
     }, inplace=True)
     # ------------------------------------
+
+    # Re-order: insert new columns between Stage and Publish Date
+    desired_order = [
+        'PO ID', 'PO Number', 'PO Line', 'PM', 'Internal Project',
+        'Customer Project', 'Site Code', 'Item Description',
+        'Total PO Value', 'Accepted AC', 'Accepted PAC',
+        'Remaining to Accept', 'Stage',
+        'Internal Check', 'Date AC OK', 'Category', 'Req Qty',
+        'Publish Date',
+        'Status Installation', 'Date Installation', 'Need Document',
+        'Date Document OK', 'Remark Last Remark', 'Readiness Acceptance',
+        'Rejection Remark', 'Remarks',
+        'Status Report ISDP', 'Date Close Report ISDP', 'Remark QC Reason',
+    ]
+    df = df[[c for c in desired_order if c in df.columns]]
 
     if strip_prices:
         price_cols = ['Total PO Value', 'Accepted AC', 'Accepted PAC', 'Remaining to Accept']
@@ -3267,7 +3395,9 @@ def submit_bc(db: Session, bc_id: int, user_id: int, background_tasks: Backgroun
             details=details,
             link=f"/configuration/bc/detail/{bc.id}"
         )
-    
+        target_phones = [u.phone_number for u in targets if u.phone_number]
+        send_whatsapp_notification(target_phones, "BC", "SUBMITTED - PENDING L1", details, background_tasks, f"/configuration/bc/detail/{bc.id}")
+
     return bc
 
 
@@ -3340,6 +3470,8 @@ def approve_bc_l1(db: Session, bc_id: int, approver_id: int, comment: str, backg
             details=details,
             link=f"/configuration/bc/detail/{bc.id}"
         )
+        target_phones = [u.phone_number for u in targets if u.phone_number]
+        send_whatsapp_notification(target_phones, "BC", "L1 APPROVED - PENDING L2", details, background_tasks, f"/configuration/bc/detail/{bc.id}")
 
     return bc
 
@@ -3413,6 +3545,8 @@ def approve_bc_l2(db: Session, bc_id: int, approver_id: int, comment: str, backg
             details=details,
             link=f"/configuration/bc/detail/{bc.id}"
         )
+        creator_phone = [bc.creator.phone_number] if bc.creator and bc.creator.phone_number else []
+        send_whatsapp_notification(creator_phone, "BC", "FULLY APPROVED", details, background_tasks, f"/configuration/bc/detail/{bc.id}")
 
     # --- 3. NOTIFICATIONS (ACT Validators) ---
     pm_targets = get_action_notification_targets(db, bc.project_id, models.ProjectActionType.ACT_APPROVE_PM) 
@@ -3447,6 +3581,8 @@ def approve_bc_l2(db: Session, bc_id: int, approver_id: int, comment: str, backg
             details=details,
             link=f"/configuration/acceptance/workflow/{bc.id}"
         )
+        validator_phones = [u.phone_number for u in combined_targets if u.phone_number]
+        send_whatsapp_notification(validator_phones, "ACCEPTANCE", "READY FOR VALIDATION", details, background_tasks, f"/configuration/acceptance/workflow/{bc.id}")
 
     return bc
 def get_bcs_by_status(db: Session, status: models.BCStatus, search_term: Optional[str] = None):
@@ -4175,11 +4311,13 @@ def search_merged_pos_by_site_codes(
     return query.all()
 
 def search_pos_by_batch(db: Session, identifiers: List[str]):
-    """Finds POs that match EITHER the PO ID or the Site Code."""
-    clean_ids =[s.strip() for s in identifiers if s.strip()]
-    if not clean_ids: 
-        return[]
-    
+    """Finds POs that match EITHER the PO ID or the Site Code, excluding any already in a BC."""
+    clean_ids = [s.strip() for s in identifiers if s.strip()]
+    if not clean_ids:
+        return []
+
+    bc_linked_ids = db.query(models.BCItem.merged_po_id).subquery()
+
     return db.query(models.MergedPO).options(
         joinedload(models.MergedPO.internal_project),
         joinedload(models.MergedPO.customer_project)
@@ -4187,7 +4325,8 @@ def search_pos_by_batch(db: Session, identifiers: List[str]):
         sa.or_(
             models.MergedPO.po_id.in_(clean_ids),
             models.MergedPO.site_code.in_(clean_ids)
-        )
+        ),
+        ~models.MergedPO.id.in_(bc_linked_ids)
     ).limit(1000).all()
 
 
@@ -5338,7 +5477,7 @@ def create_pm_fund_request(db: Session, pm_id: int, payload: schemas.FundRequest
         }
 
         send_notification_email_detailled(
-            background_tasks=background_tasks, 
+            background_tasks=background_tasks,
             recipients=admin_emails,
             subject=f"Action Required: New PM Fund Request {db_req.request_number}",
             module="CAISSE",
@@ -5346,7 +5485,9 @@ def create_pm_fund_request(db: Session, pm_id: int, payload: schemas.FundRequest
             details=details,
             link="/caisse"
         )
-    
+        pd_phones = [u.phone_number for u in pds if u.phone_number]
+        send_whatsapp_notification(pd_phones, "CAISSE", "PENDING VALIDATION", details, background_tasks, "/caisse")
+
     db.commit()
     return db_req
 
@@ -5449,7 +5590,9 @@ def pd_validate_request(db: Session, req_id: int, pd_id: int, payload: schemas.P
                 details=details,
                 link="/caisse"
             )
-        
+            admin_phones = [u.phone_number for u in admins if u.phone_number]
+            send_whatsapp_notification(admin_phones, "CAISSE", "PD VALIDATED - PENDING ADMIN", details, background_tasks, "/caisse")
+
     db.commit()
     return req
 
@@ -7506,6 +7649,18 @@ def update_expense(db: Session, expense_id: int, payload: schemas.ExpenseCreate,
 
     caisse.balance = current_balance - net_amount
     caisse.reserved_balance = current_reserved + net_amount
+
+    # LEDGER: Keep the PENDING DEBIT in sync with the edited amount.
+    # In-place update is safe because PENDING means money not yet disbursed.
+    existing_tx = db.query(models.Transaction).filter(
+        models.Transaction.expense_id == db_expense.id,
+        models.Transaction.type == models.TransactionType.DEBIT,
+        models.Transaction.status == models.TransactionStatus.PENDING
+    ).first()
+    if existing_tx:
+        existing_tx.amount = net_amount
+        existing_tx.description = f"Expense #{db_expense.id} (edited): {payload.exp_type} - {beneficiary_name}"
+
     # --- 6. DATA SYNC ---
     # Unlink old ACTs
     db.query(models.ServiceAcceptance).filter(models.ServiceAcceptance.expense_id == db_expense.id).update({"expense_id": None})
