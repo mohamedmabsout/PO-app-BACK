@@ -1,6 +1,7 @@
 import pandas as pd
 import io
 import logging
+from contextlib import asynccontextmanager
 from typing import List
 
 from fastapi import FastAPI, Depends, UploadFile, File, HTTPException
@@ -14,9 +15,31 @@ from . import crud, models, schemas
 import os
 from fastapi.staticfiles import StaticFiles
 from app.routers import expenses, facturation
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 models.Base.metadata.create_all(bind=engine, checkfirst=True)
 
-app=FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Recover any imports that were left stuck due to a server restart
+    db = SessionLocal()
+    try:
+        stuck = db.query(models.UploadHistory).filter(
+            models.UploadHistory.status.in_(["PROCESSING", "WAITING"])
+        ).all()
+        if stuck:
+            for record in stuck:
+                record.status = "FAILED"
+                record.error_message = "Import interrupted by server restart."
+            db.commit()
+            logger.info(f"Startup recovery: marked {len(stuck)} stuck import(s) as FAILED.")
+    finally:
+        db.close()
+    yield
+
+app = FastAPI(lifespan=lifespan)
 
 origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
 app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True, allow_methods=["*"], allow_headers=["*"],expose_headers=["Content-Disposition"])
@@ -38,10 +61,6 @@ app.include_router(importation.router)  # <-- NEW: Include CRUD router for testi
 app.include_router(internal_projects.router)  # <-- NEW: Include CRUD router for testing purposes
 app.include_router(pnl.router)  # <-- NEW: Include CRUD router for testing purposes
 app.include_router(category_rules.router)
-logging.basicConfig(level=logging.INFO)
-
-logger = logging.getLogger(__name__)
-
 os.makedirs("uploads/sbc_docs", exist_ok=True)
 
 app.mount("/static", StaticFiles(directory="uploads"), name="static")

@@ -75,3 +75,20 @@ async def unified_import(
         "po_history_id": po_info["history_id"] if po_info else None,
         "ac_history_id": ac_info["history_id"] if ac_info else None
     }
+
+
+@router.patch("/history/{history_id}/cancel")
+def cancel_stuck_import(
+    history_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user),
+):
+    record = db.query(models.UploadHistory).get(history_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Import record not found.")
+    if record.status not in ("PROCESSING", "WAITING"):
+        raise HTTPException(status_code=400, detail=f"Record is already in '{record.status}' state.")
+    record.status = "FAILED"
+    record.error_message = "Manually cancelled by user."
+    db.commit()
+    return {"message": "Import marked as failed.", "id": history_id}

@@ -3,9 +3,8 @@ simo/.,
 7rhctg2t9K9sB5a3
 cd /var/www/po-app-backend
 git pull origin main
-docker compose up --build -d
 docker compose down && docker compose up -d --build
-docker compose ps
+docker compose exec backend alembic upgrade head
 
 docker compose logs -f --tail=100 backend
 
